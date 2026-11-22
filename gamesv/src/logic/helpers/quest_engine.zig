@@ -3090,7 +3090,22 @@ fn shouldAutoCompleteChildQuest(ctx: QuestContext, quest_id: i32, node: LazyNode
         std.mem.eql(u8, ctype, "Communicate") or
         std.mem.eql(u8, ctype, "CheckPlayerInput") or
         std.mem.eql(u8, ctype, "FinishArcadeGameplay") or
-        std.mem.eql(u8, ctype, "SpringManorGameplayClose"))
+        std.mem.eql(u8, ctype, "SpringManorGameplayClose") or
+        std.mem.eql(u8, ctype, "CompareActorVar") or
+        std.mem.eql(u8, ctype, "CrossSceneSyncKillMonster") or
+        std.mem.eql(u8, ctype, "FinishFlipper") or
+        std.mem.eql(u8, ctype, "FinishKuroSimpleCombatKillMonster") or
+        std.mem.eql(u8, ctype, "FinishKurotato") or
+        std.mem.eql(u8, ctype, "FinishRoleTower") or
+        std.mem.eql(u8, ctype, "FinishRollBlock") or
+        std.mem.eql(u8, ctype, "FinishSurvivorsRouge") or
+        std.mem.eql(u8, ctype, "FinishTetris") or
+        std.mem.eql(u8, ctype, "FinishTrapDefense") or
+        std.mem.eql(u8, ctype, "NewHandInItems") or
+        std.mem.eql(u8, ctype, "ParallaxAlign") or
+        std.mem.eql(u8, ctype, "PlaybackShowTimeline") or
+        std.mem.eql(u8, ctype, "TakePicturesWithTimeScale") or
+        std.mem.eql(u8, ctype, "WalkingPattern"))
     {
         return false;
     }

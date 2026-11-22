@@ -1,5 +1,6 @@
 const RewardIndex = @This();
 const std = @import("std");
+const AssetsDb = @import("AssetsDb.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -20,20 +21,32 @@ pub const RowEntry = struct {
     pay_items: []const ItemPair = &.{},
 };
 
+const max_cached_tables: usize = 48;
+
+const TableSlot = struct {
+    arena: ArenaAllocator,
+    rows: []const RowEntry,
+};
+
 const IndexState = struct {
     mutex: Io.Mutex = .init,
-    arena: ArenaAllocator,
-    tables: std.StringHashMapUnmanaged([]const RowEntry) = .empty,
+    db: ?*AssetsDb = null,
+    slots: std.StringHashMapUnmanaged(TableSlot) = .empty,
+    order: std.ArrayListUnmanaged([]const u8) = .empty,
 };
 
 gpa: Allocator,
 state: *IndexState,
 
 pub fn init(gpa: Allocator) !RewardIndex {
+    return initWithDb(gpa, null);
+}
+
+pub fn initWithDb(gpa: Allocator, db: ?*AssetsDb) !RewardIndex {
     const state = try gpa.create(IndexState);
     errdefer gpa.destroy(state);
     state.* = .{
-        .arena = ArenaAllocator.init(gpa),
+        .db = db,
     };
     return .{
         .gpa = gpa,
@@ -42,7 +55,13 @@ pub fn init(gpa: Allocator) !RewardIndex {
 }
 
 pub fn deinit(self: *RewardIndex) void {
-    self.state.arena.deinit();
+    var it = self.state.slots.iterator();
+    while (it.next()) |kv| {
+        kv.value_ptr.arena.deinit();
+        self.gpa.free(kv.key_ptr.*);
+    }
+    self.state.slots.deinit(self.gpa);
+    self.state.order.deinit(self.gpa);
     self.gpa.destroy(self.state);
 }
 
@@ -54,7 +73,7 @@ pub fn getRows(self: *const RewardIndex, io: Io, table_name: []const u8) []const
     self.state.mutex.lockUncancelable(io);
     defer self.state.mutex.unlock(io);
 
-    if (self.state.tables.get(table_name)) |rows| return rows;
+    if (self.state.slots.get(table_name)) |slot| return slot.rows;
     return self.loadTableLocked(io, table_name) catch &.{};
 }
 
@@ -94,6 +113,11 @@ const table_aliases = std.StaticStringMap([]const u8).initComptime(.{
     .{ "HonamiStoryTask", "HonamiStoryLimitTask" },
     .{ "JokerGuessLevel", "GuessJokerLevel" },
     .{ "KurotatoTask", "KurotatoLimitAward" },
+    .{ "ExploreActivity", "ExploreActivityTask" },
+    .{ "TeamParkour", "TeamParKOurReward" },
+    .{ "WeeklyFramework", "WeeklyFrameAward" },
+    .{ "SpringSignReward", "SpringReward" },
+    .{ "MotorFightMainLevel", "MotorFightLevel" },
     .{ "LinkageCheckIn", "LinkageReward" },
     .{ "LongShanReward", "LongShanScoreReward" },
     .{ "MapTravelLevel", "MapTravelConfig" },
@@ -139,45 +163,67 @@ pub fn resolveTableName(table_name: []const u8) []const u8 {
 
 fn loadTableLocked(self: *const RewardIndex, io: Io, table_name: []const u8) ![]const RowEntry {
     const resolved_name = resolveTableName(table_name);
-    var path_buf: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "assets/BinData/{s}.json", .{resolved_name});
 
     var scratch = ArenaAllocator.init(self.gpa);
     defer scratch.deinit();
     const salloc = scratch.allocator();
 
-    const json_bytes = Io.Dir.cwd().readFileAlloc(io, path, salloc, .limited(8 * 1024 * 1024)) catch {
-        const stored_name = try self.state.arena.allocator().dupe(u8, table_name);
-        try self.state.tables.put(self.state.arena.allocator(), stored_name, &.{});
-        return &.{};
-    };
-
-    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, salloc, json_bytes, .{});
-    const aalloc = self.state.arena.allocator();
-
-    var list: std.ArrayList(RowEntry) = .empty;
-    switch (parsed) {
-        .array => |arr| {
-            for (arr.items) |elem| {
-                if (elem != .object) continue;
-                try appendParsedRow(&list, aalloc, elem.object);
-            }
-        },
-        .object => |obj| {
-            var it = obj.iterator();
-            while (it.next()) |kv| {
-                if (kv.value_ptr.* == .object) {
-                    try appendParsedRow(&list, aalloc, kv.value_ptr.object);
-                }
-            }
-        },
-        else => {},
+    var json_bytes_opt: ?[]u8 = null;
+    if (self.state.db) |db| {
+        json_bytes_opt = db.readRawFileAlloc(salloc, resolved_name) catch null;
+    }
+    if (json_bytes_opt == null) {
+        var path_buf: [256]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "assets/BinData/{s}.json", .{resolved_name});
+        json_bytes_opt = Io.Dir.cwd().readFileAlloc(io, path, salloc, .limited(8 * 1024 * 1024)) catch null;
     }
 
-    const slice = try list.toOwnedSlice(aalloc);
-    const stored_name = try aalloc.dupe(u8, table_name);
-    try self.state.tables.put(aalloc, stored_name, slice);
-    return slice;
+    if (self.state.order.items.len >= max_cached_tables) {
+        const oldest_key = self.state.order.orderedRemove(0);
+        if (self.state.slots.fetchRemove(oldest_key)) |kv| {
+            var old_slot = kv.value;
+            old_slot.arena.deinit();
+            self.gpa.free(kv.key);
+        }
+    }
+
+    var slot: TableSlot = .{
+        .arena = ArenaAllocator.init(self.gpa),
+        .rows = &.{},
+    };
+    errdefer slot.arena.deinit();
+
+    if (json_bytes_opt) |json_bytes| {
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, salloc, json_bytes, .{});
+        const aalloc = slot.arena.allocator();
+
+        var list: std.ArrayList(RowEntry) = .empty;
+        switch (parsed) {
+            .array => |arr| {
+                for (arr.items) |elem| {
+                    if (elem != .object) continue;
+                    try appendParsedRow(&list, aalloc, elem.object);
+                }
+            },
+            .object => |obj| {
+                var it = obj.iterator();
+                while (it.next()) |kv| {
+                    if (kv.value_ptr.* == .object) {
+                        try appendParsedRow(&list, aalloc, kv.value_ptr.object);
+                    }
+                }
+            },
+            else => {},
+        }
+        slot.rows = try list.toOwnedSlice(aalloc);
+    }
+
+    const key_copy = try self.gpa.dupe(u8, table_name);
+    errdefer self.gpa.free(key_copy);
+    try self.state.slots.put(self.gpa, key_copy, slot);
+    errdefer _ = self.state.slots.remove(key_copy);
+    try self.state.order.append(self.gpa, key_copy);
+    return slot.rows;
 }
 
 fn asInt(val: std.json.Value) ?i32 {
@@ -206,6 +252,12 @@ fn parseItemPairs(val: std.json.Value, aalloc: Allocator) ![]const ItemPair {
     var items: std.ArrayList(ItemPair) = .empty;
     switch (val) {
         .object => |map| {
+            const pair_id = firstInt(map, &.{ "ItemId", "Id", "Item1", "itemId", "id" });
+            const pair_cnt = firstInt(map, &.{ "Count", "Num", "Amount", "Item2", "count" });
+            if (pair_id > 0 and pair_cnt > 0) {
+                try items.append(aalloc, .{ .item_id = pair_id, .count = pair_cnt });
+                return try items.toOwnedSlice(aalloc);
+            }
             var it = map.iterator();
             while (it.next()) |kv| {
                 const item_id = std.fmt.parseInt(i32, kv.key_ptr.*, 10) catch continue;
@@ -218,8 +270,8 @@ fn parseItemPairs(val: std.json.Value, aalloc: Allocator) ![]const ItemPair {
         .array => |arr| {
             for (arr.items) |elem| {
                 if (elem != .object) continue;
-                const item_id = firstInt(elem.object, &.{ "ItemId", "Id", "itemId", "id" });
-                const count = firstInt(elem.object, &.{ "Count", "Num", "Amount", "count" });
+                const item_id = firstInt(elem.object, &.{ "ItemId", "Id", "Item1", "itemId", "id" });
+                const count = firstInt(elem.object, &.{ "Count", "Num", "Amount", "Item2", "count" });
                 if (item_id > 0 and count > 0) {
                     try items.append(aalloc, .{ .item_id = item_id, .count = count });
                 }
@@ -261,13 +313,13 @@ fn appendParsedRow(list: *std.ArrayList(RowEntry), aalloc: Allocator, obj: std.j
             }
         }
         const primary = firstInt(obj, &.{
-            "Id", "TaskId", "RewardId", "BoardId", "RecallId", "Level", "ActivityId", "GoodsId", "BuffId", "RoleId", "MailId", "Score",
+            "Id", "TaskId", "RewardId", "InstId", "LevelId", "IdKey", "BoardId", "RecallId", "Level", "ActivityId", "GoodsId", "BuffId", "RoleId", "MailId", "Score",
         });
         break :blk primary;
     };
 
     const drop_id = firstInt(obj, &.{
-        "DropId", "DropIds", "Drop", "RewardId", "RewardIds", "FirstClearDropId", "FirstPassDropId", "PassDropId", "NormalDropId", "UnlockDropId", "FreeDropId", "PreviewDrop", "DropGroup", "DropReward", "RewardDropId", "RewardDrop", "EntrustReward", "PassReward", "SignReward", "DailyClearDropId", "FirstWinReward", "RewardGroup", "EndReward", "Award", "FirstAward", "ScoreReward", "PhantomReward", "FinalRewardId", "Reward", "TaskReward", "TargetReward",
+        "DropId", "DropIds", "Drop", "RewardId", "RewardIds", "FirstClearDropId", "FirstPassDropId", "PassDropId", "NormalDropId", "UnlockDropId", "FreeDropId", "PreviewDrop", "DropGroup", "DropReward", "RewardDropId", "RewardDrop", "EntrustReward", "PassReward", "SignReward", "DailyClearDropId", "FirstWinReward", "RewardGroup", "EndReward", "Award", "FirstAward", "ScoreReward", "PhantomReward", "FinalRewardId", "Reward", "TaskReward", "TargetReward", "FirstDropId", "ShowReward", "ExchangeRewardId",
     });
     const alt_drop_id = firstInt(obj, &.{
         "GrandRewardId", "PayDropId", "ExtraDrop", "PermanentPreviewDrop", "PayDrop", "HighDropId", "MaxLevelDropId", "KeepDropId", "LevelPassReward", "DataDockReward", "PhantomSideQuestReward",
@@ -313,8 +365,6 @@ fn appendParsedRow(list: *std.ArrayList(RowEntry), aalloc: Allocator, obj: std.j
 
 test "RewardIndex parses key, compositeKey, drops and item maps" {
     const gpa = std.testing.allocator;
-    var idx = try RewardIndex.init(gpa);
-    defer idx.deinit();
 
     var scratch = ArenaAllocator.init(gpa);
     defer scratch.deinit();
@@ -325,7 +375,7 @@ test "RewardIndex parses key, compositeKey, drops and item maps" {
     ;
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, salloc, sample, .{});
     var list: std.ArrayList(RowEntry) = .empty;
-    try appendParsedRow(&list, idx.state.arena.allocator(), parsed.array.items[0].object);
+    try appendParsedRow(&list, salloc, parsed.array.items[0].object);
     try std.testing.expectEqual(@as(usize, 1), list.items.len);
     try std.testing.expectEqual(compositeKey(2, 5), list.items[0].key);
     try std.testing.expectEqual(@as(i32, 4101), list.items[0].drop_id);
@@ -355,7 +405,33 @@ test "RewardIndex resolveTableName and real 3.8.11 BinData loads" {
         "HonamiStoryScoreReward",
         "DailyAdventurePoint",
         "PhantomBattleBadgeReward",
+        "ExploreActivity",
+        "WeeklyFrameAward",
+        "TeamParKOurReward",
+        "SpringReward",
+        "MotorFightLevel",
+        "MotorParkourReward",
     }) |tbl| {
         try std.testing.expect(idx.getRows(io, tbl).len > 0);
     }
+
+    // Verify newly fixed schemas resolve non-empty drops/items/keys
+    const silent = idx.getRow(io, "SilentAreaDetection", 30000000);
+    try std.testing.expect(silent != null);
+    try std.testing.expect(silent.?.drop_id > 0);
+
+    const bf = idx.getRow(io, "RogueWeeklyBF", 1);
+    try std.testing.expect(bf != null and bf.?.drop_id > 0);
+
+    const rr_ins = idx.getRow(io, "RoverRogueIns", 9860);
+    try std.testing.expect(rr_ins != null and rr_ins.?.key == 9860);
+
+    const scratch = idx.getRow(io, "ScratchCard", 1);
+    try std.testing.expect(scratch != null and scratch.?.items.len > 0);
+
+    const turn = idx.getRow(io, "TurntableAwards", 1);
+    try std.testing.expect(turn != null and turn.?.items.len > 0);
+
+    const sign = idx.getRow(io, "ActivitySign", 100100001);
+    try std.testing.expect(sign != null and sign.?.items.len == 7);
 }

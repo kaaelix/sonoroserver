@@ -70,10 +70,19 @@ fn buildMonsterPassiveGaSkill(
 
     var comp: Entity.PassiveGaSkillComponent = .{};
     errdefer comp.deinit(gpa);
-    for (assets.tables.entity_skill_preload.items) |entry| {
-        if (entry.ActorBlueprint.len == 0) continue;
-        if (!std.mem.eql(u8, entry.ActorBlueprint, model.ActorClassPath)) continue;
-        _ = try comp.addSkill(gpa, entry.SkillId);
+    if (assets.getDb()) |db| {
+        var scratch = std.heap.ArenaAllocator.init(gpa);
+        defer scratch.deinit();
+        const skill_ids = try db.querySkillIdsByBlueprint(model.ActorClassPath, scratch.allocator());
+        for (skill_ids) |sid| {
+            _ = try comp.addSkill(gpa, sid);
+        }
+    } else {
+        for (assets.tables.entity_skill_preload.items) |entry| {
+            if (entry.ActorBlueprint.len == 0) continue;
+            if (!std.mem.eql(u8, entry.ActorBlueprint, model.ActorClassPath)) continue;
+            _ = try comp.addSkill(gpa, entry.SkillId);
+        }
     }
     if (comp.skill_component_pb.len == 0) return null;
     return comp;
@@ -189,7 +198,7 @@ fn selectSpawnConfig(assets: *const Assets, entity_id: i64, scene_map_id: i32, s
     var best: ?SpawnConfig = null;
 
     for (assets.indexes.levelEntityIndicesById(entity_id)) |idx| {
-        const cfg = assets.tables.level_entity_config.items[idx];
+        const cfg = (assets.getLevelEntityByIdx(idx) orelse continue).*;
         if (source_map_id) |map_id| {
             if (cfg.MapId != map_id) continue;
         }

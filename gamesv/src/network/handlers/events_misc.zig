@@ -11,6 +11,7 @@ const PlayerInventoryComponent = @import("../../logic/component/player/PlayerInv
 const PlayerProgressComponent = @import("../../logic/component/player/PlayerProgressComponent.zig");
 const ConsumeHelper = @import("../../logic/helpers/consume.zig");
 const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
+const LevelPlayHelper = @import("../../logic/helpers/level_play.zig");
 const RewardService = @import("../../logic/helpers/reward.zig");
 const EnergyHelper = @import("../../logic/helpers/energy.zig");
 const pb_kv = @import("pb_kv.zig");
@@ -116,8 +117,10 @@ pub fn onSignActivityRequest(
     txn: *Transaction(pb.SignActivityRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    assets: *const Assets,
     progress_comp: *PlayerProgressComponent,
     reward_ctx: RewardService.RewardContext,
+    io: std.Io,
 ) !void {
     const key = try std.fmt.allocPrint(alloc.arena, "sign_act:{d}:{d}", .{ txn.message.ActivityId, txn.message.Index });
     var item_map: std.ArrayList(pb.MapEntry(i32, i32)) = .empty;
@@ -126,10 +129,24 @@ pub fn onSignActivityRequest(
             .{ .item_id = 3, .count = 40 },
             .{ .item_id = 2, .count = 15000 },
         };
-        var tmp: std.ArrayList(RewardService.RewardItem) = .empty;
-        _ = try RewardService.grantTableReward(reward_ctx, "ActivitySign", txn.message.Index, false, true, 19500, &fallback, &tmp);
-        for (tmp.items) |it| {
-            try item_map.append(alloc.arena, .{ .key = it.item_id, .value = it.count });
+        var granted_from_slot = false;
+        if (assets.reward_index.getRow(io, "ActivitySign", txn.message.ActivityId)) |row| {
+            if (txn.message.Index >= 0 and @as(usize, @intCast(txn.message.Index)) < row.items.len) {
+                const p = row.items[@intCast(txn.message.Index)];
+                if (p.item_id > 0 and p.count > 0) {
+                    const one = [_]RewardService.RewardItem{.{ .item_id = p.item_id, .count = p.count }};
+                    _ = try RewardService.grantItems(reward_ctx, 0, true, &one, 19500);
+                    try item_map.append(alloc.arena, .{ .key = p.item_id, .value = p.count });
+                    granted_from_slot = true;
+                }
+            }
+        }
+        if (!granted_from_slot) {
+            var tmp: std.ArrayList(RewardService.RewardItem) = .empty;
+            _ = try RewardService.grantTableReward(reward_ctx, "ActivitySign", txn.message.Index, false, true, 19500, &fallback, &tmp);
+            for (tmp.items) |it| {
+                try item_map.append(alloc.arena, .{ .key = it.item_id, .value = it.count });
+            }
         }
         try progress_comp.save(fs, alloc.arena);
     }
@@ -143,7 +160,7 @@ pub fn onSignActivityFreeDropRequest(
     progress_comp: *PlayerProgressComponent,
     reward_ctx: RewardService.RewardContext,
 ) !void {
-    _ = try claimOne(alloc, fs, progress_comp, reward_ctx, "sign_free", "ActivitySignGrandReward", txn.message.ActivityId);
+    _ = try claimOne(alloc, fs, progress_comp, reward_ctx, "sign_free", "ActivitySign", txn.message.ActivityId);
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -1773,11 +1790,17 @@ pub fn onTetrisFinishRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     if (txn.message.Score > progress_comp.info.getKeyInt("tetris:best")) {
         try progress_comp.info.setKeyInt(alloc.gpa, "tetris:best", txn.message.Score);
         try progress_comp.save(fs, alloc.arena);
     }
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        const cfg_id = lp_ctx.scene.findConfigIdByNetId(txn.message.EntityId) orelse txn.message.EntityId;
+        try LevelPlayHelper.onConditionEvent(lp_ctx, progress_comp, .finish_tetris, cfg_id, txn.message.Score);
+    }
+    try QuestEngine.onConditionStateChanged(qctx);
     txn.respond(.{ .ErrorCode = .Success });
 }
 

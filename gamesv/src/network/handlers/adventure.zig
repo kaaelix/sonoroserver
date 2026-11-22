@@ -709,10 +709,19 @@ pub fn onWeeklyFrameworkScoreRewardRequest(
         const k = try std.fmt.bufPrint(&kbuf, "weekly_fw:{d}", .{tid});
         if (try progress_comp.info.markClaim(alloc.gpa, k)) {
             dirty = true;
-            _ = try RewardService.grantItems(reward_ctx, 0, true, &.{
-                .{ .item_id = 3, .count = 80 },
-                .{ .item_id = 2, .count = 20000 },
-            }, 19500);
+            _ = try RewardService.grantTableReward(
+                reward_ctx,
+                "WeeklyFrameAward",
+                tid,
+                false,
+                true,
+                19500,
+                &.{
+                    .{ .item_id = 3, .count = 80 },
+                    .{ .item_id = 2, .count = 20000 },
+                },
+                null,
+            );
         }
     }
     if (dirty) try progress_comp.save(fs, alloc.arena);

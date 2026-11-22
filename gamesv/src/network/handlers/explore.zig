@@ -535,15 +535,21 @@ pub fn onExploreEntityTraceRequest(
     try progress_comp.save(fs, alloc.arena);
     var eids: std.ArrayList(i32) = .empty;
     if (txn.message.ExploratoryDegree > 0) {
-        for (assets.tables.level_entity_config.items) |lcfg| {
-            if (txn.message.AreaId != 0 and lcfg.AreaId != txn.message.AreaId) continue;
-            const bi = lcfg.ComponentsData.BaseInfoComponent orelse continue;
-            const cat = bi.Category orelse continue;
-            if ((cat.ExploratoryDegree orelse 0) != txn.message.ExploratoryDegree) continue;
-            if (lcfg.EntityId > 0 and lcfg.EntityId <= std.math.maxInt(i32)) {
-                try eids.append(alloc.arena, @intCast(lcfg.EntityId));
+        if (assets.getDb()) |db| {
+            const found = try db.queryEntityIdsByAreaExplore(txn.message.AreaId, txn.message.ExploratoryDegree, alloc.arena);
+            const cap = @min(found.len, 32);
+            try eids.appendSlice(alloc.arena, found[0..cap]);
+        } else {
+            for (assets.tables.level_entity_config.items) |lcfg| {
+                if (txn.message.AreaId != 0 and lcfg.AreaId != txn.message.AreaId) continue;
+                const bi = lcfg.ComponentsData.BaseInfoComponent orelse continue;
+                const cat = bi.Category orelse continue;
+                if ((cat.ExploratoryDegree orelse 0) != txn.message.ExploratoryDegree) continue;
+                if (lcfg.EntityId > 0 and lcfg.EntityId <= std.math.maxInt(i32)) {
+                    try eids.append(alloc.arena, @intCast(lcfg.EntityId));
+                }
+                if (eids.items.len >= 32) break;
             }
-            if (eids.items.len >= 32) break;
         }
     }
     if (eids.items.len == 0 and txn.message.ExploratoryDegree == 0) {

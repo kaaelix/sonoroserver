@@ -1,6 +1,8 @@
 const Registry = @This();
 const std = @import("std");
 const DataTables = @import("DataTables.zig");
+const AssetsDb = @import("AssetsDb.zig");
+const Io = std.Io;
 
 const Allocator = std.mem.Allocator;
 const AiStateMachineConfig = DataTables.AiStateMachineConfig;
@@ -91,11 +93,35 @@ pub const Graph = struct {
     }
 };
 
+const LazyState = struct {
+    mutex: Io.Mutex = .init,
+    arena: std.heap.ArenaAllocator,
+    graphs: std.StringArrayHashMapUnmanaged(*const Graph) = .empty,
+    missing: std.StringHashMapUnmanaged(void) = .empty,
+    common_config: ?AiStateMachineConfig = null,
+};
+
 arena: std.heap.ArenaAllocator,
 graphs: std.StringArrayHashMapUnmanaged(*const Graph) = .empty,
+db: ?*AssetsDb = null,
+io: ?Io = null,
+lazy_state: ?*LazyState = null,
 
 pub fn init(gpa: Allocator, tables: *const DataTables) !Registry {
     return initFromConfigs(gpa, tables.ai_state_machine_config.items);
+}
+
+pub fn initWithDb(gpa: Allocator, io: Io, db: *AssetsDb) !Registry {
+    const ls = try gpa.create(LazyState);
+    errdefer gpa.destroy(ls);
+    ls.* = .{ .arena = .init(gpa) };
+    ls.common_config = db.getAiStateMachineConfig("SM_Common");
+    return .{
+        .arena = .init(gpa),
+        .db = db,
+        .io = io,
+        .lazy_state = ls,
+    };
 }
 
 fn initFromConfigs(gpa: Allocator, configs: []const AiStateMachineConfig) !Registry {
@@ -121,10 +147,41 @@ fn initFromConfigs(gpa: Allocator, configs: []const AiStateMachineConfig) !Regis
 }
 
 pub fn deinit(registry: *Registry) void {
+    if (registry.lazy_state) |ls| {
+        const gpa = ls.arena.child_allocator;
+        ls.arena.deinit();
+        gpa.destroy(ls);
+    }
     registry.arena.deinit();
 }
 
 pub fn get(registry: *const Registry, id: []const u8) ?*const Graph {
+    if (registry.lazy_state) |ls| {
+        const db = registry.db orelse return null;
+        const io = registry.io orelse return null;
+        ls.mutex.lock(io) catch return null;
+        defer ls.mutex.unlock(io);
+
+        if (ls.graphs.get(id)) |g| return g;
+        if (ls.missing.contains(id)) return null;
+        const common_cfg = ls.common_config orelse return null;
+        const cfg = db.getAiStateMachineConfig(id) orelse {
+            const k = ls.arena.allocator().dupe(u8, id) catch return null;
+            ls.missing.put(ls.arena.allocator(), k, {}) catch {};
+            return null;
+        };
+        const graph_opt = buildGraph(ls.arena.allocator(), cfg.StateMachineJson, common_cfg.StateMachineJson) catch null;
+        const graph = graph_opt orelse {
+            const k = ls.arena.allocator().dupe(u8, id) catch return null;
+            ls.missing.put(ls.arena.allocator(), k, {}) catch {};
+            return null;
+        };
+        const g_ptr = ls.arena.allocator().create(Graph) catch return null;
+        g_ptr.* = graph;
+        const key = ls.arena.allocator().dupe(u8, id) catch return null;
+        ls.graphs.put(ls.arena.allocator(), key, g_ptr) catch return null;
+        return g_ptr;
+    }
     return registry.graphs.get(id);
 }
 

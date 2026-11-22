@@ -7,6 +7,7 @@ const pb = @import("proto").pb;
 const WeaponItem = @import("../fs/WeaponItem.zig");
 pub const Config = @import("zon/config.zon");
 const ConcertoExceptions: []const i32 = @import("zon/concerto_exceptions.zon");
+const AssetsDb = @import("AssetsDb.zig");
 
 pub const RoleInfo = @import("tables/RoleInfo.zig");
 pub const RoleBeHitMap = @import("tables/RoleBeHitMap.zig");
@@ -545,7 +546,30 @@ motor_linkage_quest: Table(MotorLinkageQuest, "TaskId"),
     return try arena.allocator().dupe(Item, all_items.items);
 }
 
+fn isLazySqliteField(comptime name: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(50000);
+    if (std.mem.eql(u8, name, "level_entity_config")) return "getLevelEntityByIdx";
+    if (std.mem.eql(u8, name, "buff")) return "getBuff";
+    if (std.mem.eql(u8, name, "template_config")) return "getTemplateById";
+    if (std.mem.eql(u8, name, "damage")) return "getDamage";
+    if (std.mem.eql(u8, name, "base_property")) return "getBaseProperty";
+    if (std.mem.eql(u8, name, "trail_phantom_prop")) return "getTrailPhantomProp";
+    if (std.mem.eql(u8, name, "model_config_preload")) return "getModelConfigPreload";
+    if (std.mem.eql(u8, name, "condition")) return "getCondition";
+    if (std.mem.eql(u8, name, "condition_group")) return "getConditionGroup";
+    if (std.mem.eql(u8, name, "passive_skill")) return "getPassiveSkill";
+    if (std.mem.eql(u8, name, "drop_package")) return "getDropPackage";
+    if (std.mem.eql(u8, name, "drop_group")) return "getDropGroup";
+    if (std.mem.eql(u8, name, "flow")) return "getFlow";
+    if (std.mem.eql(u8, name, "ai_state_machine_config")) return "getAiStateMachineConfig";
+    return null;
+}
+
 pub fn load(gpa: Allocator, io: Io) !DataTables {
+    return loadWithDb(gpa, io, null);
+}
+
+pub fn loadWithDb(gpa: Allocator, io: Io, db_opt: ?*AssetsDb) !DataTables {
     var tables: DataTables = undefined;
 
     tables.arena = ArenaAllocator.init(gpa);
@@ -555,23 +579,59 @@ pub fn load(gpa: Allocator, io: Io) !DataTables {
         if (field.type == ArenaAllocator) continue;
 
         var table: field.type = .init;
-        const base_path = "assets/BinData/" ++ field.type.json;
+        const ItemsSlice = @FieldType(field.type, "items");
+        const RowType = std.meta.Child(ItemsSlice);
+        const KeyType = @FieldType(RowType, field.type.key);
 
-        const items = try loadTableItems(
-            @FieldType(field.type, "items"),
-            gpa,
-            &tables.arena,
-            io,
-            base_path,
-        );
-        table.items = items;
-
-        for (table.items, 0..) |item, index| {
-            const key = @field(item, field.type.key);
-            try table.index.put(tables.arena.allocator(), key, index);
+        var skip_load = false;
+        if (comptime std.mem.eql(u8, field.name, "entity_skill_preload")) {
+            if (db_opt) |db| {
+                // Queries go directly through AssetsDb indexes (saves 22 MB JSON).
+                table.lazy_ctx = db;
+                @field(tables, field.name) = table;
+                skip_load = true;
+            }
+        } else if (comptime isLazySqliteField(field.name)) |method| {
+            if (db_opt) |db| {
+                table.lazy_ctx = db;
+                if (!comptime std.mem.eql(u8, field.name, "level_entity_config")) {
+                    table.lazy_get = AssetsDb.makeTableLookup(RowType, KeyType, method);
+                }
+                @field(tables, field.name) = table;
+                skip_load = true;
+            }
         }
+        if (!skip_load) {
+            var loaded_items: ?ItemsSlice = null;
+            if (db_opt) |db| {
+                const json_name = field.type.json;
+                const stem = json_name[0 .. json_name.len - ".json".len];
+                if (try db.readRawFileAlloc(gpa, stem)) |raw_content| {
+                    defer gpa.free(raw_content);
+                    loaded_items = try std.json.parseFromSliceLeaky(
+                        ItemsSlice,
+                        tables.arena.allocator(),
+                        raw_content,
+                        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+                    );
+                }
+            }
 
-        @field(tables, field.name) = table;
+            table.items = loaded_items orelse try loadTableItems(
+                ItemsSlice,
+                gpa,
+                &tables.arena,
+                io,
+                "assets/BinData/" ++ field.type.json,
+            );
+
+            for (table.items, 0..) |item, index| {
+                const key = @field(item, field.type.key);
+                try table.index.put(tables.arena.allocator(), key, index);
+            }
+
+            @field(tables, field.name) = table;
+        }
     }
 
     return tables;
@@ -599,9 +659,13 @@ pub fn Table(comptime T: type, comptime key_field: [:0]const u8) type {
 
         items: []const T,
         index: IndexMap,
+        lazy_ctx: ?*anyopaque = null,
+        lazy_get: ?*const fn (*anyopaque, KeyType) ?T = null,
 
         pub fn getDataById(table: @This(), id: KeyType) ?T {
-            return if (table.index.get(id)) |i| table.items[i] else null;
+            if (table.index.get(id)) |i| return table.items[i];
+            if (table.lazy_get) |getter| return getter(table.lazy_ctx.?, id);
+            return null;
         }
     };
 }
@@ -649,6 +713,11 @@ pub fn getMotorcycleConfigId(tables: *const DataTables) ?i32 {
         };
         if (blueprint.EntityLogic != .Vehicle) continue;
 
+        if (tables.template_config.lazy_ctx) |ptr| {
+            const db: *AssetsDb = @ptrCast(@alignCast(ptr));
+            if (db.findTemplateByBlueprint(summon.BlueprintType)) |tpl| return tpl.Id;
+            continue;
+        }
         for (tables.template_config.items) |template| {
             if (std.mem.eql(u8, template.BlueprintType, summon.BlueprintType)) return template.Id;
         }
@@ -792,7 +861,14 @@ pub fn getRoleAutoBuffs(
     }
 
     if (do_autobuff) {
-        for (tables.buff.items) |*buff| {
+        var temp_arena = ArenaAllocator.init(gpa);
+        defer temp_arena.deinit();
+        const candidates: []const Buff = if (tables.buff.lazy_ctx) |ptr| blk: {
+            const db: *AssetsDb = @ptrCast(@alignCast(ptr));
+            break :blk try db.getAutoBuffCandidates(resolved_role_id, temp_arena.allocator());
+        } else tables.buff.items;
+
+        for (candidates) |*buff| {
             var id_buf: [20]u8 = undefined;
             var role_buf: [20]u8 = undefined;
             const id_str = std.fmt.bufPrint(&id_buf, "{d}", .{buff.Id}) catch continue;

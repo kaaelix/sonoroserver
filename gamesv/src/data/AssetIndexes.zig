@@ -2,6 +2,7 @@ const AssetIndexes = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const DataTables = @import("DataTables.zig");
+const AssetsDb = @import("AssetsDb.zig");
 
 pub const MapEntityKey = struct {
     map_id: i32,
@@ -122,6 +123,86 @@ pub fn init(gpa: Allocator, tables: *const DataTables) !AssetIndexes {
     });
 }
 
+pub fn initWithDb(gpa: Allocator, db: *AssetsDb, tables: *const DataTables) !AssetIndexes {
+    var result: AssetIndexes = .{};
+    errdefer result.deinit(gpa);
+
+    try buildStringIndex(DataTables.BlueprintConfig, gpa, tables.blueprint_config.items, &result.blueprint_by_type);
+    try buildLevelEntityIndexesFromDb(gpa, db, &result);
+    try buildTeleporterIndex(gpa, tables.teleporter.items, &result);
+    try buildLevelPlayIndexes(gpa, tables.level_play_data.items, &result);
+
+    return result;
+}
+
+fn buildLevelEntityIndexesFromDb(gpa: Allocator, db: *AssetsDb, out: *AssetIndexes) !void {
+    try db.mutex.lock(db.io);
+    defer db.mutex.unlock(db.io);
+
+    var stmt = try db.db.prepare("SELECT idx, entity_id, map_id, cell_x, cell_y, spawnable FROM level_entities ORDER BY idx");
+    defer stmt.deinit();
+
+    const Row = struct {
+        idx: u32,
+        entity_id: i64,
+        map_id: i32,
+        cell_x: i32,
+        cell_y: i32,
+        spawnable: bool,
+    };
+    var rows: std.ArrayList(Row) = .empty;
+    defer rows.deinit(gpa);
+    try rows.ensureTotalCapacity(gpa, 220_000);
+
+    while (try stmt.step()) {
+        try rows.append(gpa, .{
+            .idx = @intCast(stmt.colInt(0)),
+            .entity_id = stmt.colInt(1),
+            .map_id = @intCast(stmt.colInt(2)),
+            .cell_x = @intCast(stmt.colInt(3)),
+            .cell_y = @intCast(stmt.colInt(4)),
+            .spawnable = stmt.colInt(5) != 0,
+        });
+    }
+
+    const cap = std.math.cast(u32, rows.items.len) orelse return error.IndexOverflow;
+    if (cap == 0) return;
+    try out.entity_by_map_pair.ensureTotalCapacity(gpa, cap);
+
+    var id_builder: SpanTable(i64).Builder = .{};
+    defer id_builder.deinit(gpa);
+    var cell_builder: SpanTable(SpatialCellKey).Builder = .{};
+    defer cell_builder.deinit(gpa);
+    var map_builder: SpanTable(i32).Builder = .{};
+    defer map_builder.deinit(gpa);
+
+    for (rows.items) |r| {
+        const pair_gop = out.entity_by_map_pair.getOrPutAssumeCapacity(.{
+            .map_id = r.map_id,
+            .entity_id = r.entity_id,
+        });
+        if (!pair_gop.found_existing) pair_gop.value_ptr.* = r.idx;
+
+        try id_builder.countKey(gpa, r.entity_id);
+        if (r.spawnable) {
+            try cell_builder.countKey(gpa, .{ .map_id = r.map_id, .cell_x = r.cell_x, .cell_y = r.cell_y });
+            try map_builder.countKey(gpa, r.map_id);
+        }
+    }
+
+    out.entity_by_id = try id_builder.allocateResult(gpa);
+    out.spawnables_by_map_cell = try cell_builder.allocateResult(gpa);
+    out.spawnables_by_map = try map_builder.allocateResult(gpa);
+
+    for (rows.items) |r| {
+        out.entity_by_id.appendValue(r.entity_id, r.idx);
+        if (r.spawnable) {
+            out.spawnables_by_map_cell.appendValue(.{ .map_id = r.map_id, .cell_x = r.cell_x, .cell_y = r.cell_y }, r.idx);
+            out.spawnables_by_map.appendValue(r.map_id, r.idx);
+        }
+    }
+}
+
 pub fn initFromSlices(gpa: Allocator, inputs: Inputs) !AssetIndexes {
     var result: AssetIndexes = .{};
     errdefer result.deinit(gpa);
@@ -159,6 +240,10 @@ pub fn findLevelEntity(
         .map_id = map_id,
         .entity_id = entity_id,
     }) orelse return null;
+    if (tables.level_entity_config.lazy_ctx) |ptr| {
+        const db: *AssetsDb = @ptrCast(@alignCast(ptr));
+        return db.getLevelEntityByIdx(idx);
+    }
     return &tables.level_entity_config.items[idx];
 }
 
@@ -201,6 +286,10 @@ pub fn findTemplateConfig(
     tables: *const DataTables,
     blueprint_type: []const u8,
 ) ?*const DataTables.TemplateConfig {
+    if (tables.template_config.lazy_ctx) |ptr| {
+        const db: *AssetsDb = @ptrCast(@alignCast(ptr));
+        return db.findTemplateByBlueprint(blueprint_type);
+    }
     const idx = self.template_by_type.get(blueprint_type) orelse return null;
     return &tables.template_config.items[idx];
 }

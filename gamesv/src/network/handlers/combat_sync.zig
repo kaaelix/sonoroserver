@@ -672,15 +672,6 @@ pub fn onSimpleCombatEntityDieRequest(
     fs: *FileSystem,
     scene_opt: *?Scene,
     qctx: QuestEngine.QuestContext,
-    assets: *const Assets,
-    basic_comp: *PlayerBasicComponent,
-    inventory_comp: *PlayerInventoryComponent,
-    weapon_comp: *PlayerWeaponComponent,
-    echo_comp: *PlayerEchoComponent,
-    map_comp: *PlayerMapComponent,
-    quest_comp: *PlayerQuestComponent,
-    role_comp: *PlayerRoleComponent,
-    io: std.Io,
     progress_comp: *PlayerProgressComponent,
 ) !void {
     for (txn.message.EntityDieCtxMap.items) |entry| {
@@ -691,26 +682,13 @@ pub fn onSimpleCombatEntityDieRequest(
         if (entry.value.TrapDefenseGoldenCoinAbosorbedCtx != null or entry.value.SurvivorsGoldenCoinAbosorbedCtx != null) {
             _ = try progress_comp.info.addKeyInt(alloc.gpa, "simple_combat:coins", 1);
         }
-        if (scene_opt.*) |*scene| {
+        if (scene_opt.* != null) {
             QuestEngine.onEntityKilled(qctx, entry.key, null) catch |err| QuestEngine.logHookErr("onEntityKilled", err);
-            LevelPlayHelper.onEntityKilled(.{
-                .assets = assets,
-                .fs = fs,
-                .conn = txn.conn,
-                .scene = scene,
-                .basic_comp = basic_comp,
-                .inventory_comp = inventory_comp,
-                .weapon_comp = weapon_comp,
-                .echo_comp = echo_comp,
-                .map_comp = map_comp,
-                .quest_comp = quest_comp,
-                .role_comp = role_comp,
-                .events = qctx.events,
-                .io = io,
-                .alloc = alloc,
-            }, entry.key, null) catch |err| {
-                std.log.scoped(.level_play).warn("onEntityKilled failed: {t}", .{err});
-            };
+            if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+                LevelPlayHelper.onEntityKilledWithConditions(lp_ctx, progress_comp, entry.key, null) catch |err| {
+                    std.log.scoped(.level_play).warn("onEntityKilled failed: {t}", .{err});
+                };
+            }
         }
     }
     try progress_comp.save(fs, alloc.arena);

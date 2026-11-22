@@ -487,8 +487,13 @@ pub fn onEntityWalkingPatternFinishRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistIntKey(alloc, fs, pc, "walk_pat:fin", txn.message.EntityId, txn.message.Point);
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        const cfg_id = lp_ctx.scene.findConfigIdByNetId(txn.message.EntityId) orelse txn.message.EntityId;
+        try LevelPlayHelper.onConditionEvent(lp_ctx, pc, .walking_pattern, cfg_id, txn.message.Point);
+    }
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -497,8 +502,14 @@ pub fn onSubmitWalkingPatternPointRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistIntKey(alloc, fs, pc, "walk_pat:pt", txn.message.TreeIncId, txn.message.Point);
+    if (txn.message.NodeId > 0) {
+        if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+            _ = try LevelPlayHelper.onSubmitLevelPlayNode(lp_ctx, pc, txn.message.TreeOwnerId, txn.message.TreeIncId, txn.message.NodeId);
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -2909,7 +2920,7 @@ pub fn onExploreActivityTaskRewardRequest(
     const key = try std.fmt.allocPrint(alloc.arena, "explore_task:{d}", .{txn.message.TaskId});
     if (try progress_comp.info.markClaim(alloc.gpa, key)) {
         const fallback = [_]RewardService.RewardItem{ .{ .item_id = 3, .count = 20 }, .{ .item_id = 2, .count = 10000 } };
-        _ = try RewardService.grantTableReward(reward_ctx, "ExploreActivity", txn.message.TaskId, false, true, 1, &fallback, null);
+        _ = try RewardService.grantTableReward(reward_ctx, "ExploreActivityTask", txn.message.TaskId, false, true, 1, &fallback, null);
         try progress_comp.save(fs, alloc.arena);
     }
     txn.respond(.{ .ErrorCode = .Success });
@@ -3227,7 +3238,21 @@ pub fn onCharacterMoveToPointEndPush(
 }
 pub fn onFollowerChairPresentationPush(_: *Transaction(pb.FollowerChairPresentationPush)) !void {}
 pub fn onHoldWeaponPush(_: *Transaction(pb.HoldWeaponPush)) !void {}
-pub fn onPhotographPush(_: *Transaction(pb.PhotographPush)) !void {}
+pub fn onPhotographPush(
+    _: *Transaction(pb.PhotographPush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        _ = LevelPlayHelper.onSubmitPhotoLevelPlayNode(lp_ctx, pc, 0, 0) catch {};
+    } else {
+        _ = pc.info.addKeyInt(alloc.gpa, "explore:photo_cnt", 1) catch {};
+    }
+    pc.save(fs, alloc.arena) catch {};
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
 pub fn onPlayEntityMontagePush(_: *Transaction(pb.PlayEntityMontagePush)) !void {}
 pub fn onRoadNetworkEntityUpdateCurRoadPush(_: *Transaction(pb.RoadNetworkEntityUpdateCurRoadPush)) !void {}
 pub fn onTestSpawnTemplateEntityPush(_: *Transaction(pb.TestSpawnTemplateEntityPush)) !void {}

@@ -346,7 +346,7 @@ pub fn onTeamParkourRewardRequest(
     const k = try std.fmt.bufPrint(&kbuf, "team_pk:{d}:{d}", .{ txn.message.ActivityId, txn.message.RewardId });
     if (try progress_comp.info.markClaim(alloc.gpa, k)) {
         try progress_comp.save(fs, alloc.arena);
-        _ = try RewardService.grantItems(reward_ctx, 0, true, &.{.{ .item_id = 3, .count = 40 }}, 1);
+        _ = try RewardService.grantTableReward(reward_ctx, "TeamParKOurReward", txn.message.RewardId, false, true, 1, &.{.{ .item_id = 3, .count = 40 }}, null);
     }
     txn.respond(.{ .ErrorCode = .Success });
 }

@@ -6,6 +6,7 @@ const FileSystem = common.FileSystem;
 const PlayerQuestComponent = @import("../../logic/component/player/PlayerQuestComponent.zig");
 const PlayerProgressComponent = @import("../../logic/component/player/PlayerProgressComponent.zig");
 const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
+const LevelPlayHelper = @import("../../logic/helpers/level_play.zig");
 const Transaction = @import("../handlers.zig").Transaction;
 
 pub fn onQuestReviewDataRequest(
@@ -130,6 +131,9 @@ pub fn onSubmitPhotoNodeRequest(
 ) !void {
     const owner_id = std.math.cast(i32, txn.message.TreeOwnerId) orelse 0;
     try QuestEngine.onSubmitPhotoNode(qctx, owner_id, txn.message.NodeId);
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        _ = try LevelPlayHelper.onSubmitPhotoLevelPlayNode(lp_ctx, qctx.progress_comp, owner_id, txn.message.NodeId);
+    }
     txn.respond(.{ .ErrorId = .Success });
 }
 
@@ -143,6 +147,15 @@ pub fn onSubmitNodeRequest(
         txn.message.TreeIncId,
         txn.message.NodeId,
     );
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        _ = try LevelPlayHelper.onSubmitLevelPlayNode(
+            lp_ctx,
+            qctx.progress_comp,
+            txn.message.TreeOwnerId,
+            txn.message.TreeIncId,
+            txn.message.NodeId,
+        );
+    }
     txn.respond(.{
         .TreeOwnerId = txn.message.TreeOwnerId,
         .TreeIncId = txn.message.TreeIncId,

@@ -295,6 +295,20 @@ fn isNpcPassengerBlueprint(assets: *const Assets, blueprint_type: []const u8) bo
 }
 
 fn findMotorcyclePassengerTemplate(assets: *const Assets, role_id: i32) ?*const Assets.DataTables.TemplateConfig {
+    if (assets.getDb()) |db| {
+        var scratch = std.heap.ArenaAllocator.init(assets.tables.arena.child_allocator);
+        defer scratch.deinit();
+        const rows = db.queryPassengerTemplates(scratch.allocator()) catch return null;
+        var matched_bp: ?[]const u8 = null;
+        for (rows) |template| {
+            if (!passengerTemplateMatchesRole(assets, template.BlueprintType, role_id)) continue;
+            if (!isNpcPassengerBlueprint(assets, template.BlueprintType)) continue;
+            matched_bp = template.BlueprintType;
+        }
+        const bp = matched_bp orelse return null;
+        return assets.findTemplateConfig(bp);
+    }
+
     var candidate: ?*const Assets.DataTables.TemplateConfig = null;
     for (assets.tables.template_config.items) |*template| {
         if (!passengerTemplateMatchesRole(assets, template.BlueprintType, role_id)) continue;

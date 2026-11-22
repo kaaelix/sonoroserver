@@ -1351,7 +1351,12 @@ pub fn onMotorParkourLevelRewardRequest(
         const k = try std.fmt.bufPrint(&kbuf, "motor:pk:{d}:{d}", .{ txn.message.MotorParkourId, ridx });
         if (try progress_comp.info.markClaim(alloc.gpa, k)) {
             dirty = true;
-            _ = try RewardService.grantItems(reward_ctx, 0, true, &.{.{ .item_id = 3, .count = 30 }}, 8001);
+            const reward_id: i64 = blk: {
+                const idx = @as(i64, txn.message.MotorParkourId) * 100 + @as(i64, ridx);
+                if (reward_ctx.assets.reward_index.getRow(reward_ctx.io, "MotorParkourReward", idx) != null) break :blk idx;
+                break :blk ridx;
+            };
+            _ = try RewardService.grantTableReward(reward_ctx, "MotorParkourReward", reward_id, false, true, 8001, &.{.{ .item_id = 3, .count = 30 }}, null);
         }
     }
     if (dirty) try progress_comp.save(fs, alloc.arena);
@@ -1568,7 +1573,8 @@ pub fn onMotorFightSettleRequest(
     try progress_comp.save(fs, alloc.arena);
 
     if (is_first_clear) {
-        _ = try RewardService.grantTableReward(reward_ctx, "MotorFightMainLevel", sub_lv, false, true, 1, &.{
+        const main_lv = if (sub_lv >= 100000) @divTrunc(sub_lv, 100) else sub_lv;
+        _ = try RewardService.grantTableReward(reward_ctx, "MotorFightLevel", main_lv, false, true, 1, &.{
             .{ .item_id = 3, .count = 40 },
             .{ .item_id = 2, .count = 10000 },
         }, null);

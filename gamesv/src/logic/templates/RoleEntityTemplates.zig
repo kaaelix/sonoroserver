@@ -66,10 +66,19 @@ fn appendVisionEntityPassiveSkills(
     summon_id: i32,
 ) !void {
     const actor_path = visionSummonActorPath(assets, summon_id) orelse return;
-    for (assets.tables.entity_skill_preload.items) |entry| {
-        if (entry.ActorBlueprint.len == 0) continue;
-        if (!std.mem.eql(u8, entry.ActorBlueprint, actor_path)) continue;
-        try appendPassiveSkill(gpa, skills, entry.SkillId);
+    if (assets.getDb()) |db| {
+        var scratch = std.heap.ArenaAllocator.init(gpa);
+        defer scratch.deinit();
+        const skill_ids = try db.querySkillIdsByBlueprint(actor_path, scratch.allocator());
+        for (skill_ids) |sid| {
+            try appendPassiveSkill(gpa, skills, sid);
+        }
+    } else {
+        for (assets.tables.entity_skill_preload.items) |entry| {
+            if (entry.ActorBlueprint.len == 0) continue;
+            if (!std.mem.eql(u8, entry.ActorBlueprint, actor_path)) continue;
+            try appendPassiveSkill(gpa, skills, entry.SkillId);
+        }
     }
 }
 
@@ -617,11 +626,20 @@ pub fn createRoleEntity(
     var role_str_buf: [16]u8 = undefined;
     const role_str = std.fmt.bufPrint(&role_str_buf, "{d}", .{resolved_role_id}) catch unreachable;
 
-    for (assets.tables.entity_skill_preload.items) |entry| {
-        var skill_str_buf: [10]u8 = undefined;
-        const skill_str = std.fmt.bufPrint(&skill_str_buf, "{d}", .{entry.SkillId}) catch continue;
-        if (!std.mem.startsWith(u8, skill_str, role_str)) continue;
-        try appendPassiveSkill(alloc.gpa, &passive_skills, entry.SkillId);
+    if (assets.getDb()) |db| {
+        var scratch = std.heap.ArenaAllocator.init(alloc.gpa);
+        defer scratch.deinit();
+        const skill_ids = try db.querySkillIdsByRolePrefix(resolved_role_id, scratch.allocator());
+        for (skill_ids) |sid| {
+            try appendPassiveSkill(alloc.gpa, &passive_skills, sid);
+        }
+    } else {
+        for (assets.tables.entity_skill_preload.items) |entry| {
+            var skill_str_buf: [10]u8 = undefined;
+            const skill_str = std.fmt.bufPrint(&skill_str_buf, "{d}", .{entry.SkillId}) catch continue;
+            if (!std.mem.startsWith(u8, skill_str, role_str)) continue;
+            try appendPassiveSkill(alloc.gpa, &passive_skills, entry.SkillId);
+        }
     }
 
     for (fight_buff_infos_filtered) |buff_info| {

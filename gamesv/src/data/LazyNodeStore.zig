@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const AssetsDb = @import("AssetsDb.zig");
 
 pub const ByteSpan = struct {
     offset: u64,
@@ -26,13 +27,37 @@ const CacheSlot = struct {
 const CacheState = struct {
     mutex: Io.Mutex = .init,
     slots: std.AutoHashMapUnmanaged(i32, CacheSlot) = .empty,
+    order: std.ArrayListUnmanaged(i32) = .empty,
 };
+
+const max_cached_owners: usize = 256;
 
 gpa: Allocator,
 index_arena: ArenaAllocator,
 file_path: []const u8,
 owner_spans: std.AutoHashMapUnmanaged(i32, []const ByteSpan),
 cache: *CacheState,
+db: ?*AssetsDb = null,
+kind: i32 = 0,
+
+pub fn initWithDb(gpa: Allocator, db: *AssetsDb, kind: i32, file_path: []const u8) !LazyNodeStore {
+    var index_arena = ArenaAllocator.init(gpa);
+    errdefer index_arena.deinit();
+
+    const cache = try gpa.create(CacheState);
+    errdefer gpa.destroy(cache);
+    cache.* = .{};
+
+    return .{
+        .gpa = gpa,
+        .index_arena = index_arena,
+        .file_path = try index_arena.allocator().dupe(u8, file_path),
+        .owner_spans = .empty,
+        .cache = cache,
+        .db = db,
+        .kind = kind,
+    };
+}
 
 pub fn init(gpa: Allocator, io: Io, file_path: []const u8) !LazyNodeStore {
     var index_arena = ArenaAllocator.init(gpa);
@@ -152,11 +177,13 @@ pub fn deinit(self: *LazyNodeStore) void {
         slot.arena.deinit();
     }
     self.cache.slots.deinit(self.gpa);
+    self.cache.order.deinit(self.gpa);
     self.gpa.destroy(self.cache);
     self.index_arena.deinit();
 }
 
 pub fn hasOwner(self: *const LazyNodeStore, owner_id: i32) bool {
+    if (self.db) |db| return db.hasNodeTreeOwner(self.kind, owner_id);
     return self.owner_spans.contains(owner_id);
 }
 
@@ -168,35 +195,59 @@ pub fn getOwnerNodes(self: *const LazyNodeStore, io: Io, owner_id: i32) ![]const
         return slot.nodes;
     }
 
-    const spans = self.owner_spans.get(owner_id) orelse return &.{};
-
     var slot_arena = ArenaAllocator.init(self.gpa);
     errdefer slot_arena.deinit();
     const arena = slot_arena.allocator();
 
-    var file = try Io.Dir.cwd().openFile(io, self.file_path, .{});
-    defer file.close(io);
-
     var nodes: std.ArrayListUnmanaged(NodeEntry) = .empty;
-    for (spans) |span| {
-        const buf = try arena.alloc(u8, span.len);
-        const read_n = try file.readPositionalAll(io, buf, span.offset);
-        if (read_n != span.len) return error.UnexpectedEof;
+    if (self.db) |db| {
+        const raw_slices = try db.queryNodeTreeDataSlices(self.kind, owner_id, arena);
+        if (raw_slices.len == 0) {
+            slot_arena.deinit();
+            return &.{};
+        }
+        for (raw_slices) |buf| {
+            const data_val = try std.json.parseFromSliceLeaky(
+                std.json.Value,
+                arena,
+                buf,
+                .{ .allocate = .alloc_always },
+            );
+            try appendNodeFlattened(arena, &nodes, data_val, null);
+        }
+    } else {
+        const spans = self.owner_spans.get(owner_id) orelse return &.{};
+        var file = try Io.Dir.cwd().openFile(io, self.file_path, .{});
+        defer file.close(io);
 
-        const parsed = try std.json.parseFromSliceLeaky(
-            std.json.Value,
-            arena,
-            buf,
-            .{ .allocate = .alloc_always },
-        );
-        if (parsed != .object) continue;
-        const data_val = parsed.object.get("Data") orelse continue;
-        try appendNodeFlattened(arena, &nodes, data_val, null);
+        for (spans) |span| {
+            const buf = try arena.alloc(u8, span.len);
+            const read_n = try file.readPositionalAll(io, buf, span.offset);
+            if (read_n != span.len) return error.UnexpectedEof;
+
+            const parsed = try std.json.parseFromSliceLeaky(
+                std.json.Value,
+                arena,
+                buf,
+                .{ .allocate = .alloc_always },
+            );
+            if (parsed != .object) continue;
+            const data_val = parsed.object.get("Data") orelse continue;
+            try appendNodeFlattened(arena, &nodes, data_val, null);
+        }
     }
 
     try normalizeSequenceChildOrder(arena, owner_id, nodes.items);
     const owned_nodes = try arena.dupe(NodeEntry, nodes.items);
 
+    if (self.cache.order.items.len >= max_cached_owners) {
+        const oldest = self.cache.order.orderedRemove(0);
+        if (self.cache.slots.fetchRemove(oldest)) |kv| {
+            var old_arena = kv.value.arena;
+            old_arena.deinit();
+        }
+    }
+    try self.cache.order.append(self.gpa, owner_id);
     try self.cache.slots.put(self.gpa, owner_id, .{
         .arena = slot_arena,
         .nodes = owned_nodes,

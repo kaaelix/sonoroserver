@@ -9,6 +9,7 @@ const PlayerRoleComponent = @import("../../logic/component/player/PlayerRoleComp
 const RewardService = @import("../../logic/helpers/reward.zig");
 const EnergyHelper = @import("../../logic/helpers/energy.zig");
 const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
+const LevelPlayHelper = @import("../../logic/helpers/level_play.zig");
 const Transaction = @import("../handlers.zig").Transaction;
 const PlayerID = @import("../../logic/PlayerID.zig");
 
@@ -301,10 +302,14 @@ pub fn onRoleTowerChallengeSettleRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const score = try progress_comp.info.addKeyInt(alloc.gpa, "role_tower:score", 1000);
     const floor = try progress_comp.info.addKeyInt(alloc.gpa, "role_tower:stage", 1);
     try progress_comp.save(fs, alloc.arena);
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        LevelPlayHelper.onConditionEvent(lp_ctx, progress_comp, .finish_role_tower, 0, @intCast(floor)) catch {};
+    }
     const rec: pb.RoleTowerBestRecord = .{
         .ChallengeId = txn.message.ChallengeId,
         .PassedFloorCount = @intCast(@max(0, floor)),
@@ -438,6 +443,7 @@ pub fn onRoleTowerStageSettleRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const floor = try progress_comp.info.addKeyInt(alloc.gpa, "role_tower:stage", 1);
     var kbuf: [48]u8 = undefined;
@@ -446,6 +452,9 @@ pub fn onRoleTowerStageSettleRequest(
     _ = try progress_comp.info.addKeyInt(alloc.gpa, "role_tower:score", 500);
     try progress_comp.save(fs, alloc.arena);
     _ = txn.message;
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        LevelPlayHelper.onConditionEvent(lp_ctx, progress_comp, .finish_role_tower, 0, @intCast(floor)) catch {};
+    }
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -454,10 +463,14 @@ pub fn onRoleTowerStepAdvanceRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     _ = txn.message;
     _ = try progress_comp.info.addKeyInt(alloc.gpa, "roletower:steps", 1);
     try progress_comp.save(fs, alloc.arena);
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        LevelPlayHelper.onConditionEvent(lp_ctx, progress_comp, .finish_role_tower, 0, 0) catch {};
+    }
     txn.respond(.{ .ErrorCode = .Success });
 }
 

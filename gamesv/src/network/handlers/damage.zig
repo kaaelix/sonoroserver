@@ -28,17 +28,10 @@ pub fn DamageExecuteRequest(
     txn: *dispatch.CombatRequestTxn(.DamageExecuteRequest),
     assets: *const Assets,
     scene: *Scene,
-    conn: *Connection,
     fs: *FileSystem,
     events: *EventQueue,
     buff_timers: *BuffTimerScheduler,
     qctx: QuestEngine.QuestContext,
-    basic_comp: *PlayerBasicComponent,
-    inventory_comp: *PlayerInventoryComponent,
-    weapon_comp: *PlayerWeaponComponent,
-    echo_comp: *PlayerEchoComponent,
-    map_comp: *PlayerMapComponent,
-    quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
     query: Scene.Query(&.{
         Entity,
@@ -96,24 +89,11 @@ pub fn DamageExecuteRequest(
 
     if (execute_data.KilledTarget and !target_is_player) {
         QuestEngine.onEntityKilled(qctx, execute_data.TargetEntityId, null) catch |err| QuestEngine.logHookErr("onEntityKilled", err);
-        LevelPlayHelper.onEntityKilled(.{
-            .assets = assets,
-            .fs = fs,
-            .conn = conn,
-            .scene = scene,
-            .events = events,
-            .alloc = alloc,
-            .io = io,
-            .basic_comp = basic_comp,
-            .inventory_comp = inventory_comp,
-            .weapon_comp = weapon_comp,
-            .echo_comp = echo_comp,
-            .map_comp = map_comp,
-            .quest_comp = quest_comp,
-            .role_comp = role_comp,
-        }, execute_data.TargetEntityId, null) catch |err| {
-            std.log.scoped(.level_play).warn("onEntityKilled failed: {t}", .{err});
-        };
+        if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+            LevelPlayHelper.onEntityKilledWithConditions(lp_ctx, qctx.progress_comp, execute_data.TargetEntityId, null) catch |err| {
+                std.log.scoped(.level_play).warn("onEntityKilled failed: {t}", .{err});
+            };
+        }
     } else if (!execute_data.KilledTarget and !target_is_player) {
         if (target_idx) |idx| {
             const cfg_id = scene.entities.items(.config)[idx].config_id;
@@ -294,17 +274,10 @@ fn killEntityDirect(
     eid: i64,
     assets: *const Assets,
     scene: *Scene,
-    conn: *Connection,
     fs: *FileSystem,
     events: *EventQueue,
     buff_timers: *BuffTimerScheduler,
     qctx: QuestEngine.QuestContext,
-    basic_comp: *PlayerBasicComponent,
-    inventory_comp: *PlayerInventoryComponent,
-    weapon_comp: *PlayerWeaponComponent,
-    echo_comp: *PlayerEchoComponent,
-    map_comp: *PlayerMapComponent,
-    quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
     receive_data_pack: *std.ArrayList(pb.CombatReceiveData),
     io: std.Io,
@@ -342,24 +315,11 @@ fn killEntityDirect(
         persistRoleHp(scene, eid, role_comp, events, fs, alloc, true);
     } else if (cfg.entity_type != .player) {
         QuestEngine.onEntityKilled(qctx, eid, null) catch |err| QuestEngine.logHookErr("onEntityKilled", err);
-        LevelPlayHelper.onEntityKilled(.{
-            .assets = assets,
-            .fs = fs,
-            .conn = conn,
-            .scene = scene,
-            .events = events,
-            .alloc = alloc,
-            .io = io,
-            .basic_comp = basic_comp,
-            .inventory_comp = inventory_comp,
-            .weapon_comp = weapon_comp,
-            .echo_comp = echo_comp,
-            .map_comp = map_comp,
-            .quest_comp = quest_comp,
-            .role_comp = role_comp,
-        }, eid, null) catch |err| {
-            std.log.scoped(.level_play).warn("onEntityKilled failed: {t}", .{err});
-        };
+        if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+            LevelPlayHelper.onEntityKilledWithConditions(lp_ctx, qctx.progress_comp, eid, null) catch |err| {
+                std.log.scoped(.level_play).warn("onEntityKilled failed: {t}", .{err});
+            };
+        }
         queueKilledMonsterRemoval(scene, alloc.gpa, eid) catch |err| {
             std.log.scoped(.damage).warn("queueKilledMonsterRemoval({d}) failed: {t}", .{ eid, err });
         };
@@ -401,24 +361,17 @@ pub fn MonsterDrownRequest(
     txn: *dispatch.CombatRequestTxn(.MonsterDrownRequest),
     assets: *const Assets,
     scene: *Scene,
-    conn: *Connection,
     fs: *FileSystem,
     events: *EventQueue,
     buff_timers: *BuffTimerScheduler,
     qctx: QuestEngine.QuestContext,
-    basic_comp: *PlayerBasicComponent,
-    inventory_comp: *PlayerInventoryComponent,
-    weapon_comp: *PlayerWeaponComponent,
-    echo_comp: *PlayerEchoComponent,
-    map_comp: *PlayerMapComponent,
-    quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
     io: std.Io,
     alloc: mem.Alloc,
 ) !void {
     if (txn.common) |c| {
         if (c.EntityId != 0) {
-            try killEntityDirect(c.EntityId, assets, scene, conn, fs, events, buff_timers, qctx, basic_comp, inventory_comp, weapon_comp, echo_comp, map_comp, quest_comp, role_comp, txn.receive_data_pack, io, alloc);
+            try killEntityDirect(c.EntityId, assets, scene, fs, events, buff_timers, qctx, role_comp, txn.receive_data_pack, io, alloc);
         }
     }
     txn.respond(.{ .ErrorCode = .Success });
@@ -429,17 +382,10 @@ pub fn MonsterDrownPush(
     common: ?pb.CombatCommon,
     assets: *const Assets,
     scene: *Scene,
-    conn: *Connection,
     fs: *FileSystem,
     events: *EventQueue,
     buff_timers: *BuffTimerScheduler,
     qctx: QuestEngine.QuestContext,
-    basic_comp: *PlayerBasicComponent,
-    inventory_comp: *PlayerInventoryComponent,
-    weapon_comp: *PlayerWeaponComponent,
-    echo_comp: *PlayerEchoComponent,
-    map_comp: *PlayerMapComponent,
-    quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
     receive_data_pack: *std.ArrayList(pb.CombatReceiveData),
     io: std.Io,
@@ -447,31 +393,24 @@ pub fn MonsterDrownPush(
 ) !void {
     const c = common orelse return;
     if (c.EntityId == 0) return;
-    try killEntityDirect(c.EntityId, assets, scene, conn, fs, events, buff_timers, qctx, basic_comp, inventory_comp, weapon_comp, echo_comp, map_comp, quest_comp, role_comp, receive_data_pack, io, alloc);
+    try killEntityDirect(c.EntityId, assets, scene, fs, events, buff_timers, qctx, role_comp, receive_data_pack, io, alloc);
 }
 
 pub fn MonsterBoomRequest(
     txn: *dispatch.CombatRequestTxn(.MonsterBoomRequest),
     assets: *const Assets,
     scene: *Scene,
-    conn: *Connection,
     fs: *FileSystem,
     events: *EventQueue,
     buff_timers: *BuffTimerScheduler,
     qctx: QuestEngine.QuestContext,
-    basic_comp: *PlayerBasicComponent,
-    inventory_comp: *PlayerInventoryComponent,
-    weapon_comp: *PlayerWeaponComponent,
-    echo_comp: *PlayerEchoComponent,
-    map_comp: *PlayerMapComponent,
-    quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
     io: std.Io,
     alloc: mem.Alloc,
 ) !void {
     if (txn.common) |c| {
         if (c.EntityId != 0) {
-            try killEntityDirect(c.EntityId, assets, scene, conn, fs, events, buff_timers, qctx, basic_comp, inventory_comp, weapon_comp, echo_comp, map_comp, quest_comp, role_comp, txn.receive_data_pack, io, alloc);
+            try killEntityDirect(c.EntityId, assets, scene, fs, events, buff_timers, qctx, role_comp, txn.receive_data_pack, io, alloc);
         }
     }
     txn.respond(.{ .ErrorCode = .Success });
@@ -482,17 +421,10 @@ pub fn MonsterBoomPush(
     common: ?pb.CombatCommon,
     assets: *const Assets,
     scene: *Scene,
-    conn: *Connection,
     fs: *FileSystem,
     events: *EventQueue,
     buff_timers: *BuffTimerScheduler,
     qctx: QuestEngine.QuestContext,
-    basic_comp: *PlayerBasicComponent,
-    inventory_comp: *PlayerInventoryComponent,
-    weapon_comp: *PlayerWeaponComponent,
-    echo_comp: *PlayerEchoComponent,
-    map_comp: *PlayerMapComponent,
-    quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
     receive_data_pack: *std.ArrayList(pb.CombatReceiveData),
     io: std.Io,
@@ -500,7 +432,7 @@ pub fn MonsterBoomPush(
 ) !void {
     const c = common orelse return;
     if (c.EntityId == 0) return;
-    try killEntityDirect(c.EntityId, assets, scene, conn, fs, events, buff_timers, qctx, basic_comp, inventory_comp, weapon_comp, echo_comp, map_comp, quest_comp, role_comp, receive_data_pack, io, alloc);
+    try killEntityDirect(c.EntityId, assets, scene, fs, events, buff_timers, qctx, role_comp, receive_data_pack, io, alloc);
 }
 
 pub fn RoleGoDownPush(

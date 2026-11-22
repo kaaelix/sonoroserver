@@ -97,7 +97,7 @@ pub fn resolveEntityConfig(assets: *const Assets, scene_map_id: i32, config_id: 
     if (matched == null) {
         const indices = assets.indexes.levelEntityIndicesById(config_id);
         if (indices.len > 0) {
-            matched = &assets.tables.level_entity_config.items[indices[0]];
+            matched = assets.getLevelEntityByIdx(indices[0]);
         }
     }
 
@@ -788,6 +788,7 @@ pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32) !void {
 
             const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp.LevelPlayId) catch continue;
             var reach_area_done = false;
+            var finished_reach_node: ?@import("../../data/LazyNodeStore.zig").NodeEntry = null;
             for (nodes) |node| {
                 if (node.data != .object) continue;
                 const ntype = jsonStr(node.data.object.get("Type")) orelse continue;
@@ -799,17 +800,404 @@ pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32) !void {
                 if (std.mem.eql(u8, ctype, "ReachArea") and isPlayerWithinReachArea(ctx, cond_val.object, x, y)) {
                     runLevelPlayActions(ctx, lp.LevelPlayId, node.id, node.data.object.get("FinishActions"));
                     reach_area_done = true;
+                    finished_reach_node = node;
                 }
             }
             if (reach_area_done) {
-                try completeLevelPlay(ctx, lp.LevelPlayId);
-                dirty_entered = false;
+                if (!hasPendingSiblingChildQuests(nodes, finished_reach_node.?, null, lp.LevelPlayId)) {
+                    try completeLevelPlay(ctx, lp.LevelPlayId);
+                    dirty_entered = false;
+                }
             }
         }
     }
 
     if (dirty_entered) {
         ctx.quest_comp.save(ctx.fs, ctx.alloc.arena) catch {};
+    }
+}
+
+pub const LevelPlayEventKind = enum {
+    compare_actor_var,
+    cross_scene_sync_kill,
+    finish_flipper,
+    finish_kuro_simple_combat_kill,
+    finish_kurotato,
+    finish_role_tower,
+    finish_roll_block,
+    finish_survivors_rouge,
+    finish_tetris,
+    finish_trap_defense,
+    new_hand_in_items,
+    parallax_align,
+    playback_show_timeline,
+    take_pictures_with_time_scale,
+    walking_pattern,
+
+    pub fn conditionType(self: LevelPlayEventKind) []const u8 {
+        return switch (self) {
+            .compare_actor_var => "CompareActorVar",
+            .cross_scene_sync_kill => "CrossSceneSyncKillMonster",
+            .finish_flipper => "FinishFlipper",
+            .finish_kuro_simple_combat_kill => "FinishKuroSimpleCombatKillMonster",
+            .finish_kurotato => "FinishKurotato",
+            .finish_role_tower => "FinishRoleTower",
+            .finish_roll_block => "FinishRollBlock",
+            .finish_survivors_rouge => "FinishSurvivorsRouge",
+            .finish_tetris => "FinishTetris",
+            .finish_trap_defense => "FinishTrapDefense",
+            .new_hand_in_items => "NewHandInItems",
+            .parallax_align => "ParallaxAlign",
+            .playback_show_timeline => "PlaybackShowTimeline",
+            .take_pictures_with_time_scale => "TakePicturesWithTimeScale",
+            .walking_pattern => "WalkingPattern",
+        };
+    }
+
+    pub fn matchesConditionType(self: LevelPlayEventKind, ctype: []const u8) bool {
+        if (std.mem.eql(u8, ctype, self.conditionType())) return true;
+        return switch (self) {
+            .take_pictures_with_time_scale => std.mem.eql(u8, ctype, "TakePhoto") or std.mem.eql(u8, ctype, "TakePhoto2"),
+            else => false,
+        };
+    }
+};
+
+pub fn fromQuestContext(qctx: QuestEngine.QuestContext) ?LevelPlayContext {
+    const scene = qctx.scene orelse return null;
+    const role_comp = qctx.role_comp orelse return null;
+    return .{
+        .assets = qctx.assets,
+        .fs = qctx.fs,
+        .conn = qctx.conn,
+        .scene = scene,
+        .scene_comp = qctx.scene_comp,
+        .events = qctx.events,
+        .alloc = qctx.alloc,
+        .io = qctx.io,
+        .basic_comp = qctx.basic_comp,
+        .inventory_comp = qctx.inventory_comp,
+        .weapon_comp = qctx.weapon_comp,
+        .echo_comp = qctx.echo_comp,
+        .map_comp = qctx.map_comp,
+        .quest_comp = qctx.quest_comp,
+        .role_comp = role_comp,
+    };
+}
+
+pub fn allowsLevelPlayClientSubmit(ctype: []const u8) bool {
+    const allowed = [_][]const u8{
+        "CompareActorVar",
+        "FinishFlipper",
+        "FinishKurotato",
+        "FinishRoleTower",
+        "FinishRollBlock",
+        "FinishSurvivorsRouge",
+        "FinishTetris",
+        "FinishTrapDefense",
+        "NewHandInItems",
+        "ParallaxAlign",
+        "PlaybackShowTimeline",
+        "TakePicturesWithTimeScale",
+        "TakePhoto",
+        "TakePhoto2",
+        "WalkingPattern",
+        "ReachArea",
+        "CheckUiGame",
+        "CheckEntityState",
+        "CompareVar",
+        "UseSkill",
+        "UseItem",
+        "Deliver",
+        "Communicate",
+        "Parkour",
+        "RhythmGame",
+        "SlidingBlocks",
+        "CrossSceneSyncKillMonster",
+        "FinishKuroSimpleCombatKillMonster",
+    };
+    for (allowed) |name| {
+        if (std.mem.eql(u8, ctype, name)) return true;
+    }
+    return false;
+}
+
+fn isLevelPlayNodeMarked(progress_comp: ?*const PlayerProgressComponent, lp_id: i32, node_id: i32) bool {
+    const pc = progress_comp orelse return false;
+    var kbuf: [48]u8 = undefined;
+    const key = std.fmt.bufPrint(&kbuf, "lp_node:{d}:{d}", .{ lp_id, node_id }) catch return false;
+    return pc.info.hasClaim(key);
+}
+
+fn jsonIntVal(v_opt: ?std.json.Value) i64 {
+    const v = v_opt orelse return 0;
+    return switch (v) {
+        .integer => |i| i,
+        .float => |f| @intFromFloat(f),
+        .string => |s| std.fmt.parseInt(i64, s, 10) catch 0,
+        else => 0,
+    };
+}
+
+fn hasPendingSiblingChildQuests(
+    nodes: []const LazyNodeStore.NodeEntry,
+    finished_node: LazyNodeStore.NodeEntry,
+    progress_comp: ?*const PlayerProgressComponent,
+    lp_id: i32,
+) bool {
+    const parent_id: i64 = if (finished_node.data == .object)
+        jsonIntVal(finished_node.data.object.get("ParentNodeId"))
+    else
+        0;
+    if (parent_id <= 0) return false;
+    for (nodes) |other| {
+        if (other.id == finished_node.id) continue;
+        if (other.data != .object) continue;
+        const ntype = jsonStr(other.data.object.get("Type")) orelse continue;
+        if (!std.mem.eql(u8, ntype, "ChildQuest")) continue;
+        if (jsonIntVal(other.data.object.get("ParentNodeId")) != parent_id) continue;
+        const cond_v = other.data.object.get("Condition") orelse continue;
+        if (cond_v != .object) continue;
+        const ctype = jsonStr(cond_v.object.get("Type")) orelse continue;
+        // Do not block ReachArea completion on another ReachArea or CompareVar stub.
+        if (std.mem.eql(u8, ctype, "ReachArea") or std.mem.eql(u8, ctype, "CompareVar")) continue;
+        if (!isLevelPlayNodeMarked(progress_comp, lp_id, other.id)) return true;
+    }
+    return false;
+}
+
+fn finishLevelPlayNodeAndMaybeComplete(
+    ctx: LevelPlayContext,
+    progress_comp: ?*PlayerProgressComponent,
+    lp_id: i32,
+    nodes: []const LazyNodeStore.NodeEntry,
+    node: LazyNodeStore.NodeEntry,
+) !void {
+    if (node.data == .object) {
+        runLevelPlayActions(ctx, lp_id, node.id, node.data.object.get("FinishActions"));
+    }
+    if (progress_comp) |pc| {
+        var kbuf: [48]u8 = undefined;
+        const key = std.fmt.bufPrint(&kbuf, "lp_node:{d}:{d}", .{ lp_id, node.id }) catch "";
+        if (key.len > 0) {
+            if (try pc.info.markClaim(ctx.alloc.gpa, key)) {
+                try pc.save(ctx.fs, ctx.alloc.arena);
+            }
+        }
+    }
+    if (!hasPendingSiblingChildQuests(nodes, node, if (progress_comp) |pc| pc else null, lp_id)) {
+        try completeLevelPlay(ctx, lp_id);
+    } else {
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LevelPlayStateNotify{
+            .Id = lp_id,
+            .State = 2,
+            .CompleteNumber = 0,
+        }) catch {};
+    }
+}
+
+fn findActiveLevelPlayId(ctx: LevelPlayContext, owner_id: i32, tree_inc_id: i64) ?i32 {
+    if (owner_id > 0) {
+        if (ctx.assets.tables.level_play_data.getDataById(owner_id) != null) return owner_id;
+    }
+    if (tree_inc_id > 0) {
+        if (std.math.cast(i32, tree_inc_id)) |inc32| {
+            if (ctx.assets.tables.level_play_data.getDataById(inc32) != null) return inc32;
+        }
+    }
+    return null;
+}
+
+pub fn onSubmitLevelPlayNode(
+    ctx: LevelPlayContext,
+    progress_comp: ?*PlayerProgressComponent,
+    owner_id: i32,
+    tree_inc_id: i64,
+    node_id: i32,
+) !bool {
+    if (node_id <= 0) return false;
+    const lp_id = findActiveLevelPlayId(ctx, owner_id, tree_inc_id) orelse return false;
+    const lp = ctx.assets.tables.level_play_data.getDataById(lp_id) orelse return false;
+    if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) return false;
+    if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) return false;
+
+    const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp_id) catch return false;
+    for (nodes) |node| {
+        if (node.id != node_id or node.data != .object) continue;
+        const ntype = jsonStr(node.data.object.get("Type")) orelse return false;
+        if (!std.mem.eql(u8, ntype, "ChildQuest")) return false;
+        const cond_val = node.data.object.get("Condition") orelse return false;
+        if (cond_val != .object) return false;
+        const ctype = jsonStr(cond_val.object.get("Type")) orelse return false;
+        if (!allowsLevelPlayClientSubmit(ctype)) return false;
+
+        try finishLevelPlayNodeAndMaybeComplete(ctx, progress_comp, lp_id, nodes, node);
+        return true;
+    }
+    return false;
+}
+
+pub fn onSubmitPhotoLevelPlayNode(
+    ctx: LevelPlayContext,
+    progress_comp: ?*PlayerProgressComponent,
+    owner_id: i32,
+    node_id: i32,
+) !bool {
+    if (progress_comp) |pc| {
+        _ = pc.info.addKeyInt(ctx.alloc.gpa, "explore:photo_cnt", 1) catch {};
+    }
+    if (owner_id > 0 and node_id > 0) {
+        if (try onSubmitLevelPlayNode(ctx, progress_comp, owner_id, owner_id, node_id)) return true;
+    }
+    try onConditionEvent(ctx, progress_comp, .take_pictures_with_time_scale, 0, 0);
+    return true;
+}
+
+fn conditionMatchesTargetEntity(kind: LevelPlayEventKind, cond: std.json.ObjectMap, entity_cfg_id: i64, extra_id: i32) bool {
+    return switch (kind) {
+        .new_hand_in_items => blk: {
+            const hi = cond.get("HandIn") orelse break :blk entity_cfg_id == 0;
+            if (hi != .object) break :blk false;
+            const eid = jsonIntVal(hi.object.get("EntityId"));
+            const iid = jsonIntVal(hi.object.get("ItemId"));
+            if (entity_cfg_id > 0 and eid > 0 and eid != entity_cfg_id) break :blk false;
+            if (extra_id > 0 and iid > 0 and iid != extra_id) break :blk false;
+            break :blk true;
+        },
+        .walking_pattern => blk: {
+            if (entity_cfg_id <= 0) break :blk true;
+            const spline_id = jsonIntVal(cond.get("SplineEntityId"));
+            const end_id = jsonIntVal(cond.get("EndEntityId"));
+            break :blk spline_id == entity_cfg_id or end_id == entity_cfg_id or (spline_id == 0 and end_id == 0);
+        },
+        .finish_roll_block => blk: {
+            if (entity_cfg_id <= 0) break :blk true;
+            const center_id = jsonIntVal(cond.get("CenterEntityId"));
+            const interact_id = jsonIntVal(cond.get("InteractEntityId"));
+            const grp_id = jsonIntVal(cond.get("RollBlockGroupId"));
+            break :blk center_id == entity_cfg_id or interact_id == entity_cfg_id or (extra_id > 0 and grp_id == extra_id);
+        },
+        .finish_tetris => blk: {
+            if (entity_cfg_id <= 0) break :blk true;
+            const origin_id = jsonIntVal(cond.get("OriginPosEntityId"));
+            break :blk origin_id == 0 or origin_id == entity_cfg_id;
+        },
+        else => true,
+    };
+}
+
+pub fn onConditionEvent(
+    ctx: LevelPlayContext,
+    progress_comp: ?*PlayerProgressComponent,
+    kind: LevelPlayEventKind,
+    entity_cfg_id: i64,
+    extra_id: i32,
+) !void {
+    if (progress_comp) |pc| {
+        const stat_key: ?[]const u8 = switch (kind) {
+            .parallax_align => "parallax:done",
+            .playback_show_timeline => "timeline:done",
+            .finish_flipper => "flipper:fin",
+            .finish_roll_block => "rb_blk:fin",
+            .walking_pattern => "walk_pat:done",
+            else => null,
+        };
+        if (stat_key) |k| {
+            _ = pc.info.addKeyInt(ctx.alloc.gpa, k, 1) catch {};
+            pc.save(ctx.fs, ctx.alloc.arena) catch {};
+        }
+    }
+
+    var candidate_ids: std.ArrayList(i32) = .empty;
+    for (ctx.quest_comp.info.progress.entered_level_plays) |lpid| {
+        if (!QuestInfo.containsInt(candidate_ids.items, lpid)) {
+            try candidate_ids.append(ctx.alloc.arena, lpid);
+        }
+    }
+    if (std.math.cast(i32, entity_cfg_id)) |cfg32| {
+        if (cfg32 > 0) {
+            for (ctx.assets.indexes.levelPlayIndicesForRefEntity(cfg32)) |lp_idx| {
+                const lpid = ctx.assets.tables.level_play_data.items[lp_idx].LevelPlayId;
+                if (!QuestInfo.containsInt(candidate_ids.items, lpid)) {
+                    try candidate_ids.append(ctx.alloc.arena, lpid);
+                }
+            }
+            for (ctx.assets.indexes.levelPlayIndicesForEntity(cfg32)) |lp_idx| {
+                const lpid = ctx.assets.tables.level_play_data.items[lp_idx].LevelPlayId;
+                if (!QuestInfo.containsInt(candidate_ids.items, lpid)) {
+                    try candidate_ids.append(ctx.alloc.arena, lpid);
+                }
+            }
+        }
+    }
+
+    for (candidate_ids.items) |lp_id| {
+        const lp = ctx.assets.tables.level_play_data.getDataById(lp_id) orelse continue;
+        if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) continue;
+        if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) continue;
+
+        const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp_id) catch continue;
+        for (nodes) |node| {
+            if (node.data != .object) continue;
+            const ntype = jsonStr(node.data.object.get("Type")) orelse continue;
+            if (!std.mem.eql(u8, ntype, "ChildQuest")) continue;
+            const cond_val = node.data.object.get("Condition") orelse continue;
+            if (cond_val != .object) continue;
+            const ctype = jsonStr(cond_val.object.get("Type")) orelse continue;
+            if (!kind.matchesConditionType(ctype)) continue;
+            if (!conditionMatchesTargetEntity(kind, cond_val.object, entity_cfg_id, extra_id)) continue;
+
+            try finishLevelPlayNodeAndMaybeComplete(ctx, progress_comp, lp_id, nodes, node);
+            break;
+        }
+    }
+}
+
+pub fn onEntityKilledWithConditions(
+    ctx: LevelPlayContext,
+    progress_comp: ?*PlayerProgressComponent,
+    target_net_id: i64,
+    cfg_id_opt: ?i32,
+) !void {
+    const killed_cfg: i32 = cfg_id_opt orelse blk: {
+        const idx = ctx.scene.net_id_map.get(target_net_id) orelse break :blk 0;
+        break :blk std.math.cast(i32, ctx.scene.entities.items(.config)[idx].config_id) orelse 0;
+    };
+    try onEntityKilled(ctx, target_net_id, cfg_id_opt);
+    if (killed_cfg <= 0) return;
+
+    var candidate_ids: std.ArrayList(i32) = .empty;
+    for (ctx.quest_comp.info.progress.entered_level_plays) |lpid| {
+        if (!QuestInfo.containsInt(candidate_ids.items, lpid)) {
+            try candidate_ids.append(ctx.alloc.arena, lpid);
+        }
+    }
+    for (ctx.assets.indexes.levelPlayIndicesForRefEntity(killed_cfg)) |lp_idx| {
+        const lpid = ctx.assets.tables.level_play_data.items[lp_idx].LevelPlayId;
+        if (!QuestInfo.containsInt(candidate_ids.items, lpid)) {
+            try candidate_ids.append(ctx.alloc.arena, lpid);
+        }
+    }
+
+    for (candidate_ids.items) |lp_id| {
+        const lp = ctx.assets.tables.level_play_data.getDataById(lp_id) orelse continue;
+        if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) continue;
+        if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) continue;
+
+        const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp_id) catch continue;
+        for (nodes) |node| {
+            if (node.data != .object) continue;
+            const ntype = jsonStr(node.data.object.get("Type")) orelse continue;
+            if (!std.mem.eql(u8, ntype, "ChildQuest")) continue;
+            const cond_val = node.data.object.get("Condition") orelse continue;
+            if (cond_val != .object) continue;
+            const ctype = jsonStr(cond_val.object.get("Type")) orelse continue;
+            if (!std.mem.eql(u8, ctype, "CrossSceneSyncKillMonster") and
+                !std.mem.eql(u8, ctype, "FinishKuroSimpleCombatKillMonster")) continue;
+
+            try finishLevelPlayNodeAndMaybeComplete(ctx, progress_comp, lp_id, nodes, node);
+            break;
+        }
     }
 }
 
@@ -879,4 +1267,52 @@ test "matchesSceneInstance respects InstanceId override and rejects cross-map Le
     try testing.expect(matchesSceneInstance(&assets, lp_inst_override, 8));
     try testing.expect(!matchesSceneInstance(&assets, lp_inst_override, 100));
     try testing.expect(matchesSceneInstance(&assets, lp_inst_override, 1500));
+}
+
+test "all 15 LevelPlayNodeData Condition.Types map cleanly and allow valid submit or event triggers" {
+    const testing = std.testing;
+    const all_15 = [_][]const u8{
+        "CompareActorVar",
+        "CrossSceneSyncKillMonster",
+        "FinishFlipper",
+        "FinishKuroSimpleCombatKillMonster",
+        "FinishKurotato",
+        "FinishRoleTower",
+        "FinishRollBlock",
+        "FinishSurvivorsRouge",
+        "FinishTetris",
+        "FinishTrapDefense",
+        "NewHandInItems",
+        "ParallaxAlign",
+        "PlaybackShowTimeline",
+        "TakePicturesWithTimeScale",
+        "WalkingPattern",
+    };
+    for (all_15) |name| {
+        try testing.expect(allowsLevelPlayClientSubmit(name));
+    }
+    try testing.expect(!allowsLevelPlayClientSubmit("Kill"));
+    try testing.expect(!allowsLevelPlayClientSubmit("PlayFlow"));
+
+    // Verify LevelPlayEventKind covers all 15 types 1:1
+    inline for (@typeInfo(LevelPlayEventKind).@"enum".fields) |f| {
+        const kind: LevelPlayEventKind = @enumFromInt(f.value);
+        try testing.expect(kind.matchesConditionType(kind.conditionType()));
+    }
+    try testing.expect(LevelPlayEventKind.take_pictures_with_time_scale.matchesConditionType("TakePhoto2"));
+
+    // Verify conditionMatchesTargetEntity validates NewHandInItems, WalkingPattern, FinishRollBlock, FinishTetris
+    const handin = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"Type":"NewHandInItems","HandIn":{"Type":"ProjectionMachine","EntityId":39000113,"ItemId":70140004}}
+    , .{});
+    defer handin.deinit();
+    try testing.expect(conditionMatchesTargetEntity(.new_hand_in_items, handin.value.object, 39000113, 70140004));
+    try testing.expect(!conditionMatchesTargetEntity(.new_hand_in_items, handin.value.object, 999, 70140004));
+
+    const wp = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"Type":"WalkingPattern","SplineEntityId":122000345,"EndEntityId":122000342}
+    , .{});
+    defer wp.deinit();
+    try testing.expect(conditionMatchesTargetEntity(.walking_pattern, wp.value.object, 122000342, 0));
+    try testing.expect(!conditionMatchesTargetEntity(.walking_pattern, wp.value.object, 123, 0));
 }

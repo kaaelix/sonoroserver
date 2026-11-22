@@ -1358,7 +1358,7 @@ fn considerSpawnCandidates(
     cap: usize,
 ) void {
     for (indices) |cfg_idx| {
-        const cfg = assets.tables.level_entity_config.items[cfg_idx];
+        const cfg = (assets.getLevelEntityByIdx(cfg_idx) orelse continue).*;
         if (!QuestEngine.entityDataLayersActive(assets, quest_info, scene.instance_id, &cfg)) continue;
         const pos = Assets.AssetIndexes.entityWorldPos(&cfg) orelse continue;
 
@@ -1510,7 +1510,7 @@ fn spawnNearbyWorldEntities(
     for (pools) |pool| {
         for (pool) |cand| {
             if (scene.entities.slice().len >= 240) break;
-            const cfg = assets.tables.level_entity_config.items[cand.cfg_idx];
+            const cfg = (assets.getLevelEntityByIdx(@intCast(cand.cfg_idx)) orelse continue).*;
             const saved_location = if (std.math.cast(i32, cfg.EntityId)) |config_id|
                 storedWorldLocation(progress_comp.info, config_id)
             else

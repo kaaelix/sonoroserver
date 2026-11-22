@@ -11,6 +11,8 @@ const PlayerInventoryComponent = @import("../../logic/component/player/PlayerInv
 const PlayerProgressComponent = @import("../../logic/component/player/PlayerProgressComponent.zig");
 const RewardService = @import("../../logic/helpers/reward.zig");
 const EnergyHelper = @import("../../logic/helpers/energy.zig");
+const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
+const LevelPlayHelper = @import("../../logic/helpers/level_play.zig");
 const pb_kv = @import("pb_kv.zig");
 
 fn claimIdList(
@@ -1345,10 +1347,14 @@ pub fn onKurotatoStepAdvanceRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     _ = txn.message;
     _ = try progress_comp.info.addKeyInt(alloc.gpa, "kurotato:step", 1);
     try progress_comp.save(fs, alloc.arena);
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        LevelPlayHelper.onConditionEvent(lp_ctx, progress_comp, .finish_kurotato, 0, 0) catch {};
+    }
     txn.respond(.{ .ErrCode = .Success });
 }
 
@@ -1932,9 +1938,14 @@ pub fn onRollBlockMovementFinishRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const key = try std.fmt.allocPrint(alloc.arena, "rb_blk:entity:{d}", .{txn.message.IncId});
     try pb_kv.persistInt(alloc, fs, progress_comp, key, txn.message.EntityId);
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        const cfg_id = lp_ctx.scene.findConfigIdByNetId(txn.message.EntityId) orelse txn.message.EntityId;
+        LevelPlayHelper.onConditionEvent(lp_ctx, progress_comp, .finish_roll_block, cfg_id, txn.message.IncId) catch {};
+    }
     txn.respond(.{ .Code = .Success });
 }
 
@@ -2021,7 +2032,7 @@ pub fn onSpringSignDrawRewardRequest(
     progress_comp: *PlayerProgressComponent,
     reward_ctx: RewardService.RewardContext,
 ) !void {
-    try claimOne(alloc, fs, progress_comp, reward_ctx, "ssign_rw", "SpringSign", txn.message.Id);
+    try claimOne(alloc, fs, progress_comp, reward_ctx, "ssign_rw", "SpringReward", txn.message.Id);
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -2043,7 +2054,7 @@ pub fn onSpringSignPhotoRewardRequest(
     progress_comp: *PlayerProgressComponent,
     reward_ctx: RewardService.RewardContext,
 ) !void {
-    try claimOne(alloc, fs, progress_comp, reward_ctx, "ssign_photo", "SpringSign", 1);
+    try claimOne(alloc, fs, progress_comp, reward_ctx, "ssign_photo", "SpringReward", 1);
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -2054,7 +2065,7 @@ pub fn onSpringSignSkinRewardRequest(
     progress_comp: *PlayerProgressComponent,
     reward_ctx: RewardService.RewardContext,
 ) !void {
-    try claimOne(alloc, fs, progress_comp, reward_ctx, "ssign_skin", "SpringSign", 1);
+    try claimOne(alloc, fs, progress_comp, reward_ctx, "ssign_skin", "SpringReward", 1);
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -2121,11 +2132,15 @@ pub fn onSurvivorsStepAdvanceRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const wave = try progress_comp.info.addKeyInt(alloc.gpa, "surv:wave", 1);
     const max_w = @max(wave, progress_comp.info.getKeyInt("surv:max_wave"));
     try progress_comp.info.setKeyInt(alloc.gpa, "surv:max_wave", max_w);
     try progress_comp.save(fs, alloc.arena);
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        LevelPlayHelper.onConditionEvent(lp_ctx, progress_comp, .finish_survivors_rouge, 0, @intCast(wave)) catch {};
+    }
     txn.respond(.{ .ErrCode = .Success });
 }
 
@@ -2397,9 +2412,13 @@ pub fn onTrapDefensePreviewFinishRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     _ = txn.message;
     try pb_kv.persistClaim(alloc, fs, progress_comp, "trap:preview_done");
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        LevelPlayHelper.onConditionEvent(lp_ctx, progress_comp, .finish_trap_defense, 0, 0) catch {};
+    }
     txn.respond(.{ .ErrorCode = .Success });
 }
 

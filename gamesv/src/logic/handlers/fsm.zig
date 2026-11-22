@@ -39,12 +39,6 @@ pub fn handleFsmWake(
     conn: *Connection,
     assets: *const Assets,
     events: *EventQueue,
-    basic_comp: *PlayerBasicComponent,
-    inventory_comp: *PlayerInventoryComponent,
-    weapon_comp: *PlayerWeaponComponent,
-    echo_comp: *PlayerEchoComponent,
-    map_comp: *PlayerMapComponent,
-    quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
     qctx: QuestEngine.QuestContext,
     alloc: mem.Alloc,
@@ -113,25 +107,11 @@ pub fn handleFsmWake(
                 try scene.syncFsmDeadlines(alloc.gpa, entity.net_id, fsm);
 
                 QuestEngine.onEntityKilled(qctx, entity.net_id, null) catch |err| QuestEngine.logHookErr("onEntityKilled", err);
-                LevelPlayHelper.onEntityKilled(.{
-                    .assets = assets,
-                    .fs = fs,
-                    .conn = conn,
-                    .scene = scene,
-                    .scene_comp = qctx.scene_comp,
-                    .events = events,
-                    .alloc = alloc,
-                    .io = io,
-                    .basic_comp = basic_comp,
-                    .inventory_comp = inventory_comp,
-                    .weapon_comp = weapon_comp,
-                    .echo_comp = echo_comp,
-                    .map_comp = map_comp,
-                    .quest_comp = quest_comp,
-                    .role_comp = role_comp,
-                }, entity.net_id, null) catch |err| {
-                    std.log.scoped(.level_play).warn("onEntityKilled failed: {t}", .{err});
-                };
+                if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+                    LevelPlayHelper.onEntityKilledWithConditions(lp_ctx, qctx.progress_comp, entity.net_id, null) catch |err| {
+                        std.log.scoped(.level_play).warn("onEntityKilled failed: {t}", .{err});
+                    };
+                }
             },
             .delayed_destroy => {
                 const item = query.byNetId(due.entity_id) orelse continue;

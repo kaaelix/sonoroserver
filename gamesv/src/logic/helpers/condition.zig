@@ -636,9 +636,11 @@ const server_cond_specs = std.StaticStringMap(ServerCondSpec).initComptime(&[_]s
     .{ "CheckShop", .{ .prog_key = "shop:buy", .param_id_key = "ShopItemId" } },
     .{ "CheckTetrisFinish", .{ .prog_key = "tetris:best", .param_id_key = "Id" } },
     .{ "CiacconaActivityResult", .{ .prog_key = "ciaccona:res" } },
+    .{ "CompareActorVar", .{ .prog_key = "actor_var:done" } },
     .{ "CookingLevelUp", .{ .prog_key = "cook:level" } },
     .{ "CorniceMeetingFinish", .{ .prog_key = "cornice:finish", .claim_prefix = "cornice_rw:" } },
     .{ "CreateAdvice", .{ .prog_key = "advice:created" } },
+    .{ "CrossSceneSyncKillMonster", .{ .prog_key = "simple_combat:kills" } },
     .{ "DailyAdventureCheck", .{ .prog_key = "dadv:check", .claim_prefix = "dadv_" } },
     .{ "DangoBrawlComposeQuality", .{ .prog_key = "db_uid" } },
     .{ "DangoBrawlPassAllBaseFilled", .{ .prog_key = "db_fight_cnt" } },
@@ -663,6 +665,19 @@ const server_cond_specs = std.StaticStringMap(ServerCondSpec).initComptime(&[_]s
     .{ "ExploreProgressStepRewardTime", .{ .prog_key = "explore:step_rw", .claim_prefix = "explore_prog:" } },
     .{ "FarmGoldLevelScore", .{ .prog_key = "fg:score", .claim_prefix = "fg_lp:", .param_id_key = "Id" } },
     .{ "FinishInst", .{ .prog_key = "inst:finish_cnt" } },
+    .{ "FinishFlipper", .{ .prog_key = "flipper:fin" } },
+    .{ "FinishKuroSimpleCombatKillMonster", .{ .prog_key = "simple_combat:kills" } },
+    .{ "FinishKurotato", .{ .prog_key = "kurotato:wave" } },
+    .{ "FinishRoleTower", .{ .prog_key = "role_tower:stage" } },
+    .{ "FinishRollBlock", .{ .prog_key = "rb_blk:fin" } },
+    .{ "FinishSurvivorsRouge", .{ .prog_key = "surv:wave" } },
+    .{ "FinishTetris", .{ .prog_key = "tetris:best" } },
+    .{ "FinishTrapDefense", .{ .prog_key = "trap:pass_wave" } },
+    .{ "NewHandInItems", .{ .prog_key = "handin_pm:cnt", .claim_prefix = "handin_pm:", .param_id_key = "EntityId" } },
+    .{ "ParallaxAlign", .{ .prog_key = "parallax:done" } },
+    .{ "PlaybackShowTimeline", .{ .prog_key = "timeline:done" } },
+    .{ "TakePicturesWithTimeScale", .{ .prog_key = "explore:photo_cnt" } },
+    .{ "WalkingPattern", .{ .prog_key = "walk_pat:done" } },
     .{ "FishingEntrust", .{ .prog_key = "fish:entrust_done", .claim_prefix = "fish_ent:" } },
     .{ "FishingFish", .{ .prog_key = "fish:catch_cnt" } },
     .{ "FishingIllustrated", .{ .prog_key = "fish:ill_cnt", .claim_prefix = "fish_ill:" } },
@@ -2442,6 +2457,17 @@ fn isSunSpiritCollected(ctx: EvalContext, eid: i64) bool {
 fn countCollectedSunSpirits(ctx: EvalContext, dungeon_id: i32, area_id: i32) i32 {
     const assets = ctx.assets orelse return 0;
     var count: i32 = 0;
+    if (assets.getDb()) |db| {
+        var scratch = std.heap.ArenaAllocator.init(assets.tables.arena.child_allocator);
+        defer scratch.deinit();
+        const rows = db.querySunSpiritEntities(scratch.allocator()) catch return 0;
+        for (rows) |row| {
+            if (dungeon_id > 0 and row.map_id != dungeon_id) continue;
+            if (area_id > 0 and row.area_id != area_id) continue;
+            if (isSunSpiritCollected(ctx, row.entity_id)) count += 1;
+        }
+        return count;
+    }
     for (assets.tables.level_entity_config.items) |cfg| {
         if (dungeon_id > 0 and cfg.MapId != dungeon_id) continue;
         if (area_id > 0 and cfg.AreaId != area_id) continue;
@@ -2609,6 +2635,68 @@ test "evalConditionRecord evaluates direct 3.8.11 types and server_cond_specs" {
 
     const p_miss = try std.json.parseFromSliceLeaky(std.json.Value, aalloc, "{\"Id\":\"999\"}", .{});
     try std.testing.expect(!evalConditionRecord(ctx, .{ .Id = 9, .Type = "AbyssPass", .LimitParams = p_miss }));
+}
+
+test "evalConditionRecord handles 15 LevelPlay Condition types" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const aalloc = arena.allocator();
+
+    var basic: PlayerBasicComponent = .{ .player_id = 1, .info = .default };
+    var echo: PlayerEchoComponent = .{ .player_id = 1, .echo_map = .empty, .preset_info = .default, .calabash_info = .default };
+    var inv: PlayerInventoryComponent = .{ .player_id = 1, .info = .default };
+    var map: PlayerMapComponent = .{ .player_id = 1, .info = .default };
+    var quest: PlayerQuestComponent = .{ .player_id = 1, .info = .default };
+    defer quest.info.deinit(gpa);
+
+    var prog: PlayerProgressComponent = .{ .player_id = 1, .info = .default };
+    defer prog.info.deinit(gpa);
+    try prog.info.setKeyInt(gpa, "actor_var:done", 1);
+    try prog.info.setKeyInt(gpa, "simple_combat:kills", 1);
+    try prog.info.setKeyInt(gpa, "flipper:fin", 1);
+    try prog.info.setKeyInt(gpa, "kurotato:wave", 1);
+    try prog.info.setKeyInt(gpa, "role_tower:stage", 1);
+    try prog.info.setKeyInt(gpa, "rb_blk:fin", 1);
+    try prog.info.setKeyInt(gpa, "surv:wave", 1);
+    try prog.info.setKeyInt(gpa, "tetris:best", 500);
+    try prog.info.setKeyInt(gpa, "trap:pass_wave", 1);
+    try prog.info.setKeyInt(gpa, "handin_pm:cnt", 1);
+    try prog.info.setKeyInt(gpa, "parallax:done", 1);
+    try prog.info.setKeyInt(gpa, "timeline:done", 1);
+    try prog.info.setKeyInt(gpa, "explore:photo_cnt", 1);
+    try prog.info.setKeyInt(gpa, "walk_pat:done", 1);
+
+    const ctx: EvalContext = .{
+        .assets = null,
+        .basic_comp = &basic,
+        .echo_comp = &echo,
+        .inventory_comp = &inv,
+        .map_comp = &map,
+        .quest_comp = &quest,
+        .progress_comp = &prog,
+    };
+
+    _ = aalloc;
+    inline for (.{
+        "CompareActorVar",
+        "CrossSceneSyncKillMonster",
+        "FinishFlipper",
+        "FinishKuroSimpleCombatKillMonster",
+        "FinishKurotato",
+        "FinishRoleTower",
+        "FinishRollBlock",
+        "FinishSurvivorsRouge",
+        "FinishTetris",
+        "FinishTrapDefense",
+        "NewHandInItems",
+        "ParallaxAlign",
+        "PlaybackShowTimeline",
+        "TakePicturesWithTimeScale",
+        "WalkingPattern",
+    }) |ctype| {
+        try std.testing.expect(evalConditionRecord(ctx, .{ .Id = 1, .Type = ctype, .NeedNum = 1 }));
+    }
 }
 
 test "evalConditionRecord handles 3.8.11 dungeon, tower, and activity conditions" {

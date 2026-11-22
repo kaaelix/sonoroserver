@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
+pub const AssetsDb = @import("AssetsDb.zig");
 pub const DataTables = @import("DataTables.zig");
 pub const AssetIndexes = @import("AssetIndexes.zig");
 pub const FsmGraphRegistry = @import("FsmGraphRegistry.zig");
@@ -19,19 +20,21 @@ flow_states: LazyFlowStore,
 reward_index: RewardIndex,
 
 pub fn init(gpa: Allocator, io: Io) !Assets {
-    var tables = try DataTables.load(gpa, io);
+    const db = try AssetsDb.init(gpa, io);
+    errdefer db.deinit();
+    var tables = try DataTables.loadWithDb(gpa, io, db);
     errdefer tables.deinit();
-    var indexes = try AssetIndexes.init(gpa, &tables);
+    var indexes = try AssetIndexes.initWithDb(gpa, db, &tables);
     errdefer indexes.deinit(gpa);
-    var fsm_graphs = try FsmGraphRegistry.init(gpa, &tables);
+    var fsm_graphs = try FsmGraphRegistry.initWithDb(gpa, io, db);
     errdefer fsm_graphs.deinit();
-    var quest_nodes = try LazyNodeStore.init(gpa, io, "assets/BinData/QuestNodeData.json");
+    var quest_nodes = try LazyNodeStore.initWithDb(gpa, db, 0, "assets/BinData/QuestNodeData.json");
     errdefer quest_nodes.deinit();
-    var level_play_nodes = try LazyNodeStore.init(gpa, io, "assets/BinData/LevelPlayNodeData.json");
+    var level_play_nodes = try LazyNodeStore.initWithDb(gpa, db, 1, "assets/BinData/LevelPlayNodeData.json");
     errdefer level_play_nodes.deinit();
-    var flow_states = try LazyFlowStore.init(gpa, io, "assets/BinData/FlowState.json");
+    var flow_states = try LazyFlowStore.initWithDb(gpa, db, "assets/BinData/FlowState.json");
     errdefer flow_states.deinit();
-    var reward_index = try RewardIndex.init(gpa);
+    var reward_index = try RewardIndex.initWithDb(gpa, db);
     errdefer reward_index.deinit();
     return .{
         .fsm_graphs = fsm_graphs,
@@ -42,6 +45,11 @@ pub fn init(gpa: Allocator, io: Io) !Assets {
         .flow_states = flow_states,
         .reward_index = reward_index,
     };
+}
+
+pub fn getDb(assets: *const Assets) ?*AssetsDb {
+    const ptr = assets.tables.level_entity_config.lazy_ctx orelse return null;
+    return @ptrCast(@alignCast(ptr));
 }
 
 /// Resolves a scene/instance ID or raw map ID to its underlying `MapConfigId`.
@@ -82,9 +90,18 @@ pub fn findLevelEntity(assets: *const Assets, map_id: i32, entity_id: i64) ?*con
 pub fn findLevelEntityAnyMap(assets: *const Assets, entity_id: i64) ?*const DataTables.LevelEntityConfig {
     const indices = assets.indexes.levelEntityIndicesById(entity_id);
     if (indices.len > 0) {
-        return &assets.tables.level_entity_config.items[indices[0]];
+        return assets.getLevelEntityByIdx(indices[0]);
     }
     return null;
+}
+
+pub fn getLevelEntityByIdx(assets: *const Assets, idx: u32) ?*const DataTables.LevelEntityConfig {
+    if (assets.tables.level_entity_config.lazy_ctx) |ptr| {
+        const db: *@import("AssetsDb.zig") = @ptrCast(@alignCast(ptr));
+        return db.getLevelEntityByIdx(idx);
+    }
+    if (idx >= assets.tables.level_entity_config.items.len) return null;
+    return &assets.tables.level_entity_config.items[idx];
 }
 
 pub fn findBlueprintConfig(assets: *const Assets, blueprint_type: []const u8) ?*const DataTables.BlueprintConfig {
@@ -119,10 +136,16 @@ pub fn getMotorcycleConfigId(assets: *const Assets) ?i32 {
 }
 
 pub fn deinit(assets: *Assets) void {
+    const db_opt: ?*@import("AssetsDb.zig") = if (assets.tables.level_entity_config.lazy_ctx) |ptr|
+        @ptrCast(@alignCast(ptr))
+    else
+        null;
     assets.reward_index.deinit();
     assets.flow_states.deinit();
     assets.level_play_nodes.deinit();
     assets.quest_nodes.deinit();
     assets.fsm_graphs.deinit();
+    assets.indexes.deinit(assets.tables.arena.child_allocator);
     assets.tables.deinit();
+    if (db_opt) |db| db.deinit();
 }

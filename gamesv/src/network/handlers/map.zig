@@ -894,15 +894,28 @@ pub fn onMapTravelFullRewardRequest(
     txn: *Transaction(pb.MapTravelFullRewardRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    assets: *const Assets,
     progress_comp: *PlayerProgressComponent,
     reward_ctx: RewardService.RewardContext,
+    io: std.Io,
 ) !void {
     if (try progress_comp.info.markClaim(alloc.gpa, "map_travel:full_reward")) {
         try progress_comp.save(fs, alloc.arena);
-        _ = try RewardService.grantItems(reward_ctx, 0, true, &.{
-            .{ .item_id = 3, .count = 160 },
-            .{ .item_id = 2, .count = 30000 },
-        }, 1);
+        const rows = assets.reward_index.getRows(io, "MapTravelLevel");
+        const cfg_key: i64 = if (rows.len > 0) rows[0].key else 1;
+        _ = try RewardService.grantTableReward(
+            reward_ctx,
+            "MapTravelLevel",
+            cfg_key,
+            false,
+            true,
+            1,
+            &.{
+                .{ .item_id = 3, .count = 160 },
+                .{ .item_id = 2, .count = 30000 },
+            },
+            null,
+        );
     }
     txn.respond(.{ .ErrorCode = .Success });
 }

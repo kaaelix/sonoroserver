@@ -61,11 +61,19 @@ pub fn onGetDetectionTargetRequest(
                     if (md.EntityConfigId != 0) {
                         try tids.append(alloc.arena, @intCast(md.EntityConfigId));
                     } else if (md.BlueprintType.len > 0) {
-                        for (assets.tables.level_entity_config.items) |lcfg| {
-                            if (lcfg.MapId != 8) continue;
-                            if (std.mem.eql(u8, lcfg.BlueprintType, md.BlueprintType)) {
-                                try tids.append(alloc.arena, @intCast(lcfg.EntityId));
+                        if (assets.getDb()) |db| {
+                            const found = db.queryEntityIdsByMapBlueprint(8, md.BlueprintType, alloc.arena) catch &.{};
+                            for (found) |eid| {
+                                try tids.append(alloc.arena, eid);
                                 if (tids.items.len >= 32) break;
+                            }
+                        } else {
+                            for (assets.tables.level_entity_config.items) |lcfg| {
+                                if (lcfg.MapId != 8) continue;
+                                if (std.mem.eql(u8, lcfg.BlueprintType, md.BlueprintType)) {
+                                    try tids.append(alloc.arena, @intCast(lcfg.EntityId));
+                                    if (tids.items.len >= 32) break;
+                                }
                             }
                         }
                     }

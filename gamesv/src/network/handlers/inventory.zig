@@ -15,6 +15,7 @@ const PlayerWeaponComponent = @import("../../logic/component/player/PlayerWeapon
 const ConsumeHelper = @import("../../logic/helpers/consume.zig");
 const EnergyHelper = @import("../../logic/helpers/energy.zig");
 const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
+const LevelPlayHelper = @import("../../logic/helpers/level_play.zig");
 const RewardService = @import("../../logic/helpers/reward.zig");
 const RoleHelper = @import("../../logic/helpers/role.zig");
 const RoleStats = @import("../../logic/helpers/role_stats.zig");
@@ -707,6 +708,7 @@ pub fn onNewHandInItemRequest(
     basic_comp: *PlayerBasicComponent,
     inventory_comp: *PlayerInventoryComponent,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     if (txn.message.ProjectionMachine) |pm| {
         if (pm.ItemId > 0) {
@@ -718,7 +720,12 @@ pub fn onNewHandInItemRequest(
             var buf: [48]u8 = undefined;
             const k = try std.fmt.bufPrint(&buf, "handin_pm:{d}", .{pm.EntityCfgId});
             try progress_comp.info.setKeyInt(alloc.gpa, k, pm.ItemId);
+            _ = try progress_comp.info.addKeyInt(alloc.gpa, "handin_pm:cnt", 1);
             try progress_comp.save(fs, alloc.arena);
+            if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+                try LevelPlayHelper.onConditionEvent(lp_ctx, progress_comp, .new_hand_in_items, pm.EntityCfgId, pm.ItemId);
+            }
+            try QuestEngine.onConditionStateChanged(qctx);
         }
     }
     txn.respond(.{ .ErrorCode = .Success });

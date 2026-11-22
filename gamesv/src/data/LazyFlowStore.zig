@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const AssetsDb = @import("AssetsDb.zig");
 
 pub const ByteSpan = struct {
     offset: u64,
@@ -18,13 +19,35 @@ const CacheSlot = struct {
 const CacheState = struct {
     mutex: Io.Mutex = .init,
     slots: std.StringHashMapUnmanaged(CacheSlot) = .empty,
+    order: std.ArrayListUnmanaged([]const u8) = .empty,
 };
+
+const max_cached_flows: usize = 256;
 
 gpa: Allocator,
 index_arena: ArenaAllocator,
 file_path: []const u8,
 state_spans: std.StringHashMapUnmanaged(ByteSpan),
 cache: *CacheState,
+db: ?*AssetsDb = null,
+
+pub fn initWithDb(gpa: Allocator, db: *AssetsDb, file_path: []const u8) !LazyFlowStore {
+    var index_arena = ArenaAllocator.init(gpa);
+    errdefer index_arena.deinit();
+
+    const cache = try gpa.create(CacheState);
+    errdefer gpa.destroy(cache);
+    cache.* = .{};
+
+    return .{
+        .gpa = gpa,
+        .index_arena = index_arena,
+        .file_path = try index_arena.allocator().dupe(u8, file_path),
+        .state_spans = .empty,
+        .cache = cache,
+        .db = db,
+    };
+}
 
 const JsonObjectScanner = struct {
     depth: usize = 0,
@@ -156,11 +179,20 @@ pub fn deinit(self: *LazyFlowStore) void {
         slot.arena.deinit();
     }
     self.cache.slots.deinit(self.gpa);
+    self.cache.order.deinit(self.gpa);
     self.gpa.destroy(self.cache);
     self.index_arena.deinit();
 }
 
 pub fn hasStateKey(self: *const LazyFlowStore, state_key: []const u8) bool {
+    if (self.db) |db| {
+        const tmp = db.queryFlowStateJson(state_key, self.gpa) catch return false;
+        if (tmp) |buf| {
+            self.gpa.free(buf);
+            return true;
+        }
+        return false;
+    }
     return self.state_spans.contains(state_key);
 }
 
@@ -185,27 +217,50 @@ pub fn getStateByKey(self: *const LazyFlowStore, io: Io, state_key: []const u8) 
         return slot.state;
     }
 
-    const span = self.state_spans.get(state_key) orelse return null;
-
     var slot_arena = ArenaAllocator.init(self.gpa);
     errdefer slot_arena.deinit();
     const arena = slot_arena.allocator();
 
-    var file = try Io.Dir.cwd().openFile(io, self.file_path, .{});
-    defer file.close(io);
+    const parsed = if (self.db) |db| blk: {
+        const buf = (try db.queryFlowStateJson(state_key, arena)) orelse {
+            slot_arena.deinit();
+            return null;
+        };
+        break :blk try std.json.parseFromSliceLeaky(
+            std.json.Value,
+            arena,
+            buf,
+            .{ .allocate = .alloc_always },
+        );
+    } else blk: {
+        const span = self.state_spans.get(state_key) orelse {
+            slot_arena.deinit();
+            return null;
+        };
+        var file = try Io.Dir.cwd().openFile(io, self.file_path, .{});
+        defer file.close(io);
 
-    const buf = try arena.alloc(u8, span.len);
-    const read_n = try file.readPositionalAll(io, buf, span.offset);
-    if (read_n != span.len) return error.UnexpectedEof;
+        const buf = try arena.alloc(u8, span.len);
+        const read_n = try file.readPositionalAll(io, buf, span.offset);
+        if (read_n != span.len) return error.UnexpectedEof;
 
-    const parsed = try std.json.parseFromSliceLeaky(
-        std.json.Value,
-        arena,
-        buf,
-        .{ .allocate = .alloc_always },
-    );
+        break :blk try std.json.parseFromSliceLeaky(
+            std.json.Value,
+            arena,
+            buf,
+            .{ .allocate = .alloc_always },
+        );
+    };
 
+    if (self.cache.order.items.len >= max_cached_flows) {
+        const oldest = self.cache.order.orderedRemove(0);
+        if (self.cache.slots.fetchRemove(oldest)) |kv| {
+            var old_arena = kv.value.arena;
+            old_arena.deinit();
+        }
+    }
     const dup_key = try arena.dupe(u8, state_key);
+    try self.cache.order.append(self.gpa, dup_key);
     try self.cache.slots.put(self.gpa, dup_key, .{
         .state_key = dup_key,
         .arena = slot_arena,
