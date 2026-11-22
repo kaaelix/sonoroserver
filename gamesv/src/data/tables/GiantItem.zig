@@ -1,0 +1,5 @@
+Id: i32,
+AddStableValue: i32 = 0,
+Quality: i32 = 0,
+UnlockCondition: i32 = 0,
+GiantEcoType: i32 = 0,

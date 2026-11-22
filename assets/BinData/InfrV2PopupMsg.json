@@ -1,0 +1,135 @@
+[
+  {
+    "Id": 1,
+    "Type": 1,
+    "TreeId": 4,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2051_UI.T_IconRoleHeadCircle256_2051_UI",
+    "Text": "VillageInfr_Tree1_Locking_1"
+  },
+  {
+    "Id": 3,
+    "Type": 2,
+    "TreeId": 4,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2051_UI.T_IconRoleHeadCircle256_2051_UI",
+    "Text": "VillageInfr_Tree1_Tobuilt_1"
+  },
+  {
+    "Id": 5,
+    "Type": 3,
+    "TreeId": 4,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2051_UI.T_IconRoleHeadCircle256_2051_UI",
+    "Text": "VillageInfr_Tree1_Achieve_1"
+  },
+  {
+    "Id": 7,
+    "Type": 4,
+    "TreeId": 4,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Tree1_Finish_1"
+  },
+  {
+    "Id": 9,
+    "Type": 1,
+    "TreeId": 2,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Tree2_Locking_1"
+  },
+  {
+    "Id": 11,
+    "Type": 2,
+    "TreeId": 2,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Tree2_Tobuilt_1"
+  },
+  {
+    "Id": 13,
+    "Type": 3,
+    "TreeId": 2,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Tree2_Achieve_1"
+  },
+  {
+    "Id": 15,
+    "Type": 4,
+    "TreeId": 2,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Tree2_Finish_1"
+  },
+  {
+    "Id": 17,
+    "Type": 1,
+    "TreeId": 1,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Tree3_Locking_1"
+  },
+  {
+    "Id": 19,
+    "Type": 2,
+    "TreeId": 1,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2052_UI.T_IconRoleHeadCircle256_2052_UI",
+    "Text": "VillageInfr_Tree3_Tobuilt_1"
+  },
+  {
+    "Id": 21,
+    "Type": 3,
+    "TreeId": 1,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2052_UI.T_IconRoleHeadCircle256_2052_UI",
+    "Text": "VillageInfr_Tree3_Achieve_1"
+  },
+  {
+    "Id": 23,
+    "Type": 4,
+    "TreeId": 1,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Tree3_Finish_1"
+  },
+  {
+    "Id": 25,
+    "Type": 1,
+    "TreeId": 3,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Tree4_Locking_1"
+  },
+  {
+    "Id": 27,
+    "Type": 2,
+    "TreeId": 3,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2050_UI.T_IconRoleHeadCircle256_2050_UI",
+    "Text": "VillageInfr_Tree4_Tobuilt_1"
+  },
+  {
+    "Id": 29,
+    "Type": 3,
+    "TreeId": 3,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2050_UI.T_IconRoleHeadCircle256_2050_UI",
+    "Text": "VillageInfr_Tree4_Achieve_1"
+  },
+  {
+    "Id": 31,
+    "Type": 4,
+    "TreeId": 3,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Tree4_Finish_1"
+  },
+  {
+    "Id": 33,
+    "Type": 5,
+    "TreeId": 0,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Village_Lacking_1"
+  },
+  {
+    "Id": 35,
+    "Type": 6,
+    "TreeId": 0,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Village_Tobuilt_1"
+  },
+  {
+    "Id": 37,
+    "Type": 7,
+    "TreeId": 0,
+    "HeadTexturePath": "/Game/Aki/UI/UIResources/Common/Image/IconRoleHeadCircle256/T_IconRoleHeadCircle256_2026_UI.T_IconRoleHeadCircle256_2026_UI",
+    "Text": "VillageInfr_Village_Finish_1"
+  }
+]

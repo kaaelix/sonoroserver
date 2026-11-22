@@ -1,0 +1,15 @@
+const IntMap = @import("int_map.zig").IntMap;
+
+Id: i32,
+ItemType: i32 = 0,
+ShowTypes: []const i32 = &.{},
+QualityId: i32 = 0,
+MainTypeId: i32 = 0,
+MaxCapcity: i32 = 0,
+MaxStackableNum: i32 = 99999,
+ShowInBag: bool = false,
+ShowUseButton: bool = false,
+UseCountLimit: i32 = 0,
+UseLevel: i32 = 0,
+Parameters: IntMap(i32, i32) = .{},
+ConvertItems: IntMap(i32, i32) = .{},

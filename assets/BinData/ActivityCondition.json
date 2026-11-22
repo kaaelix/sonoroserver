@@ -1,0 +1,2529 @@
+[
+  {
+    "Id": 10000001,
+    "Type": 1,
+    "Params": {
+      "Attr": "Knowledge",
+      "Min": "5"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 10000002,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5001",
+      "Count": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 10000003,
+    "Type": 1,
+    "Params": {
+      "Attr": "Knowledge",
+      "Min": "10"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 10000004,
+    "Type": 10,
+    "Params": {
+      "ItemId": "11",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 10000005,
+    "Type": 10,
+    "Params": {
+      "ItemId": "12",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 10000006,
+    "Type": 7,
+    "Params": {
+      "Month": "3",
+      "Day": "17",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 10000007,
+    "Type": 7,
+    "Params": {
+      "Month": "3",
+      "Day": "18",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 10000008,
+    "Type": 7,
+    "Params": {
+      "Month": "3",
+      "Day": "19",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 10000009,
+    "Type": 7,
+    "Params": {
+      "Month": "3",
+      "Day": "22",
+      "IncludeSelf": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 10000010,
+    "Type": 7,
+    "Params": {
+      "Month": "4",
+      "Day": "1",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000001,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5001",
+      "Count": "50",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000002,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5003",
+      "Count": "50",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000003,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5005",
+      "Count": "50",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000004,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5007",
+      "Count": "50",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000005,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5009",
+      "Count": "50",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000006,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5011",
+      "Count": "50",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000007,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5015",
+      "Count": "50",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000008,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5017",
+      "Count": "50",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000009,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5021",
+      "Count": "50",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000001,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1001"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000002,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1002"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000003,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1003"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000004,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1004"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000005,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1005"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000006,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1006"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000007,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1007"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000008,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1008"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000009,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1009"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000010,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1010"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000011,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1011"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000012,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1012"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000013,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1013"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000014,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1014"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 14000001,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5001",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000001,
+    "Type": 10,
+    "Params": {
+      "ItemId": "69",
+      "Count": "1"
+    },
+    "Description": "SolarSchoolCondition_19000001"
+  },
+  {
+    "Id": 19000002,
+    "Type": 10,
+    "Params": {
+      "ItemId": "14",
+      "Count": "1"
+    },
+    "Description": "SolarSchoolCondition_19000002"
+  },
+  {
+    "Id": 19000003,
+    "Type": 10,
+    "Params": {
+      "ItemId": "15",
+      "Count": "1"
+    },
+    "Description": "SolarSchoolCondition_19000003"
+  },
+  {
+    "Id": 19000004,
+    "Type": 3,
+    "Params": {
+      "RoleId": "1",
+      "Min": "4"
+    },
+    "Description": "SolarSchoolCondition_19000004"
+  },
+  {
+    "Id": 19000005,
+    "Type": 3,
+    "Params": {
+      "RoleId": "2",
+      "Min": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 14000002,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5005",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 14000003,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5015",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 14000004,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5017",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 14000005,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5011",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 14000006,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5021",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 14000007,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5003",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000006,
+    "Type": 3,
+    "Params": {
+      "RoleId": "4",
+      "Min": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000007,
+    "Type": 3,
+    "Params": {
+      "RoleId": "5",
+      "Min": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000008,
+    "Type": 3,
+    "Params": {
+      "RoleId": "6",
+      "Min": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000009,
+    "Type": 3,
+    "Params": {
+      "RoleId": "7",
+      "Min": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000010,
+    "Type": 3,
+    "Params": {
+      "RoleId": "8",
+      "Min": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000011,
+    "Type": 3,
+    "Params": {
+      "RoleId": "9",
+      "Min": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000012,
+    "Type": 3,
+    "Params": {
+      "RoleId": "10",
+      "Min": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000013,
+    "Type": 3,
+    "Params": {
+      "RoleId": "11",
+      "Min": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000015,
+    "Type": 1,
+    "Params": {
+      "Attr": "Knowledge",
+      "Min": "20000"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000001,
+    "Type": 15,
+    "Params": {
+      "Key": "key1",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000002,
+    "Type": 15,
+    "Params": {
+      "Key": "key2",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000003,
+    "Type": 15,
+    "Params": {
+      "Key": "key3",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000004,
+    "Type": 15,
+    "Params": {
+      "Key": "key4",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000005,
+    "Type": 15,
+    "Params": {
+      "Key": "key5",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 17000001,
+    "Type": 1,
+    "Params": {
+      "Attr": "Thinking",
+      "Min": "1"
+    },
+    "Description": "思维>=1"
+  },
+  {
+    "Id": 17000002,
+    "Type": 1,
+    "Params": {
+      "Attr": "Art",
+      "Min": "1"
+    },
+    "Description": "艺术>=1"
+  },
+  {
+    "Id": 17000003,
+    "Type": 1,
+    "Params": {
+      "Attr": "Emotion",
+      "Min": "1"
+    },
+    "Description": "情感>=1"
+  },
+  {
+    "Id": 17000004,
+    "Type": 1,
+    "Params": {
+      "Attr": "Thinking",
+      "Min": "1"
+    },
+    "Description": "思维>=1"
+  },
+  {
+    "Id": 17000005,
+    "Type": 1,
+    "Params": {
+      "Attr": "Emotion",
+      "Min": "1"
+    },
+    "Description": "情感>=1"
+  },
+  {
+    "Id": 17000006,
+    "Type": 1,
+    "Params": {
+      "Attr": "Art",
+      "Min": "1"
+    },
+    "Description": "艺术>=1"
+  },
+  {
+    "Id": 17000007,
+    "Type": 3,
+    "Params": {
+      "RoleId": "7",
+      "Min": "2"
+    },
+    "Description": "卜灵好感>=2"
+  },
+  {
+    "Id": 17000008,
+    "Type": 3,
+    "Params": {
+      "RoleId": "4",
+      "Min": "2"
+    },
+    "Description": "洛可可好感>=2"
+  },
+  {
+    "Id": 17000009,
+    "Type": 3,
+    "Params": {
+      "RoleId": "7",
+      "Max": "0"
+    },
+    "Description": "卜灵好感<1"
+  },
+  {
+    "Id": 17000010,
+    "Type": 3,
+    "Params": {
+      "RoleId": "4",
+      "Max": "0"
+    },
+    "Description": "洛可可好感<1"
+  },
+  {
+    "Id": 16000001,
+    "Type": 13,
+    "Params": {
+      "Weekdays": "1|2|3|4|5"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000002,
+    "Type": 13,
+    "Params": {
+      "Weekdays": "6|7"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000006,
+    "Type": 15,
+    "Params": {
+      "Key": "key6",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000007,
+    "Type": 15,
+    "Params": {
+      "Key": "key7",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000014,
+    "Type": 3,
+    "Params": {
+      "RoleId": "1",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000015,
+    "Type": 3,
+    "Params": {
+      "RoleId": "2",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000016,
+    "Type": 10,
+    "Params": {
+      "ItemId": "14",
+      "Count": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000017,
+    "Type": 10,
+    "Params": {
+      "ItemId": "15",
+      "Count": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000018,
+    "Type": 1,
+    "Params": {
+      "Attr": "Knowledge",
+      "Min": "1200"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000019,
+    "Type": 1,
+    "Params": {
+      "Attr": "Knowledge",
+      "Min": "700"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000020,
+    "Type": 1,
+    "Params": {
+      "Attr": "Thinking",
+      "Min": "1000"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000021,
+    "Type": 1,
+    "Params": {
+      "Attr": "Thinking",
+      "Min": "700"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000022,
+    "Type": 1,
+    "Params": {
+      "Attr": "Art",
+      "Min": "800"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000023,
+    "Type": 1,
+    "Params": {
+      "Attr": "Art",
+      "Min": "500"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000024,
+    "Type": 1,
+    "Params": {
+      "Attr": "Physique",
+      "Min": "800"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000025,
+    "Type": 1,
+    "Params": {
+      "Attr": "Physique",
+      "Min": "400"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000026,
+    "Type": 1,
+    "Params": {
+      "Attr": "Emotion",
+      "Min": "500"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000027,
+    "Type": 1,
+    "Params": {
+      "Attr": "Emotion",
+      "Min": "200"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000008,
+    "Type": 15,
+    "Params": {
+      "Key": "key8",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000029,
+    "Type": 11,
+    "Params": {
+      "Min＝Max": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000016,
+    "Type": 14,
+    "Params": {
+      "LocationIds": "1004"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000009,
+    "Type": 15,
+    "Params": {
+      "Key": "key9",
+      "Value": "false"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000010,
+    "Type": 15,
+    "Params": {
+      "Key": "key10",
+      "Value": "false"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000011,
+    "Type": 15,
+    "Params": {
+      "Key": "key11",
+      "Value": "false"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000012,
+    "Type": 15,
+    "Params": {
+      "Key": "key12",
+      "Value": "false"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000013,
+    "Type": 15,
+    "Params": {
+      "Key": "key13",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000014,
+    "Type": 15,
+    "Params": {
+      "Key": "key14",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000015,
+    "Type": 15,
+    "Params": {
+      "Key": "key15",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000016,
+    "Type": 15,
+    "Params": {
+      "Key": "key16",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000017,
+    "Type": 18,
+    "Params": {
+      "Expect": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000003,
+    "Type": 3,
+    "Params": {
+      "RoleId": "1",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000004,
+    "Type": 3,
+    "Params": {
+      "RoleId": "1",
+      "Min": "3",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000005,
+    "Type": 3,
+    "Params": {
+      "RoleId": "1",
+      "Min": "4",
+      "Max": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000006,
+    "Type": 3,
+    "Params": {
+      "RoleId": "2",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000007,
+    "Type": 3,
+    "Params": {
+      "RoleId": "2",
+      "Min": "3",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000008,
+    "Type": 3,
+    "Params": {
+      "RoleId": "2",
+      "Min": "4",
+      "Max": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000009,
+    "Type": 3,
+    "Params": {
+      "RoleId": "4",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000010,
+    "Type": 3,
+    "Params": {
+      "RoleId": "4",
+      "Min": "3",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000011,
+    "Type": 3,
+    "Params": {
+      "RoleId": "4",
+      "Min": "4",
+      "Max": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000012,
+    "Type": 3,
+    "Params": {
+      "RoleId": "5",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000013,
+    "Type": 3,
+    "Params": {
+      "RoleId": "5",
+      "Min": "3",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000014,
+    "Type": 3,
+    "Params": {
+      "RoleId": "5",
+      "Min": "4",
+      "Max": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000015,
+    "Type": 3,
+    "Params": {
+      "RoleId": "6",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000016,
+    "Type": 3,
+    "Params": {
+      "RoleId": "6",
+      "Min": "3",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000017,
+    "Type": 3,
+    "Params": {
+      "RoleId": "6",
+      "Min": "4",
+      "Max": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000018,
+    "Type": 3,
+    "Params": {
+      "RoleId": "7",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000019,
+    "Type": 3,
+    "Params": {
+      "RoleId": "7",
+      "Min": "3",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000020,
+    "Type": 3,
+    "Params": {
+      "RoleId": "7",
+      "Min": "4",
+      "Max": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000021,
+    "Type": 3,
+    "Params": {
+      "RoleId": "8",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000022,
+    "Type": 3,
+    "Params": {
+      "RoleId": "8",
+      "Min": "3",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000023,
+    "Type": 3,
+    "Params": {
+      "RoleId": "8",
+      "Min": "4",
+      "Max": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000024,
+    "Type": 3,
+    "Params": {
+      "RoleId": "9",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000025,
+    "Type": 3,
+    "Params": {
+      "RoleId": "9",
+      "Min": "3",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000026,
+    "Type": 3,
+    "Params": {
+      "RoleId": "9",
+      "Min": "4",
+      "Max": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000027,
+    "Type": 3,
+    "Params": {
+      "RoleId": "10",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000028,
+    "Type": 3,
+    "Params": {
+      "RoleId": "10",
+      "Min": "3",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000029,
+    "Type": 3,
+    "Params": {
+      "RoleId": "10",
+      "Min": "4",
+      "Max": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000030,
+    "Type": 3,
+    "Params": {
+      "RoleId": "11",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000031,
+    "Type": 3,
+    "Params": {
+      "RoleId": "11",
+      "Min": "3",
+      "Max": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000032,
+    "Type": 3,
+    "Params": {
+      "RoleId": "11",
+      "Min": "4",
+      "Max": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000033,
+    "Type": 16,
+    "Params": {
+      "InstanceIds": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13000001,
+    "Type": 3,
+    "Params": {
+      "RoleId": "1|2",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": "SolarSchoolQuestGoal_Block1_1"
+  },
+  {
+    "Id": 13000002,
+    "Type": 3,
+    "Params": {
+      "RoleId": "2",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": "SolarSchoolQuestGoal_Block1_2"
+  },
+  {
+    "Id": 13000003,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5001|5003|7001|7002",
+      "Count": "15"
+    },
+    "Description": "SolarSchoolQuestGoal_Block1_3"
+  },
+  {
+    "Id": 13000004,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5005|5007|5009|5011|5013|5015|5017|5019|5021",
+      "Count": "15"
+    },
+    "Description": "SolarSchoolQuestGoal_Block1_4"
+  },
+  {
+    "Id": 13000005,
+    "Type": 12,
+    "Params": {
+      "LocationId": "1001|1002|1003|1004|1005|1006|1007|1008|1009|1010|1011"
+    },
+    "Description": "SolarSchoolQuestGoal_Block1_5"
+  },
+  {
+    "Id": 16000034,
+    "Type": 19,
+    "Params": {
+      "RoleId": "1",
+      "FavorLevel": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000035,
+    "Type": 19,
+    "Params": {
+      "RoleId": "1",
+      "FavorLevel": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000036,
+    "Type": 19,
+    "Params": {
+      "RoleId": "1",
+      "FavorLevel": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000037,
+    "Type": 19,
+    "Params": {
+      "RoleId": "2",
+      "FavorLevel": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000038,
+    "Type": 19,
+    "Params": {
+      "RoleId": "2",
+      "FavorLevel": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000039,
+    "Type": 19,
+    "Params": {
+      "RoleId": "2",
+      "FavorLevel": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000040,
+    "Type": 19,
+    "Params": {
+      "RoleId": "4",
+      "FavorLevel": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000041,
+    "Type": 19,
+    "Params": {
+      "RoleId": "4",
+      "FavorLevel": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000042,
+    "Type": 19,
+    "Params": {
+      "RoleId": "4",
+      "FavorLevel": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000043,
+    "Type": 19,
+    "Params": {
+      "RoleId": "5",
+      "FavorLevel": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000044,
+    "Type": 19,
+    "Params": {
+      "RoleId": "5",
+      "FavorLevel": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000045,
+    "Type": 19,
+    "Params": {
+      "RoleId": "5",
+      "FavorLevel": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000046,
+    "Type": 19,
+    "Params": {
+      "RoleId": "6",
+      "FavorLevel": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000047,
+    "Type": 19,
+    "Params": {
+      "RoleId": "6",
+      "FavorLevel": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000048,
+    "Type": 19,
+    "Params": {
+      "RoleId": "6",
+      "FavorLevel": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000049,
+    "Type": 19,
+    "Params": {
+      "RoleId": "7",
+      "FavorLevel": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000050,
+    "Type": 19,
+    "Params": {
+      "RoleId": "7",
+      "FavorLevel": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000051,
+    "Type": 19,
+    "Params": {
+      "RoleId": "7",
+      "FavorLevel": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000052,
+    "Type": 19,
+    "Params": {
+      "RoleId": "8",
+      "FavorLevel": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000053,
+    "Type": 19,
+    "Params": {
+      "RoleId": "8",
+      "FavorLevel": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000054,
+    "Type": 19,
+    "Params": {
+      "RoleId": "8",
+      "FavorLevel": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000055,
+    "Type": 19,
+    "Params": {
+      "RoleId": "9",
+      "FavorLevel": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000056,
+    "Type": 19,
+    "Params": {
+      "RoleId": "9",
+      "FavorLevel": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000057,
+    "Type": 19,
+    "Params": {
+      "RoleId": "9",
+      "FavorLevel": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000058,
+    "Type": 19,
+    "Params": {
+      "RoleId": "10",
+      "FavorLevel": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000059,
+    "Type": 19,
+    "Params": {
+      "RoleId": "10",
+      "FavorLevel": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000060,
+    "Type": 19,
+    "Params": {
+      "RoleId": "10",
+      "FavorLevel": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000061,
+    "Type": 19,
+    "Params": {
+      "RoleId": "11",
+      "FavorLevel": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000062,
+    "Type": 19,
+    "Params": {
+      "RoleId": "11",
+      "FavorLevel": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000063,
+    "Type": 19,
+    "Params": {
+      "RoleId": "11",
+      "FavorLevel": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13000006,
+    "Type": 8,
+    "Params": {
+      "BehaviorId": "1101",
+      "State": "Finished"
+    },
+    "Description": "SolarSchoolQuestGoal_Block2_1"
+  },
+  {
+    "Id": 13000007,
+    "Type": 8,
+    "Params": {
+      "BehaviorId": "1201",
+      "State": "Finished"
+    },
+    "Description": "SolarSchoolQuestGoal_Block2_2"
+  },
+  {
+    "Id": 13000008,
+    "Type": 1,
+    "Params": {
+      "Attr": "Knowledge",
+      "Min": "80"
+    },
+    "Description": "SolarSchoolQuestGoal_Block2_3"
+  },
+  {
+    "Id": 13000009,
+    "Type": 1,
+    "Params": {
+      "Attr": "Thinking",
+      "Min": "80"
+    },
+    "Description": "SolarSchoolQuestGoal_Block2_4"
+  },
+  {
+    "Id": 13000010,
+    "Type": 1,
+    "Params": {
+      "Attr": "Physique",
+      "Min": "80"
+    },
+    "Description": "SolarSchoolQuestGoal_Block2_5"
+  },
+  {
+    "Id": 13000011,
+    "Type": 1,
+    "Params": {
+      "Attr": "Emotion",
+      "Min": "80"
+    },
+    "Description": "SolarSchoolQuestGoal_Block2_6"
+  },
+  {
+    "Id": 13000012,
+    "Type": 1,
+    "Params": {
+      "Attr": "Art",
+      "Min": "80"
+    },
+    "Description": "SolarSchoolQuestGoal_Block2_7"
+  },
+  {
+    "Id": 13000013,
+    "Type": 1,
+    "Params": {
+      "Attr": "Popularity",
+      "Min": "20"
+    },
+    "Description": "SolarSchoolQuestGoal_Block2_8"
+  },
+  {
+    "Id": 13000014,
+    "Type": 3,
+    "Params": {
+      "RoleId": "4",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13000015,
+    "Type": 3,
+    "Params": {
+      "RoleId": "8",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000017,
+    "Type": 15,
+    "Params": {
+      "Key": "key17",
+      "Value": "false"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000018,
+    "Type": 15,
+    "Params": {
+      "Key": "key18",
+      "Value": "false"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000019,
+    "Type": 15,
+    "Params": {
+      "Key": "key19",
+      "Value": "false"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13000016,
+    "Type": 3,
+    "Params": {
+      "RoleId": "11",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 17000011,
+    "Type": 1,
+    "Params": {
+      "Attr": "Money",
+      "Min": "1"
+    },
+    "Description": "金钱数量＞1"
+  },
+  {
+    "Id": 16000064,
+    "Type": 19,
+    "Params": {
+      "RoleId": "3",
+      "FavorLevel": "3"
+    },
+    "Description": "SolarSchool_Shouanren"
+  },
+  {
+    "Id": 16000065,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "2",
+      "Min": "1"
+    },
+    "Description": "SolarSchool_Xiaoka"
+  },
+  {
+    "Id": 16000066,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "1",
+      "Min": "1"
+    },
+    "Description": "SolarSchool_Changli"
+  },
+  {
+    "Id": 13100001,
+    "Type": 7,
+    "Params": {
+      "Month": "3",
+      "Day": "16",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100002,
+    "Type": 7,
+    "Params": {
+      "Month": "4",
+      "Day": "12",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100003,
+    "Type": 7,
+    "Params": {
+      "Month": "4",
+      "Day": "15",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100004,
+    "Type": 7,
+    "Params": {
+      "Month": "5",
+      "Day": "23",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100005,
+    "Type": 7,
+    "Params": {
+      "Month": "5",
+      "Day": "24",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100006,
+    "Type": 7,
+    "Params": {
+      "Month": "7",
+      "Day": "1",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100007,
+    "Type": 7,
+    "Params": {
+      "Month": "7",
+      "Day": "2",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100008,
+    "Type": 7,
+    "Params": {
+      "Month": "7",
+      "Day": "6",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100009,
+    "Type": 7,
+    "Params": {
+      "Month": "9",
+      "Day": "1",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100010,
+    "Type": 7,
+    "Params": {
+      "Month": "9",
+      "Day": "26",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100011,
+    "Type": 7,
+    "Params": {
+      "Month": "11",
+      "Day": "1",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100012,
+    "Type": 7,
+    "Params": {
+      "Month": "12",
+      "Day": "28",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100013,
+    "Type": 7,
+    "Params": {
+      "Month": "12",
+      "Day": "31",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13100014,
+    "Type": 7,
+    "Params": {
+      "Month": "3",
+      "Day": "16",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100001,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "1",
+      "Level": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100002,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "1",
+      "Level": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100003,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "1",
+      "Level": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100004,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "2",
+      "Level": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100005,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "2",
+      "Level": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100006,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "2",
+      "Level": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100007,
+    "Type": 21,
+    "Params": {
+      "TimeSlots": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100008,
+    "Type": 21,
+    "Params": {
+      "TimeSlots": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100009,
+    "Type": 21,
+    "Params": {
+      "TimeSlots": "3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100010,
+    "Type": 21,
+    "Params": {
+      "TimeSlots": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100011,
+    "Type": 21,
+    "Params": {
+      "TimeSlots": "5"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100012,
+    "Type": 11,
+    "Params": {
+      "Min": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13200001,
+    "Type": 7,
+    "Params": {
+      "Month": "3",
+      "Day": "19",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13200002,
+    "Type": 15,
+    "Params": {
+      "Key": "key23",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13200003,
+    "Type": 7,
+    "Params": {
+      "Month": "5",
+      "Day": "24",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13200004,
+    "Type": 7,
+    "Params": {
+      "Month": "7",
+      "Day": "1",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13200005,
+    "Type": 7,
+    "Params": {
+      "Month": "7",
+      "Day": "2",
+      "IncludeSelf": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 12000018,
+    "Type": 7,
+    "Params": {
+      "StartMonth": "7",
+      "StartDay": "13",
+      "EndMonth": "12",
+      "EndDay": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000010,
+    "Type": 22,
+    "Params": {
+      "BehaviorId": "5002",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000011,
+    "Type": 22,
+    "Params": {
+      "BehaviorId": "5004",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000012,
+    "Type": 22,
+    "Params": {
+      "BehaviorId": "5006",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000013,
+    "Type": 22,
+    "Params": {
+      "BehaviorId": "5008",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000014,
+    "Type": 22,
+    "Params": {
+      "BehaviorId": "5010",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000015,
+    "Type": 22,
+    "Params": {
+      "BehaviorId": "5012",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000016,
+    "Type": 22,
+    "Params": {
+      "BehaviorId": "5014",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000017,
+    "Type": 22,
+    "Params": {
+      "BehaviorId": "5016",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000018,
+    "Type": 22,
+    "Params": {
+      "BehaviorId": "5018",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 11000019,
+    "Type": 22,
+    "Params": {
+      "BehaviorId": "5020",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13000023,
+    "Type": 3,
+    "Params": {
+      "RoleId": "1",
+      "Min": "2",
+      "Max": "2"
+    },
+    "Description": "SolarSchoolQuestGoal_Block1_6"
+  },
+  {
+    "Id": 13000017,
+    "Type": 24,
+    "Params": {
+      "Attr": "8",
+      "Count": "2500"
+    },
+    "Description": "SolarSchoolQuestGoal_Block3_1"
+  },
+  {
+    "Id": 13000018,
+    "Type": 1,
+    "Params": {
+      "Attr": "Art",
+      "Min": "120"
+    },
+    "Description": "SolarSchoolQuestGoal_Block3_2"
+  },
+  {
+    "Id": 13000019,
+    "Type": 1,
+    "Params": {
+      "Attr": "Knowledge",
+      "Min": "120"
+    },
+    "Description": "SolarSchoolQuestGoal_Block3_3"
+  },
+  {
+    "Id": 13000020,
+    "Type": 9,
+    "Params": {
+      "Count": "1"
+    },
+    "Description": "SolarSchoolQuestGoal_Block3_4"
+  },
+  {
+    "Id": 13000021,
+    "Type": 7,
+    "Params": {
+      "Month": "6",
+      "Day": "14",
+      "IncludeSelf": "1"
+    },
+    "Description": "SolarSchoolQuestGoal_Block3_5"
+  },
+  {
+    "Id": 13000022,
+    "Type": 28,
+    "Params": {
+      "QuestNodeId": "170001|170002|170003|170004|170005|170006",
+      "Count": "1"
+    },
+    "Description": "SolarSchoolQuestGoal_Block3_6"
+  },
+  {
+    "Id": 13000024,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "1",
+      "Level": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13000025,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "2",
+      "Level": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13000026,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "1",
+      "Level": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13000027,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "2",
+      "Level": "2"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600001,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5009",
+      "Count": "25",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600002,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5009",
+      "Count": "40",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600003,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5010",
+      "Count": "10",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600004,
+    "Type": 15,
+    "Params": {
+      "Key": "key24",
+      "Value": "false"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600005,
+    "Type": 15,
+    "Params": {
+      "Key": "key25",
+      "Value": "false"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13610001,
+    "Type": 6,
+    "Params": {
+      "StartMonth": "4",
+      "StartDay": "1",
+      "EndMonth": "7",
+      "EndDay": "4"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13610002,
+    "Type": 6,
+    "Params": {
+      "StartMonth": "7",
+      "StartDay": "4",
+      "EndMonth": "9",
+      "EndDay": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13610003,
+    "Type": 6,
+    "Params": {
+      "StartMonth": "9",
+      "StartDay": "1",
+      "EndMonth": "11",
+      "EndDay": "23"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600006,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5005",
+      "Count": "18",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600007,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5006",
+      "Count": "8",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600008,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5007",
+      "Count": "18",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600009,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5008",
+      "Count": "8",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600010,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5009",
+      "Count": "18",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600011,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5010",
+      "Count": "8",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600012,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5022",
+      "Count": "3",
+      "OnlySuccess": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600013,
+    "Type": 22,
+    "Params": {
+      "BehaviorId": "5022",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600014,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5015",
+      "Count": "13",
+      "OnlySuccess": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600015,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5017",
+      "Count": "13",
+      "OnlySuccess": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600016,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5019",
+      "Count": "15",
+      "OnlySuccess": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600017,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5011",
+      "Count": "12",
+      "OnlySuccess": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 13600018,
+    "Type": 2,
+    "Params": {
+      "BehaviorId": "5013",
+      "Count": "12",
+      "OnlySuccess": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100013,
+    "Type": 11,
+    "Params": {
+      "Min＝Max": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100014,
+    "Type": 28,
+    "Params": {
+      "QuestNodeId": "120008",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 15100015,
+    "Type": 28,
+    "Params": {
+      "QuestNodeId": "120011",
+      "Count": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000031,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "1",
+      "Min": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000032,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "2",
+      "Min": "1"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000033,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "1",
+      "Max": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 19000034,
+    "Type": 23,
+    "Params": {
+      "InfluenceId": "2",
+      "Max": "0"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000020,
+    "Type": 15,
+    "Params": {
+      "Key": "key20",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000021,
+    "Type": 15,
+    "Params": {
+      "Key": "key17",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000022,
+    "Type": 15,
+    "Params": {
+      "Key": "key18",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000023,
+    "Type": 15,
+    "Params": {
+      "Key": "key21",
+      "Value": "false"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000024,
+    "Type": 15,
+    "Params": {
+      "Key": "key21",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 18000025,
+    "Type": 15,
+    "Params": {
+      "Key": "key22",
+      "Value": "true"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 17000012,
+    "Type": 1,
+    "Params": {
+      "Attr": "Money",
+      "Min": "1"
+    },
+    "Description": "金钱数量＞500"
+  },
+  {
+    "Id": 17000013,
+    "Type": 1,
+    "Params": {
+      "Attr": "Money",
+      "Min": "1"
+    },
+    "Description": "金钱数量＞500"
+  },
+  {
+    "Id": 16000067,
+    "Type": 21,
+    "Params": {
+      "TimeSlots": "2|3"
+    },
+    "Description": ""
+  },
+  {
+    "Id": 16000068,
+    "Type": 21,
+    "Params": {
+      "TimeSlots": "4"
+    },
+    "Description": ""
+  }
+]

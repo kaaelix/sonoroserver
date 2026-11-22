@@ -1,0 +1,195 @@
+[
+  {
+    "InstId": 8040,
+    "FirstReadEntrys": [],
+    "HotEntryUnlockCond": {
+      "2": {
+        "ArrayInt": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      }
+    },
+    "UnlockTips": {
+      "2": "Rogue_Heat_UnlockTips_101"
+    },
+    "InstIcon": "/Game/Aki/UI/UIResources/Common/Image/ComImg/T_ComRomeText_01.T_ComRomeText_01",
+    "SpecialBossIndex": 0
+  },
+  {
+    "InstId": 8041,
+    "FirstReadEntrys": [
+      1,
+      2
+    ],
+    "HotEntryUnlockCond": {
+      "3": {
+        "ArrayInt": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      }
+    },
+    "UnlockTips": {
+      "3": "Rogue_Heat_UnlockTips_102"
+    },
+    "InstIcon": "/Game/Aki/UI/UIResources/Common/Image/ComImg/T_ComRomeText_02.T_ComRomeText_02",
+    "SpecialBossIndex": 0
+  },
+  {
+    "InstId": 8042,
+    "FirstReadEntrys": [
+      2,
+      3
+    ],
+    "HotEntryUnlockCond": {
+      "4": {
+        "ArrayInt": [
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      }
+    },
+    "UnlockTips": {
+      "4": "Rogue_Heat_UnlockTips_103"
+    },
+    "InstIcon": "/Game/Aki/UI/UIResources/Common/Image/ComImg/T_ComRomeText_03.T_ComRomeText_03",
+    "SpecialBossIndex": 0
+  },
+  {
+    "InstId": 8043,
+    "FirstReadEntrys": [
+      3,
+      6
+    ],
+    "HotEntryUnlockCond": {
+      "6": {
+        "ArrayInt": [
+          7,
+          8
+        ]
+      },
+      "8": {
+        "ArrayInt": [
+          9,
+          10
+        ]
+      }
+    },
+    "UnlockTips": {
+      "7": "Rogue_Heat_UnlockTips_1",
+      "9": "Rogue_Heat_UnlockTips_2"
+    },
+    "InstIcon": "/Game/Aki/UI/UIResources/Common/Image/ComImg/T_ComRomeText_04_Red.T_ComRomeText_04_Red",
+    "SpecialBossIndex": 0
+  },
+  {
+    "InstId": 8039,
+    "FirstReadEntrys": [
+      1
+    ],
+    "HotEntryUnlockCond": {},
+    "UnlockTips": {},
+    "InstIcon": "",
+    "SpecialBossIndex": 0
+  },
+  {
+    "InstId": 8047,
+    "FirstReadEntrys": [],
+    "HotEntryUnlockCond": {
+      "2": {
+        "ArrayInt": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
+    },
+    "UnlockTips": {
+      "22": "Rogue_Heat_UnlockTips_201"
+    },
+    "InstIcon": "/Game/Aki/UI/UIResources/Common/Image/ComImg/T_ComRomeText_01.T_ComRomeText_01",
+    "SpecialBossIndex": 0
+  },
+  {
+    "InstId": 8048,
+    "FirstReadEntrys": [
+      21,
+      22
+    ],
+    "HotEntryUnlockCond": {
+      "3": {
+        "ArrayInt": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
+    },
+    "UnlockTips": {
+      "23": "Rogue_Heat_UnlockTips_202"
+    },
+    "InstIcon": "/Game/Aki/UI/UIResources/Common/Image/ComImg/T_ComRomeText_02.T_ComRomeText_02",
+    "SpecialBossIndex": 0
+  },
+  {
+    "InstId": 8049,
+    "FirstReadEntrys": [
+      22,
+      24
+    ],
+    "HotEntryUnlockCond": {
+      "4": {
+        "ArrayInt": [
+          5,
+          6
+        ]
+      },
+      "6": {
+        "ArrayInt": [
+          7,
+          8
+        ]
+      }
+    },
+    "UnlockTips": {
+      "25": "Rogue_Heat_UnlockTips_203",
+      "27": "Rogue_Heat_UnlockTips_204"
+    },
+    "InstIcon": "/Game/Aki/UI/UIResources/Common/Image/ComImg/T_ComRomeText_03.T_ComRomeText_03",
+    "SpecialBossIndex": 0
+  },
+  {
+    "InstId": 8046,
+    "FirstReadEntrys": [],
+    "HotEntryUnlockCond": {},
+    "UnlockTips": {},
+    "InstIcon": "/Game/Aki/UI/UIResources/Common/Image/ComImg/T_ComRomeText_03.T_ComRomeText_03",
+    "SpecialBossIndex": 5
+  }
+]

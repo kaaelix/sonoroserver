@@ -1,0 +1,30 @@
+[
+  {
+    "Id": 1,
+    "Activity": 107500003,
+    "Index": 1,
+    "Score": 100,
+    "DropId": 5211109
+  },
+  {
+    "Id": 2,
+    "Activity": 107500003,
+    "Index": 2,
+    "Score": 200,
+    "DropId": 5211110
+  },
+  {
+    "Id": 3,
+    "Activity": 107500003,
+    "Index": 3,
+    "Score": 300,
+    "DropId": 5211111
+  },
+  {
+    "Id": 4,
+    "Activity": 107500003,
+    "Index": 4,
+    "Score": 400,
+    "DropId": 5211112
+  }
+]

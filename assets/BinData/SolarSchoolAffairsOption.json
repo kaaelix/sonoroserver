@@ -1,0 +1,20 @@
+[
+  {
+    "Id": 1,
+    "GroupId": 1,
+    "DescKey": "Affairs_Opt_1",
+    "Reward": 1001
+  },
+  {
+    "Id": 2,
+    "GroupId": 1,
+    "DescKey": "Affairs_Opt_2",
+    "Reward": 1003
+  },
+  {
+    "Id": 3,
+    "GroupId": 1,
+    "DescKey": "Affairs_Opt_3",
+    "Reward": 1003
+  }
+]

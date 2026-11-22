@@ -1,0 +1,5 @@
+Id: i32,
+WeatherType: i32 = 1,
+PhotoWeatherType: i32 = 1,
+Type: i32 = 1,
+DAPath: []const u8 = "",

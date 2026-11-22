@@ -1,0 +1,5 @@
+Id: i32,
+Category: i32 = 0,
+Sort: i32 = 0,
+DropId: i32 = 0,
+Enable: bool = true,

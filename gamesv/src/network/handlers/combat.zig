@@ -1,0 +1,224 @@
+const std = @import("std");
+const pb = @import("proto").pb;
+const Transaction = @import("../handlers.zig").Transaction;
+const mem = @import("../../mem.zig");
+const State = @import("../State.zig");
+const EventQueue = @import("../../logic/EventQueue.zig");
+const quest_types = @import("../../logic/helpers/quest_types.zig");
+
+const log = std.log.scoped(.combat);
+
+const combat_namespaces: []const type = &.{
+    @import("role.zig"),
+    @import("skill.zig"),
+    @import("damage.zig"),
+    @import("buff.zig"),
+    @import("time.zig"),
+    @import("fsm.zig"),
+    @import("attach.zig"),
+    @import("combat_envelope_handlers.zig"),
+};
+
+pub fn CombatRequestTxn(comptime Tag: anytype) type {
+    const MessageUnion = @FieldType(pb.CombatRequestData, "Message");
+    const RequestUnion = @typeInfo(@FieldType(MessageUnion, @tagName(Tag))).optional.child;
+    const req_name = @tagName(Tag);
+    const resp_tag_name = req_name[0 .. req_name.len - "Request".len] ++ "Response";
+
+    return struct {
+        pub const RequestPayload = RequestUnion;
+        pub const ResponseTag = resp_tag_name;
+
+        common: ?pb.CombatCommon,
+        request_id: i32,
+        payload: RequestPayload,
+        receive_data_pack: *std.ArrayList(pb.CombatReceiveData),
+        response: ?pb.CombatResponseData = null,
+
+        pub fn respond(self: *@This(), msg: anytype) void {
+            const ResponseMessageUnion = @typeInfo(@FieldType(pb.CombatResponseData, "Message")).optional.child;
+            const ResponsePayload = @typeInfo(@FieldType(ResponseMessageUnion, resp_tag_name)).optional.child;
+
+            var payload: ResponsePayload = std.mem.zeroes(ResponsePayload);
+            inline for (comptime std.meta.fields(@TypeOf(msg))) |field| {
+                @field(payload, field.name) = @field(msg, field.name);
+            }
+
+            self.response = .{
+                .CombatCommon = self.common,
+                .RequestId = self.request_id,
+                .Message = @unionInit(
+                    ResponseMessageUnion,
+                    resp_tag_name,
+                    payload,
+                ),
+            };
+        }
+    };
+}
+
+pub fn dispatch(
+    comptime DataType: type,
+    data: DataType,
+    state: *State,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    events: *EventQueue,
+    receive_data_pack: ?*std.ArrayList(pb.CombatReceiveData),
+) !?pb.CombatReceiveData {
+    const is_request = DataType == pb.CombatRequestData;
+
+    @setEvalBranchQuota(100_000);
+    const msg = data.Message orelse return null;
+
+    switch (msg) {
+        inline else => |payload, tag| {
+            const inner = payload orelse return null;
+
+            const handler = comptime blk: {
+                for (combat_namespaces) |ns| {
+                    if (@hasDecl(ns, @tagName(tag))) break :blk @field(ns, @tagName(tag));
+                }
+                break :blk {};
+            };
+
+            if (comptime @TypeOf(handler) == void) {
+                if (comptime is_request) {
+                    if (defaultCombatResponse(tag, data)) |resp| {
+                        log.debug("sent default combat response for: {s}", .{@tagName(tag)});
+                        return resp;
+                    }
+                }
+                log.debug("ignored combat push: {s}", .{@tagName(tag)});
+                return null;
+            }
+
+            const target_fn = comptime handler;
+            const Args = std.meta.ArgsTuple(@TypeOf(target_fn));
+            var args: Args = undefined;
+
+            if (comptime is_request) {
+                var txn: CombatRequestTxn(tag) = .{
+                    .common = data.CombatCommon,
+                    .request_id = data.RequestId,
+                    .payload = inner,
+                    .receive_data_pack = receive_data_pack.?,
+                };
+                args[0] = &txn;
+
+                inline for (comptime std.meta.fields(Args)[1..], 1..) |param, i| {
+                    if (param.type == *EventQueue)
+                        args[i] = events
+                    else if (param.type == quest_types.QuestContext)
+                        args[i] = state.questContext(gpa, io, events)
+                    else
+                        args[i] = try state.extract(gpa, io, param.type);
+                }
+
+                try @call(.auto, target_fn, args);
+
+                if (txn.response) |resp| {
+                    return .{ .Message = .{ .CombatResponseData = resp } };
+                }
+            } else {
+                args[0] = inner;
+
+                inline for (comptime std.meta.fields(Args)[1..], 1..) |param, i| {
+                    if (param.type == *EventQueue)
+                        args[i] = events
+                    else if (param.type == quest_types.QuestContext)
+                        args[i] = state.questContext(gpa, io, events)
+                    else if (param.type == *std.ArrayList(pb.CombatReceiveData))
+                        args[i] = receive_data_pack.?
+                    else if (param.type == ?pb.CombatCommon)
+                        args[i] = data.CombatCommon
+                    else
+                        args[i] = try state.extract(gpa, io, param.type);
+                }
+
+                try @call(.auto, target_fn, args);
+            }
+
+            // log.debug("handled combat message of type: {s}", .{@tagName(tag)});
+
+            return null;
+        },
+    }
+}
+
+pub fn onCombatSendPackRequest(
+    txn: *Transaction(pb.CombatSendPackRequest),
+    state: *State,
+    alloc: mem.Alloc,
+    io: std.Io,
+    events: *EventQueue,
+) !void {
+    var receive_data_pack: std.ArrayList(pb.CombatReceiveData) = .empty;
+
+    for (txn.message.Data.items) |message| {
+        const inner = message.Message orelse continue;
+        switch (inner) {
+            .Push => |maybe_push| {
+                const push = maybe_push orelse continue;
+                _ = try dispatch(pb.CombatPushData, push, state, alloc.gpa, io, events, &receive_data_pack);
+            },
+            .Request => |maybe_req| {
+                const req = maybe_req orelse continue;
+                if (try dispatch(pb.CombatRequestData, req, state, alloc.gpa, io, events, &receive_data_pack)) |response| {
+                    try receive_data_pack.append(state.arena.allocator(), response);
+                }
+            },
+        }
+    }
+
+    txn.respond(.{ .ReceivePackNotify = .{ .Data = receive_data_pack } });
+
+    if (state.scene) |*scene| {
+        if (scene.pending_killed_removals.items.len > 0) {
+            var remove_infos: std.ArrayList(pb.EntityRemoveInfo) = .empty;
+            var write_idx: usize = 0;
+            for (scene.pending_killed_removals.items) |eid| {
+                if (scene.net_id_map.get(eid) == null) continue;
+                scene.remove(alloc.gpa, state.fs, eid) catch {
+                    scene.pending_killed_removals.items[write_idx] = eid;
+                    write_idx += 1;
+                    continue;
+                };
+                try remove_infos.append(state.arena.allocator(), .{
+                    .EntityId = eid,
+                    .Type = .HpIsZero,
+                });
+            }
+            scene.pending_killed_removals.shrinkRetainingCapacity(write_idx);
+            if (remove_infos.items.len > 0) {
+                state.conn.pushBestEffort(alloc.gpa, io, pb.EntityRemoveNotify{
+                    .IsRemove = true,
+                    .RemoveInfos = remove_infos,
+                });
+            }
+        }
+    }
+}
+
+fn defaultCombatResponse(comptime tag: anytype, data: pb.CombatRequestData) ?pb.CombatReceiveData {
+    const req_name = @tagName(tag);
+    if (!comptime std.mem.endsWith(u8, req_name, "Request")) return null;
+    const resp_tag_name = req_name[0 .. req_name.len - "Request".len] ++ "Response";
+    const ResponseMessageUnion = @typeInfo(@FieldType(pb.CombatResponseData, "Message")).optional.child;
+    if (!comptime @hasField(ResponseMessageUnion, resp_tag_name)) return null;
+
+    const ResponsePayload = @typeInfo(@FieldType(ResponseMessageUnion, resp_tag_name)).optional.child;
+    var payload: ResponsePayload = .default;
+    if (comptime @hasField(ResponsePayload, "ErrorCode")) {
+        payload.ErrorCode = .Success;
+    }
+    return .{
+        .Message = .{
+            .CombatResponseData = .{
+                .CombatCommon = data.CombatCommon,
+                .RequestId = data.RequestId,
+                .Message = @unionInit(ResponseMessageUnion, resp_tag_name, payload),
+            },
+        },
+    };
+}

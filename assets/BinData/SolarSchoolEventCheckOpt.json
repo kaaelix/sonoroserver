@@ -1,0 +1,1404 @@
+[
+  {
+    "Id": 1,
+    "GroupId": 1,
+    "DescKey": "SolarSchoolEventCheck_Opt_3_1",
+    "AttrRequire": [
+      30,
+      30,
+      30,
+      30,
+      30
+    ],
+    "FocusAttr": [
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_3_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_3_1_Fail",
+    "RewardSuccess": 1001,
+    "RewardFail": 1002,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 2,
+    "GroupId": 1,
+    "DescKey": "SolarSchoolEventCheck_Opt_3_2",
+    "AttrRequire": [
+      30,
+      30,
+      30,
+      30,
+      30
+    ],
+    "FocusAttr": [
+      3
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_3_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_3_2_Fail",
+    "RewardSuccess": 1001,
+    "RewardFail": 1002,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 3,
+    "GroupId": 1,
+    "DescKey": "SolarSchoolEventCheck_Opt_3_3",
+    "AttrRequire": [
+      30,
+      30,
+      30,
+      30,
+      30
+    ],
+    "FocusAttr": [
+      1
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_3_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_3_3_Fail",
+    "RewardSuccess": 1001,
+    "RewardFail": 1002,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 4,
+    "GroupId": 2,
+    "DescKey": "SolarSchoolEventCheck_Opt_4_1",
+    "AttrRequire": [
+      122,
+      122,
+      198,
+      198,
+      44
+    ],
+    "FocusAttr": [
+      3
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_4_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_4_1_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 5,
+    "GroupId": 2,
+    "DescKey": "SolarSchoolEventCheck_Opt_4_2",
+    "AttrRequire": [
+      140,
+      140,
+      162,
+      162,
+      44
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_4_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_4_2_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 6,
+    "GroupId": 2,
+    "DescKey": "SolarSchoolEventCheck_Opt_4_3",
+    "AttrRequire": [
+      140,
+      140,
+      119,
+      119,
+      52
+    ],
+    "FocusAttr": [
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_4_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_4_3_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 7,
+    "GroupId": 3,
+    "DescKey": "SolarSchoolEventCheck_Opt_5_1",
+    "AttrRequire": [
+      152,
+      152,
+      131,
+      131,
+      60
+    ],
+    "FocusAttr": [
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_5_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_5_1_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 8,
+    "GroupId": 3,
+    "DescKey": "SolarSchoolEventCheck_Opt_5_2",
+    "AttrRequire": [
+      194,
+      194,
+      131,
+      131,
+      46
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_5_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_5_2_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 9,
+    "GroupId": 3,
+    "DescKey": "SolarSchoolEventCheck_Opt_5_3",
+    "AttrRequire": [
+      248,
+      248,
+      101,
+      101,
+      46
+    ],
+    "FocusAttr": [
+      1
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_5_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_5_3_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 10,
+    "GroupId": 4,
+    "DescKey": "SolarSchoolEventCheck_Opt_6_1",
+    "AttrRequire": [
+      30,
+      30,
+      30,
+      30,
+      30
+    ],
+    "FocusAttr": [
+      1,
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_6_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_6_1_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 11,
+    "GroupId": 4,
+    "DescKey": "SolarSchoolEventCheck_Opt_6_2",
+    "AttrRequire": [
+      30,
+      30,
+      30,
+      30,
+      30
+    ],
+    "FocusAttr": [
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_6_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_6_2_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 12,
+    "GroupId": 4,
+    "DescKey": "SolarSchoolEventCheck_Opt_6_3",
+    "AttrRequire": [
+      30,
+      30,
+      30,
+      30,
+      30
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_6_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_6_3_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 13,
+    "GroupId": 5,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_1",
+    "AttrRequire": [
+      93,
+      93,
+      42,
+      42,
+      36
+    ],
+    "FocusAttr": [
+      1,
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_1_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 14,
+    "GroupId": 5,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_2",
+    "AttrRequire": [
+      42,
+      42,
+      75,
+      75,
+      34
+    ],
+    "FocusAttr": [
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_2_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 15,
+    "GroupId": 5,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_3",
+    "AttrRequire": [
+      66,
+      66,
+      60,
+      60,
+      36
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_3_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 16,
+    "GroupId": 6,
+    "DescKey": "SolarSchoolEventCheck_Opt_8_1",
+    "AttrRequire": [
+      121,
+      121,
+      55,
+      55,
+      47
+    ],
+    "FocusAttr": [
+      1,
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_8_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_8_1_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 17,
+    "GroupId": 6,
+    "DescKey": "SolarSchoolEventCheck_Opt_8_2",
+    "AttrRequire": [
+      55,
+      55,
+      98,
+      98,
+      45
+    ],
+    "FocusAttr": [
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_8_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_8_2_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 18,
+    "GroupId": 6,
+    "DescKey": "SolarSchoolEventCheck_Opt_8_3",
+    "AttrRequire": [
+      86,
+      86,
+      78,
+      78,
+      47
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_8_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_8_3_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 19,
+    "GroupId": 7,
+    "DescKey": "SolarSchoolEventCheck_Opt_9_1",
+    "AttrRequire": [
+      186,
+      186,
+      84,
+      84,
+      72
+    ],
+    "FocusAttr": [
+      1,
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_9_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_9_1_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 20,
+    "GroupId": 7,
+    "DescKey": "SolarSchoolEventCheck_Opt_9_2",
+    "AttrRequire": [
+      84,
+      84,
+      150,
+      150,
+      68
+    ],
+    "FocusAttr": [
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_9_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_9_2_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 21,
+    "GroupId": 7,
+    "DescKey": "SolarSchoolEventCheck_Opt_9_3",
+    "AttrRequire": [
+      132,
+      132,
+      120,
+      120,
+      72
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_9_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_9_3_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 22,
+    "GroupId": 8,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_1",
+    "AttrRequire": [
+      313,
+      313,
+      361,
+      361,
+      61
+    ],
+    "FocusAttr": [
+      3,
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_1_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 23,
+    "GroupId": 8,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_2",
+    "AttrRequire": [
+      352,
+      352,
+      216,
+      216,
+      81
+    ],
+    "FocusAttr": [
+      1,
+      3
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_2_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 24,
+    "GroupId": 8,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_3",
+    "AttrRequire": [
+      352,
+      352,
+      301,
+      301,
+      61
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_3_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 25,
+    "GroupId": 9,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_1",
+    "AttrRequire": [
+      586,
+      586,
+      180,
+      180,
+      67
+    ],
+    "FocusAttr": [
+      1,
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_1_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 26,
+    "GroupId": 9,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_2",
+    "AttrRequire": [
+      382,
+      382,
+      246,
+      246,
+      101
+    ],
+    "FocusAttr": [
+      3,
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_2_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 27,
+    "GroupId": 9,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_3",
+    "AttrRequire": [
+      502,
+      502,
+      246,
+      246,
+      67
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_3_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 28,
+    "GroupId": 10,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_1",
+    "AttrRequire": [
+      431,
+      431,
+      676,
+      676,
+      104
+    ],
+    "FocusAttr": [
+      3,
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_1_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 29,
+    "GroupId": 10,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_2",
+    "AttrRequire": [
+      506,
+      506,
+      419,
+      419,
+      144
+    ],
+    "FocusAttr": [
+      3,
+      1
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_2_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 30,
+    "GroupId": 10,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_3",
+    "AttrRequire": [
+      506,
+      506,
+      577,
+      577,
+      104
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_3_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 31,
+    "GroupId": 11,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_1",
+    "AttrRequire": [
+      1041,
+      1041,
+      346,
+      346,
+      115
+    ],
+    "FocusAttr": [
+      1,
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_1_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 32,
+    "GroupId": 11,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_2",
+    "AttrRequire": [
+      547,
+      547,
+      460,
+      460,
+      171
+    ],
+    "FocusAttr": [
+      2,
+      3
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_2_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 33,
+    "GroupId": 11,
+    "DescKey": "SolarSchoolEventCheck_Opt_7_3",
+    "AttrRequire": [
+      855,
+      855,
+      460,
+      460,
+      115
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_7_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_7_3_Fail",
+    "RewardSuccess": 0,
+    "RewardFail": 0,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 10
+  },
+  {
+    "Id": 34,
+    "GroupId": 12,
+    "DescKey": "SolarSchoolEventCheck_Opt_14_1",
+    "AttrRequire": [
+      765,
+      765,
+      302,
+      302,
+      87
+    ],
+    "FocusAttr": [
+      1,
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_14_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_14_1_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 35,
+    "GroupId": 12,
+    "DescKey": "SolarSchoolEventCheck_Opt_14_2",
+    "AttrRequire": [
+      386,
+      386,
+      516,
+      516,
+      79
+    ],
+    "FocusAttr": [
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_14_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_14_2_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 36,
+    "GroupId": 12,
+    "DescKey": "SolarSchoolEventCheck_Opt_14_3",
+    "AttrRequire": [
+      657,
+      657,
+      389,
+      389,
+      87
+    ],
+    "FocusAttr": [
+      3,
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_14_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_14_3_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 37,
+    "GroupId": 13,
+    "DescKey": "SolarSchoolEventCheck_Opt_15_1",
+    "AttrRequire": [
+      765,
+      765,
+      302,
+      302,
+      87
+    ],
+    "FocusAttr": [
+      1,
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_15_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_15_1_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 38,
+    "GroupId": 13,
+    "DescKey": "SolarSchoolEventCheck_Opt_15_2",
+    "AttrRequire": [
+      386,
+      386,
+      516,
+      516,
+      79
+    ],
+    "FocusAttr": [
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_15_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_15_2_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 39,
+    "GroupId": 13,
+    "DescKey": "SolarSchoolEventCheck_Opt_15_3",
+    "AttrRequire": [
+      657,
+      657,
+      389,
+      389,
+      87
+    ],
+    "FocusAttr": [
+      3,
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_15_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_15_3_Fail",
+    "RewardSuccess": 1007,
+    "RewardFail": 1008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 40,
+    "GroupId": 14,
+    "DescKey": "SolarSchoolEventCheck_Opt_16_1",
+    "AttrRequire": [
+      40,
+      30,
+      25,
+      25,
+      25
+    ],
+    "FocusAttr": [
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_16_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_16_1_Fail",
+    "RewardSuccess": 81001,
+    "RewardFail": 81002,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 41,
+    "GroupId": 14,
+    "DescKey": "SolarSchoolEventCheck_Opt_16_2",
+    "AttrRequire": [
+      40,
+      25,
+      30,
+      25,
+      25
+    ],
+    "FocusAttr": [
+      3
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_16_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_16_2_Fail",
+    "RewardSuccess": 81003,
+    "RewardFail": 81004,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 42,
+    "GroupId": 14,
+    "DescKey": "SolarSchoolEventCheck_Opt_16_3",
+    "AttrRequire": [
+      40,
+      25,
+      25,
+      30,
+      25
+    ],
+    "FocusAttr": [
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_16_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_16_3_Fail",
+    "RewardSuccess": 81005,
+    "RewardFail": 81006,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 43,
+    "GroupId": 15,
+    "DescKey": "SolarSchoolEventCheck_Opt_17_1",
+    "AttrRequire": [
+      160,
+      30,
+      25,
+      25,
+      25
+    ],
+    "FocusAttr": [
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_17_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_17_1_Fail",
+    "RewardSuccess": 81007,
+    "RewardFail": 81008,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 44,
+    "GroupId": 15,
+    "DescKey": "SolarSchoolEventCheck_Opt_17_2",
+    "AttrRequire": [
+      160,
+      25,
+      25,
+      30,
+      25
+    ],
+    "FocusAttr": [
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_17_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_17_2_Fail",
+    "RewardSuccess": 81009,
+    "RewardFail": 81010,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 45,
+    "GroupId": 15,
+    "DescKey": "SolarSchoolEventCheck_Opt_17_3",
+    "AttrRequire": [
+      160,
+      40,
+      40,
+      25,
+      40
+    ],
+    "FocusAttr": [
+      2,
+      3,
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_17_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_17_3_Fail",
+    "RewardSuccess": 81011,
+    "RewardFail": 81012,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 46,
+    "GroupId": 16,
+    "DescKey": "SolarSchoolEventCheck_Opt_18_1",
+    "AttrRequire": [
+      60,
+      55,
+      25,
+      25,
+      25
+    ],
+    "FocusAttr": [
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_18_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_18_1_Fail",
+    "RewardSuccess": 81013,
+    "RewardFail": 81014,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 47,
+    "GroupId": 16,
+    "DescKey": "SolarSchoolEventCheck_Opt_18_2",
+    "AttrRequire": [
+      75,
+      45,
+      25,
+      25,
+      25
+    ],
+    "FocusAttr": [
+      1
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_18_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_18_2_Fail",
+    "RewardSuccess": 81015,
+    "RewardFail": 81016,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 48,
+    "GroupId": 16,
+    "DescKey": "SolarSchoolEventCheck_Opt_18_3",
+    "AttrRequire": [
+      60,
+      45,
+      25,
+      25,
+      30
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_18_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_18_3_Fail",
+    "RewardSuccess": 81017,
+    "RewardFail": 81018,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 49,
+    "GroupId": 17,
+    "DescKey": "SolarSchoolEventCheck_Opt_19_1",
+    "AttrRequire": [
+      450,
+      245,
+      25,
+      30,
+      25
+    ],
+    "FocusAttr": [
+      4
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_19_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_19_1_Fail",
+    "RewardSuccess": 81019,
+    "RewardFail": 81020,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 50,
+    "GroupId": 17,
+    "DescKey": "SolarSchoolEventCheck_Opt_19_2",
+    "AttrRequire": [
+      450,
+      245,
+      30,
+      25,
+      25
+    ],
+    "FocusAttr": [
+      3
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_19_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_19_2_Fail",
+    "RewardSuccess": 81021,
+    "RewardFail": 81022,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 51,
+    "GroupId": 17,
+    "DescKey": "SolarSchoolEventCheck_Opt_19_3",
+    "AttrRequire": [
+      450,
+      400,
+      25,
+      40,
+      40
+    ],
+    "FocusAttr": [
+      2,
+      4,
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_19_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_19_3_Fail",
+    "RewardSuccess": 81023,
+    "RewardFail": 81024,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 52,
+    "GroupId": 18,
+    "DescKey": "SolarSchoolEventCheck_Opt_20_1",
+    "AttrRequire": [
+      25,
+      25,
+      55,
+      60,
+      25
+    ],
+    "FocusAttr": [
+      3
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_20_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_20_1_Fail",
+    "RewardSuccess": 81025,
+    "RewardFail": 81026,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 53,
+    "GroupId": 18,
+    "DescKey": "SolarSchoolEventCheck_Opt_20_2",
+    "AttrRequire": [
+      25,
+      30,
+      45,
+      60,
+      25
+    ],
+    "FocusAttr": [
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_20_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_20_2_Fail",
+    "RewardSuccess": 81027,
+    "RewardFail": 81028,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 54,
+    "GroupId": 18,
+    "DescKey": "SolarSchoolEventCheck_Opt_20_3",
+    "AttrRequire": [
+      25,
+      25,
+      45,
+      60,
+      30
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_20_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_20_3_Fail",
+    "RewardSuccess": 81029,
+    "RewardFail": 81030,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 55,
+    "GroupId": 19,
+    "DescKey": "SolarSchoolEventCheck_Opt_21_1",
+    "AttrRequire": [
+      25,
+      25,
+      245,
+      450,
+      30
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_21_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_21_1_Fail",
+    "RewardSuccess": 81031,
+    "RewardFail": 81032,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 56,
+    "GroupId": 19,
+    "DescKey": "SolarSchoolEventCheck_Opt_21_2",
+    "AttrRequire": [
+      25,
+      30,
+      245,
+      450,
+      25
+    ],
+    "FocusAttr": [
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_21_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_21_2_Fail",
+    "RewardSuccess": 81033,
+    "RewardFail": 81034,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 57,
+    "GroupId": 19,
+    "DescKey": "SolarSchoolEventCheck_Opt_21_3",
+    "AttrRequire": [
+      25,
+      40,
+      400,
+      450,
+      40
+    ],
+    "FocusAttr": [
+      2,
+      3,
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_21_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_21_3_Fail",
+    "RewardSuccess": 81035,
+    "RewardFail": 81036,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 58,
+    "GroupId": 20,
+    "DescKey": "SolarSchoolEventCheck_Opt_22_1",
+    "AttrRequire": [
+      25,
+      25,
+      245,
+      450,
+      30
+    ],
+    "FocusAttr": [
+      5
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_22_1_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_22_1_Fail",
+    "RewardSuccess": 81037,
+    "RewardFail": 81040,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 59,
+    "GroupId": 20,
+    "DescKey": "SolarSchoolEventCheck_Opt_22_2",
+    "AttrRequire": [
+      450,
+      245,
+      30,
+      25,
+      25
+    ],
+    "FocusAttr": [
+      3
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_22_2_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_22_2_Fail",
+    "RewardSuccess": 81038,
+    "RewardFail": 81041,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  },
+  {
+    "Id": 60,
+    "GroupId": 20,
+    "DescKey": "SolarSchoolEventCheck_Opt_22_3",
+    "AttrRequire": [
+      25,
+      30,
+      245,
+      450,
+      25
+    ],
+    "FocusAttr": [
+      2
+    ],
+    "LowSuccessRate": 3000,
+    "SuccessDescKey": "SolarSchoolEventCheck_Opt_22_3_Suc",
+    "FailDescKey": "SolarSchoolEventCheck_Opt_22_3_Fail",
+    "RewardSuccess": 81039,
+    "RewardFail": 81042,
+    "SuccessActionList": [],
+    "FailActionList": [],
+    "AddScore": 0
+  }
+]

@@ -1,0 +1,6 @@
+Id: i32,
+MaleFormation: []const i32 = &.{},
+FemaleFormation: []const i32 = &.{},
+OnlyTrial: bool = false,
+AutoChange: bool = false,
+ShowInEntrance: bool = false,

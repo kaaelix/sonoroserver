@@ -1,0 +1,52 @@
+[
+  {
+    "Id": 1,
+    "ActivityId": 111700001,
+    "InstanceType": 0,
+    "Name": "",
+    "FestivalName": "",
+    "EnterActionIdList": [],
+    "MapActionIdList": [],
+    "EndActionIdList": []
+  },
+  {
+    "Id": 3,
+    "ActivityId": 111700001,
+    "InstanceType": 1,
+    "Name": "",
+    "FestivalName": "",
+    "EnterActionIdList": [],
+    "MapActionIdList": [],
+    "EndActionIdList": []
+  },
+  {
+    "Id": 7,
+    "ActivityId": 111700001,
+    "InstanceType": 1,
+    "Name": "SolarSchoolInstance_Name7",
+    "FestivalName": "",
+    "EnterActionIdList": [],
+    "MapActionIdList": [],
+    "EndActionIdList": []
+  },
+  {
+    "Id": 10,
+    "ActivityId": 111700001,
+    "InstanceType": 2,
+    "Name": "SolarSchoolInstance_Name4",
+    "FestivalName": "",
+    "EnterActionIdList": [],
+    "MapActionIdList": [],
+    "EndActionIdList": []
+  },
+  {
+    "Id": 11,
+    "ActivityId": 111700001,
+    "InstanceType": 2,
+    "Name": "SolarSchoolInstance_Name5",
+    "FestivalName": "",
+    "EnterActionIdList": [],
+    "MapActionIdList": [],
+    "EndActionIdList": []
+  }
+]

@@ -1,0 +1,48 @@
+[
+  {
+    "Id": 4,
+    "InstanceId": 10,
+    "ActivityId": 111700001,
+    "ExamType": 2,
+    "AttrMax": [
+      70,
+      70,
+      250,
+      250,
+      70
+    ],
+    "AttrWeight": [
+      50,
+      50,
+      400,
+      400,
+      100
+    ],
+    "ScoreMin": 0,
+    "ScoreMax": 72,
+    "ScoreRankGroupId": 2
+  },
+  {
+    "Id": 5,
+    "InstanceId": 11,
+    "ActivityId": 111700001,
+    "ExamType": 1,
+    "AttrMax": [
+      800,
+      800,
+      100,
+      100,
+      100
+    ],
+    "AttrWeight": [
+      400,
+      400,
+      50,
+      50,
+      100
+    ],
+    "ScoreMin": 0,
+    "ScoreMax": 72,
+    "ScoreRankGroupId": 1
+  }
+]

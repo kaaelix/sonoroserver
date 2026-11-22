@@ -1,0 +1,731 @@
+[
+  {
+    "RecallId": 300001,
+    "NeedFinishQuestIds": [],
+    "QuestIds": [],
+    "RecallQuests": {},
+    "ExitGuideQuestId": 0,
+    "DungeonEntranceId": 0,
+    "DungeonIds": [],
+    "DungeonIdMap": {},
+    "LevelPlayIds": [],
+    "RecallLevels": {},
+    "EntryTags": [],
+    "FunctionIds": [],
+    "QuestName": "",
+    "ChapterName": "",
+    "SmallChapterName": "",
+    "AreaTexture": "",
+    "FunctionViewTexture": [],
+    "LoadingId": 0,
+    "VideoDownLoadVersion": 0,
+    "BlockList": []
+  },
+  {
+    "RecallId": 100201,
+    "NeedFinishQuestIds": [],
+    "QuestIds": [],
+    "RecallQuests": {},
+    "ExitGuideQuestId": 0,
+    "DungeonEntranceId": 0,
+    "DungeonIds": [],
+    "DungeonIdMap": {},
+    "LevelPlayIds": [],
+    "RecallLevels": {},
+    "EntryTags": [],
+    "FunctionIds": [],
+    "QuestName": "",
+    "ChapterName": "",
+    "SmallChapterName": "",
+    "AreaTexture": "",
+    "FunctionViewTexture": [],
+    "LoadingId": 0,
+    "VideoDownLoadVersion": 0,
+    "BlockList": []
+  },
+  {
+    "RecallId": 1,
+    "NeedFinishQuestIds": [],
+    "QuestIds": [],
+    "RecallQuests": {},
+    "ExitGuideQuestId": 0,
+    "DungeonEntranceId": 0,
+    "DungeonIds": [],
+    "DungeonIdMap": {},
+    "LevelPlayIds": [],
+    "RecallLevels": {},
+    "EntryTags": [
+      "关卡.decfe9c6"
+    ],
+    "FunctionIds": [
+      1,
+      2,
+      3
+    ],
+    "QuestName": "",
+    "ChapterName": "",
+    "SmallChapterName": "",
+    "AreaTexture": "",
+    "FunctionViewTexture": [],
+    "LoadingId": 0,
+    "VideoDownLoadVersion": 0,
+    "BlockList": []
+  },
+  {
+    "RecallId": 100101,
+    "NeedFinishQuestIds": [],
+    "QuestIds": [],
+    "RecallQuests": {},
+    "ExitGuideQuestId": 0,
+    "DungeonEntranceId": 0,
+    "DungeonIds": [],
+    "DungeonIdMap": {},
+    "LevelPlayIds": [],
+    "RecallLevels": {},
+    "EntryTags": [],
+    "FunctionIds": [],
+    "QuestName": "",
+    "ChapterName": "",
+    "SmallChapterName": "",
+    "AreaTexture": "",
+    "FunctionViewTexture": [],
+    "LoadingId": 0,
+    "VideoDownLoadVersion": 0,
+    "BlockList": []
+  },
+  {
+    "RecallId": 110070,
+    "NeedFinishQuestIds": [
+      125000120,
+      125000121,
+      133000009,
+      125000122,
+      146000002,
+      125000123,
+      125000124
+    ],
+    "QuestIds": [
+      121800000,
+      121800001,
+      121800002,
+      121800003,
+      121800004,
+      121800005,
+      121800006
+    ],
+    "RecallQuests": {
+      "121800000": 125000120,
+      "121800001": 125000121,
+      "121800002": 133000009,
+      "121800003": 125000122,
+      "121800004": 146000002,
+      "121800005": 125000123,
+      "121800006": 125000124
+    },
+    "ExitGuideQuestId": 231850003,
+    "DungeonEntranceId": 308000,
+    "DungeonIds": [
+      20110008,
+      20111507,
+      20110068
+    ],
+    "DungeonIdMap": {
+      "20110008": 8,
+      "20110068": 68,
+      "20111507": 1507
+    },
+    "LevelPlayIds": [
+      121800001,
+      32850001,
+      32850002,
+      32850003,
+      32850004,
+      32850005,
+      32850006,
+      32850007,
+      32850008,
+      32850009,
+      32850013,
+      32850011,
+      32850012
+    ],
+    "RecallLevels": {
+      "32850001": 131000055,
+      "32850002": 131000061,
+      "32850003": 131000062,
+      "32850004": 141900002,
+      "32850005": 133900021,
+      "32850006": 146000055,
+      "32850007": 146000053,
+      "32850008": 146900000,
+      "32850009": 146900007,
+      "32850011": 146900009,
+      "32850012": 131900003,
+      "32850013": 146900008,
+      "121800001": 141000012
+    },
+    "EntryTags": [
+      "关卡.decfe9c6"
+    ],
+    "FunctionIds": [
+      1,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "QuestName": "QuestHandBook_100011_Name",
+    "ChapterName": "QuestReview_Chapter_1",
+    "SmallChapterName": "QuestTree_ChapterRegion_1",
+    "AreaTexture": "/Game/Aki/UI/UIResources/UiFunc/Image/StoryRecap/T_StoryRecapAreaHuanglong.T_StoryRecapAreaHuanglong",
+    "FunctionViewTexture": [
+      "/Game/Aki/UI/UIResources/Common/Image/BgCg/Loading/T_Login_Recall_11.T_Login_Recall_11"
+    ],
+    "LoadingId": 9301,
+    "VideoDownLoadVersion": 2,
+    "BlockList": [
+      1
+    ]
+  },
+  {
+    "RecallId": 111000,
+    "NeedFinishQuestIds": [
+      880000013
+    ],
+    "QuestIds": [
+      121800007
+    ],
+    "RecallQuests": {
+      "121800007": 880000013
+    },
+    "ExitGuideQuestId": 231850001,
+    "DungeonEntranceId": 308000,
+    "DungeonIds": [
+      20110018
+    ],
+    "DungeonIdMap": {
+      "20110018": 8
+    },
+    "LevelPlayIds": [],
+    "RecallLevels": {},
+    "EntryTags": [
+      "关卡.decfe9c6"
+    ],
+    "FunctionIds": [
+      1,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "QuestName": "Quest_880000013_QuestName_0_1",
+    "ChapterName": "QuestReview_Chapter_1",
+    "SmallChapterName": "QuestTree_ChapterRegion_1",
+    "AreaTexture": "/Game/Aki/UI/UIResources/UiFunc/Image/StoryRecap/T_StoryRecapAreaHuanglong.T_StoryRecapAreaHuanglong",
+    "FunctionViewTexture": [
+      "/Game/Aki/UI/UIResources/Common/Image/BgCg/Loading/T_Login_Recall_11.T_Login_Recall_11"
+    ],
+    "LoadingId": 9300,
+    "VideoDownLoadVersion": 2,
+    "BlockList": [
+      1
+    ]
+  },
+  {
+    "RecallId": 112000,
+    "NeedFinishQuestIds": [],
+    "QuestIds": [
+      32750003,
+      32750004,
+      32750005,
+      32750006,
+      32750027,
+      32750010,
+      32750007,
+      32750008,
+      32750009,
+      32750011,
+      32750012,
+      32750013,
+      32750014,
+      32750015,
+      32750016,
+      32750017,
+      32750018,
+      32750019,
+      32750020,
+      32750021,
+      32750022,
+      32750023,
+      32750024,
+      32750025,
+      32750030
+    ],
+    "RecallQuests": {
+      "32750003": 880000015,
+      "32750004": 880000017,
+      "32750005": 880000021,
+      "32750006": 880000025,
+      "32750007": 880000018,
+      "32750008": 880000019,
+      "32750009": 880700000,
+      "32750010": 880700004,
+      "32750011": 880700005,
+      "32750012": 880700007,
+      "32750013": 880700008,
+      "32750014": 880700009,
+      "32750015": 880000012,
+      "32750016": 880000029,
+      "32750017": 880000030,
+      "32750018": 880700001,
+      "32750019": 880700002,
+      "32750020": 880700003,
+      "32750021": 139700000,
+      "32750022": 139700001,
+      "32750023": 139700002,
+      "32750024": 139700003,
+      "32750025": 6700000,
+      "32750027": 880000032,
+      "32750030": 880000031
+    },
+    "ExitGuideQuestId": 0,
+    "DungeonEntranceId": 308000,
+    "DungeonIds": [
+      20020008,
+      20028400
+    ],
+    "DungeonIdMap": {
+      "20020008": 8,
+      "20028400": 8400
+    },
+    "LevelPlayIds": [
+      32750002,
+      32750003,
+      32750007,
+      32850014,
+      32850015,
+      32850016,
+      32850017,
+      32750001
+    ],
+    "RecallLevels": {
+      "32750001": 139000001,
+      "32750002": 6700000,
+      "32750003": 6700001,
+      "32750007": 6700002,
+      "32850014": 123700000,
+      "32850015": 123700002,
+      "32850016": 123700003,
+      "32850017": 123700004
+    },
+    "EntryTags": [
+      "关卡.decfe9c6"
+    ],
+    "FunctionIds": [
+      1001,
+      1,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "QuestName": "QuestTree_ChasingMoon_NodeName",
+    "ChapterName": "QuestReview_Chapter_1",
+    "SmallChapterName": "QuestTree_ChapterRegion_1",
+    "AreaTexture": "/Game/Aki/UI/UIResources/UiFunc/Image/StoryRecap/T_StoryRecapAreaHuanglong.T_StoryRecapAreaHuanglong",
+    "FunctionViewTexture": [
+      "/Game/Aki/UI/UIResources/Common/Image/BgCg/Loading/T_Login_Recall_12.T_Login_Recall_12"
+    ],
+    "LoadingId": 9302,
+    "VideoDownLoadVersion": 2,
+    "BlockList": [
+      1
+    ]
+  },
+  {
+    "RecallId": 110080,
+    "NeedFinishQuestIds": [
+      145000004
+    ],
+    "QuestIds": [
+      121850006
+    ],
+    "RecallQuests": {
+      "121850006": 145000004
+    },
+    "ExitGuideQuestId": 231850005,
+    "DungeonEntranceId": 308000,
+    "DungeonIds": [
+      20130008,
+      20130900,
+      20131510,
+      20131506,
+      20131512
+    ],
+    "DungeonIdMap": {
+      "20130008": 8,
+      "20130900": 900,
+      "20131506": 1506,
+      "20131510": 1510,
+      "20131512": 1512
+    },
+    "LevelPlayIds": [
+      121850017,
+      121850018,
+      32850033,
+      121850019,
+      32850018,
+      32850019,
+      32850020,
+      32850021,
+      32850022,
+      32850023,
+      32850024,
+      32850025,
+      32850032,
+      32850034,
+      121850009,
+      32850026,
+      32850027,
+      32850028,
+      32850029,
+      32850030,
+      32850031,
+      121850016
+    ],
+    "RecallLevels": {
+      "32850018": 146750002,
+      "32850019": 146750003,
+      "32850020": 134750028,
+      "32850021": 134750000,
+      "32850022": 138000018,
+      "32850023": 138000013,
+      "32850024": 138000019,
+      "32850025": 138000020,
+      "32850026": 135750002,
+      "32850027": 135750007,
+      "32850028": 135750003,
+      "32850029": 135750006,
+      "32850030": 135750005,
+      "32850031": 135750004,
+      "32850032": 135750009,
+      "32850033": 134000036,
+      "32850034": 138000014,
+      "121850009": 135000059,
+      "121850016": 145750000,
+      "121850017": 138000017,
+      "121850018": 134000034,
+      "121850019": 134000035
+    },
+    "EntryTags": [
+      "关卡.decfe9c6"
+    ],
+    "FunctionIds": [
+      1,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "QuestName": "QuestHandBook_100012_Name",
+    "ChapterName": "QuestReview_Chapter_1",
+    "SmallChapterName": "QuestTree_ChapterRegion_1",
+    "AreaTexture": "/Game/Aki/UI/UIResources/UiFunc/Image/StoryRecap/T_StoryRecapAreaHuanglong.T_StoryRecapAreaHuanglong",
+    "FunctionViewTexture": [
+      "/Game/Aki/UI/UIResources/Common/Image/BgCg/Loading/T_Login_Recall_13.T_Login_Recall_13"
+    ],
+    "LoadingId": 9303,
+    "VideoDownLoadVersion": 2,
+    "BlockList": [
+      1,
+      2
+    ]
+  },
+  {
+    "RecallId": 210000,
+    "NeedFinishQuestIds": [
+      114000026,
+      114000027,
+      114000028,
+      114000030,
+      140000011,
+      114000029
+    ],
+    "QuestIds": [
+      121700000
+    ],
+    "RecallQuests": {
+      "121700000": 114000026
+    },
+    "ExitGuideQuestId": 32700004,
+    "DungeonEntranceId": 308000,
+    "DungeonIds": [
+      20200008
+    ],
+    "DungeonIdMap": {
+      "20200008": 8
+    },
+    "LevelPlayIds": [],
+    "RecallLevels": {},
+    "EntryTags": [],
+    "FunctionIds": [
+      1,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "QuestName": "Quest_114000026_QuestName_114_1",
+    "ChapterName": "",
+    "SmallChapterName": "",
+    "AreaTexture": "",
+    "FunctionViewTexture": [],
+    "LoadingId": 0,
+    "VideoDownLoadVersion": 0,
+    "BlockList": [
+      2,
+      3
+    ]
+  },
+  {
+    "RecallId": 210010,
+    "NeedFinishQuestIds": [
+      114000026,
+      114000027,
+      114000028,
+      114000030,
+      140000011,
+      114000029
+    ],
+    "QuestIds": [
+      121700001
+    ],
+    "RecallQuests": {
+      "121700001": 114000027
+    },
+    "ExitGuideQuestId": 32700005,
+    "DungeonEntranceId": 308000,
+    "DungeonIds": [
+      20200018,
+      20202510
+    ],
+    "DungeonIdMap": {
+      "20200018": 8,
+      "20202510": 2510
+    },
+    "LevelPlayIds": [],
+    "RecallLevels": {},
+    "EntryTags": [],
+    "FunctionIds": [
+      1,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "QuestName": "Quest_114000027_QuestName_114_1",
+    "ChapterName": "",
+    "SmallChapterName": "",
+    "AreaTexture": "",
+    "FunctionViewTexture": [],
+    "LoadingId": 0,
+    "VideoDownLoadVersion": 0,
+    "BlockList": [
+      3
+    ]
+  },
+  {
+    "RecallId": 210020,
+    "NeedFinishQuestIds": [
+      114000026,
+      114000027,
+      114000028,
+      114000030,
+      140000011,
+      114000029
+    ],
+    "QuestIds": [
+      121700002,
+      121700003
+    ],
+    "RecallQuests": {
+      "121700002": 114000028,
+      "121700003": 114000030
+    },
+    "ExitGuideQuestId": 32700006,
+    "DungeonEntranceId": 308000,
+    "DungeonIds": [
+      20200028,
+      20201511
+    ],
+    "DungeonIdMap": {
+      "20200028": 8,
+      "20201511": 1511
+    },
+    "LevelPlayIds": [
+      121700001
+    ],
+    "RecallLevels": {
+      "121700001": 102000033
+    },
+    "EntryTags": [],
+    "FunctionIds": [
+      1,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "QuestName": "Quest_114000028_QuestName_114_1",
+    "ChapterName": "",
+    "SmallChapterName": "",
+    "AreaTexture": "",
+    "FunctionViewTexture": [],
+    "LoadingId": 0,
+    "VideoDownLoadVersion": 0,
+    "BlockList": [
+      3,
+      5
+    ]
+  },
+  {
+    "RecallId": 210030,
+    "NeedFinishQuestIds": [
+      114000026,
+      114000027,
+      114000028,
+      114000030,
+      140000011,
+      114000029
+    ],
+    "QuestIds": [
+      121700004,
+      121700005
+    ],
+    "RecallQuests": {
+      "121700004": 140000011,
+      "121700005": 114000029
+    },
+    "ExitGuideQuestId": 32700007,
+    "DungeonEntranceId": 308000,
+    "DungeonIds": [
+      20200038,
+      20201514
+    ],
+    "DungeonIdMap": {
+      "20200038": 8,
+      "20201514": 1514
+    },
+    "LevelPlayIds": [
+      121700000
+    ],
+    "RecallLevels": {
+      "121700000": 102000034
+    },
+    "EntryTags": [],
+    "FunctionIds": [
+      1,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "QuestName": "Quest_140000011_QuestName_140_2",
+    "ChapterName": "",
+    "SmallChapterName": "",
+    "AreaTexture": "",
+    "FunctionViewTexture": [],
+    "LoadingId": 0,
+    "VideoDownLoadVersion": 0,
+    "BlockList": [
+      3
+    ]
+  },
+  {
+    "RecallId": 210040,
+    "NeedFinishQuestIds": [
+      145000005
+    ],
+    "QuestIds": [
+      251700000
+    ],
+    "RecallQuests": {
+      "251700000": 145000005
+    },
+    "ExitGuideQuestId": 32700009,
+    "DungeonEntranceId": 308000,
+    "DungeonIds": [
+      20220008,
+      20220904,
+      20220903,
+      20221513
+    ],
+    "DungeonIdMap": {
+      "20220008": 8,
+      "20220903": 903,
+      "20220904": 904,
+      "20221513": 1513
+    },
+    "LevelPlayIds": [
+      251700012,
+      251700009,
+      251700010,
+      251700011,
+      251700007,
+      251700008,
+      251700006,
+      251700005
+    ],
+    "RecallLevels": {
+      "251700005": 145750001,
+      "251700006": 161750008,
+      "251700007": 109000060,
+      "251700008": 109000065,
+      "251700009": 109750001,
+      "251700010": 109000062,
+      "251700011": 109000063,
+      "251700012": 145000000
+    },
+    "EntryTags": [
+      "关卡.decfe9c6"
+    ],
+    "FunctionIds": [
+      1,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "QuestName": "Quest_140000011_QuestName_140_2",
+    "ChapterName": "QuestReview_Chapter_1",
+    "SmallChapterName": "QuestTree_ChapterRegion_1",
+    "AreaTexture": "/Game/Aki/UI/UIResources/UiFunc/Image/StoryRecap/T_StoryRecapAreaHuanglong.T_StoryRecapAreaHuanglong",
+    "FunctionViewTexture": [
+      "/Game/Aki/UI/UIResources/Common/Image/BgCg/Loading/T_Login_Recall_13.T_Login_Recall_13"
+    ],
+    "LoadingId": 9303,
+    "VideoDownLoadVersion": 0,
+    "BlockList": [
+      3,
+      6
+    ]
+  }
+]

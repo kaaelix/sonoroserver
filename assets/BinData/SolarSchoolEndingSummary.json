@@ -1,0 +1,10 @@
+[
+  {
+    "Id": 1,
+    "ActivityId": 111700001,
+    "ScrollDurationMs": 60000,
+    "EndStayDurationMs": 3000,
+    "AudioResource": "",
+    "Comments": "首版联调占位"
+  }
+]

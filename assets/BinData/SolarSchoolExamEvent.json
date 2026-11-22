@@ -1,0 +1,98 @@
+[
+  {
+    "Id": 1,
+    "ChoiceGroupId": 1,
+    "Title": "SolarSchool_Examtitle_1",
+    "Desc": "SolarSchool_Examevent_1",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  },
+  {
+    "Id": 2,
+    "ChoiceGroupId": 2,
+    "Title": "SolarSchool_Examtitle_1",
+    "Desc": "SolarSchool_Examevent_2",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  },
+  {
+    "Id": 4,
+    "ChoiceGroupId": 3,
+    "Title": "SolarSchool_Examtitle_4",
+    "Desc": "SolarSchool_Examevent_3",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  },
+  {
+    "Id": 5,
+    "ChoiceGroupId": 4,
+    "Title": "SolarSchool_Examtitle_4",
+    "Desc": "SolarSchool_Examevent_4",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  },
+  {
+    "Id": 7,
+    "ChoiceGroupId": 5,
+    "Title": "SolarSchool_Examtitle_1",
+    "Desc": "SolarSchool_Examevent_5",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  },
+  {
+    "Id": 8,
+    "ChoiceGroupId": 6,
+    "Title": "SolarSchool_Examtitle_1",
+    "Desc": "SolarSchool_Examevent_6",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  },
+  {
+    "Id": 9,
+    "ChoiceGroupId": 7,
+    "Title": "SolarSchool_Examtitle_4",
+    "Desc": "SolarSchool_Examevent_7",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  },
+  {
+    "Id": 10,
+    "ChoiceGroupId": 8,
+    "Title": "SolarSchool_Examtitle_4",
+    "Desc": "SolarSchool_Examevent_8",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  },
+  {
+    "Id": 11,
+    "ChoiceGroupId": 9,
+    "Title": "SolarSchool_Examtitle_1",
+    "Desc": "SolarSchool_Examevent_9",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  },
+  {
+    "Id": 12,
+    "ChoiceGroupId": 10,
+    "Title": "SolarSchool_Examtitle_1",
+    "Desc": "SolarSchool_Examevent_10",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  },
+  {
+    "Id": 13,
+    "ChoiceGroupId": 11,
+    "Title": "SolarSchool_Examtitle_4",
+    "Desc": "SolarSchool_Examevent_11",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  },
+  {
+    "Id": 14,
+    "ChoiceGroupId": 12,
+    "Title": "SolarSchool_Examtitle_4",
+    "Desc": "SolarSchool_Examevent_12",
+    "Image": "UI/Exam/ev_1",
+    "AddScore": 6
+  }
+]

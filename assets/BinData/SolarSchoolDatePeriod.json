@@ -1,0 +1,50 @@
+[
+  {
+    "Id": 1,
+    "ActivityId": 111700001,
+    "Name": "",
+    "StartDayIndex": 1,
+    "EndDayIndex": 87,
+    "SaveSlotTex": "/Game/Aki/UI/UIResources/UiActivity/Image/Activity38/SolarSchool/Save/T_SolarSchoolSaveSeason01.T_SolarSchoolSaveSeason01",
+    "SeasonFxRes": "/Game/Aki/Effect/UI/Niagaras/Events/Xueyuan/NS_Fx_LGUI_Xueyuan_Spring.NS_Fx_LGUI_Xueyuan_Spring",
+    "MapSeasonRes": "",
+    "BgmState": "spring",
+    "AudioState": "spring"
+  },
+  {
+    "Id": 2,
+    "ActivityId": 111700001,
+    "Name": "",
+    "StartDayIndex": 91,
+    "EndDayIndex": 171,
+    "SaveSlotTex": "/Game/Aki/UI/UIResources/UiActivity/Image/Activity38/SolarSchool/Save/T_SolarSchoolSaveSeason02.T_SolarSchoolSaveSeason02",
+    "SeasonFxRes": "/Game/Aki/Effect/UI/Niagaras/Events/Xueyuan/NS_Fx_LGUI_Xueyuan_Summer.NS_Fx_LGUI_Xueyuan_Summer",
+    "MapSeasonRes": "",
+    "BgmState": "summer",
+    "AudioState": "summer"
+  },
+  {
+    "Id": 3,
+    "ActivityId": 111700001,
+    "Name": "",
+    "StartDayIndex": 172,
+    "EndDayIndex": 227,
+    "SaveSlotTex": "/Game/Aki/UI/UIResources/UiActivity/Image/Activity38/SolarSchool/Save/T_SolarSchoolSaveSeason03.T_SolarSchoolSaveSeason03",
+    "SeasonFxRes": "/Game/Aki/Effect/UI/Niagaras/Events/Xueyuan/NS_Fx_LGUI_Xueyuan_Autumn.NS_Fx_LGUI_Xueyuan_Autumn",
+    "MapSeasonRes": "",
+    "BgmState": "autumn",
+    "AudioState": "autumn"
+  },
+  {
+    "Id": 4,
+    "ActivityId": 111700001,
+    "Name": "",
+    "StartDayIndex": 228,
+    "EndDayIndex": 263,
+    "SaveSlotTex": "/Game/Aki/UI/UIResources/UiActivity/Image/Activity38/SolarSchool/Save/T_SolarSchoolSaveSeason04.T_SolarSchoolSaveSeason04",
+    "SeasonFxRes": "/Game/Aki/Effect/UI/Niagaras/Events/Xueyuan/NS_Fx_LGUI_Xueyuan_Winter.NS_Fx_LGUI_Xueyuan_Winter",
+    "MapSeasonRes": "",
+    "BgmState": "winter",
+    "AudioState": "winter"
+  }
+]

@@ -1,0 +1,8 @@
+Id: i64,
+Priority: i32,
+RefrenceAttribute: i32,
+AttributeType: i32,
+FormationPropValueType: i32,
+RefrenceTarget: i32,
+AttributeRate: []const f32,
+Value: []const i32,

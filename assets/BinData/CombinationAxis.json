@@ -1,0 +1,132 @@
+[
+  {
+    "Id": 1,
+    "AxisName": "Zoom",
+    "AxisType": 1,
+    "InputTag": "FightInputRoot.FightInput.AxisInput.CameraInput.CameraZoom",
+    "ExclusiveType": 0,
+    "PcKeyMap": {},
+    "GamepadKeyMap": {
+      "Gamepad_LeftTriggerAxis": "Gamepad_LeftShoulder",
+      "Gamepad_RightTriggerAxis": "Gamepad_LeftShoulder"
+    },
+    "SecondaryKeyScaleMap": {
+      "Up": 1,
+      "Down": -1,
+      "Gamepad_LeftTriggerAxis": -80,
+      "Gamepad_RightTriggerAxis": 80
+    },
+    "MobileIconPath": "",
+    "DisplayName": "",
+    "KeyboardVersionMap": {},
+    "GamepadVersionMap": {},
+    "BlockInput": []
+  },
+  {
+    "Id": 2,
+    "AxisName": "TrapDefenseZoom",
+    "AxisType": 1,
+    "InputTag": "FightInputRoot.FightInput.AxisInput.CameraInput.CameraZoom",
+    "ExclusiveType": 0,
+    "PcKeyMap": {},
+    "GamepadKeyMap": {
+      "Gamepad_LeftTriggerAxis": "Gamepad_LeftShoulder",
+      "Gamepad_RightTriggerAxis": "Gamepad_LeftShoulder"
+    },
+    "SecondaryKeyScaleMap": {
+      "Up": 1,
+      "Down": -1,
+      "Gamepad_LeftTriggerAxis": -80,
+      "Gamepad_RightTriggerAxis": 80
+    },
+    "MobileIconPath": "",
+    "DisplayName": "",
+    "KeyboardVersionMap": {},
+    "GamepadVersionMap": {},
+    "BlockInput": []
+  },
+  {
+    "Id": 3,
+    "AxisName": "UiLookInOut",
+    "AxisType": 4,
+    "InputTag": "UiInputRoot.Navigation",
+    "ExclusiveType": 0,
+    "PcKeyMap": {},
+    "GamepadKeyMap": {
+      "Gamepad_RightY": "Gamepad_LeftShoulder"
+    },
+    "SecondaryKeyScaleMap": {
+      "Gamepad_RightY": -1
+    },
+    "MobileIconPath": "",
+    "DisplayName": "",
+    "KeyboardVersionMap": {},
+    "GamepadVersionMap": {},
+    "BlockInput": [
+      "Gamepad_RightX"
+    ]
+  },
+  {
+    "Id": 4,
+    "AxisName": "CameraFocusHor",
+    "AxisType": 4,
+    "InputTag": "UiInputRoot.Navigation",
+    "ExclusiveType": 0,
+    "PcKeyMap": {},
+    "GamepadKeyMap": {
+      "Gamepad_LeftX": "Gamepad_LeftShoulder"
+    },
+    "SecondaryKeyScaleMap": {
+      "Gamepad_LeftX": 1
+    },
+    "MobileIconPath": "",
+    "DisplayName": "",
+    "KeyboardVersionMap": {},
+    "GamepadVersionMap": {},
+    "BlockInput": [
+      "Gamepad_RightX"
+    ]
+  },
+  {
+    "Id": 5,
+    "AxisName": "CameraFocusVer",
+    "AxisType": 4,
+    "InputTag": "UiInputRoot.Navigation",
+    "ExclusiveType": 0,
+    "PcKeyMap": {},
+    "GamepadKeyMap": {
+      "Gamepad_LeftY": "Gamepad_LeftShoulder"
+    },
+    "SecondaryKeyScaleMap": {
+      "Gamepad_LeftY": 1
+    },
+    "MobileIconPath": "",
+    "DisplayName": "",
+    "KeyboardVersionMap": {},
+    "GamepadVersionMap": {},
+    "BlockInput": [
+      "Gamepad_RightX"
+    ]
+  },
+  {
+    "Id": 6,
+    "AxisName": "UiCamRotate2",
+    "AxisType": 4,
+    "InputTag": "UiInputRoot.Navigation",
+    "ExclusiveType": 0,
+    "PcKeyMap": {},
+    "GamepadKeyMap": {
+      "Gamepad_DPad_Left": "Gamepad_LeftShoulder",
+      "Gamepad_DPad_Right": "Gamepad_LeftShoulder"
+    },
+    "SecondaryKeyScaleMap": {
+      "Gamepad_DPad_Left": -1,
+      "Gamepad_DPad_Right": 1
+    },
+    "MobileIconPath": "",
+    "DisplayName": "",
+    "KeyboardVersionMap": {},
+    "GamepadVersionMap": {},
+    "BlockInput": []
+  }
+]

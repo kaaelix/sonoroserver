@@ -1,0 +1,90 @@
+[
+  {
+    "Id": 1,
+    "ActivityId": 107500003,
+    "TabId": 0,
+    "Sort": 1,
+    "Desc": "VillageInfr_goods_01",
+    "ConditionGroup": 12904908,
+    "DropId": 5211101,
+    "SkipType": 0,
+    "SkipParam": []
+  },
+  {
+    "Id": 2,
+    "ActivityId": 107500003,
+    "TabId": 0,
+    "Sort": 2,
+    "Desc": "VillageInfr_goods_02",
+    "ConditionGroup": 12904909,
+    "DropId": 5211102,
+    "SkipType": 0,
+    "SkipParam": []
+  },
+  {
+    "Id": 3,
+    "ActivityId": 107500003,
+    "TabId": 0,
+    "Sort": 3,
+    "Desc": "VillageInfr_goods_03",
+    "ConditionGroup": 12904910,
+    "DropId": 5211103,
+    "SkipType": 0,
+    "SkipParam": []
+  },
+  {
+    "Id": 4,
+    "ActivityId": 107500003,
+    "TabId": 0,
+    "Sort": 4,
+    "Desc": "VillageInfr_goods_04",
+    "ConditionGroup": 12904911,
+    "DropId": 5211104,
+    "SkipType": 0,
+    "SkipParam": []
+  },
+  {
+    "Id": 5,
+    "ActivityId": 107500003,
+    "TabId": 0,
+    "Sort": 5,
+    "Desc": "VillageInfr_goods_05",
+    "ConditionGroup": 12904900,
+    "DropId": 5211105,
+    "SkipType": 0,
+    "SkipParam": []
+  },
+  {
+    "Id": 6,
+    "ActivityId": 107500003,
+    "TabId": 0,
+    "Sort": 6,
+    "Desc": "VillageInfr_goods_06",
+    "ConditionGroup": 12904901,
+    "DropId": 5211106,
+    "SkipType": 0,
+    "SkipParam": []
+  },
+  {
+    "Id": 7,
+    "ActivityId": 107500003,
+    "TabId": 0,
+    "Sort": 7,
+    "Desc": "VillageInfr_goods_07",
+    "ConditionGroup": 12904902,
+    "DropId": 5211107,
+    "SkipType": 0,
+    "SkipParam": []
+  },
+  {
+    "Id": 8,
+    "ActivityId": 107500003,
+    "TabId": 0,
+    "Sort": 8,
+    "Desc": "VillageInfr_goods_08",
+    "ConditionGroup": 12904903,
+    "DropId": 5211108,
+    "SkipType": 0,
+    "SkipParam": []
+  }
+]

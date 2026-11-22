@@ -1,0 +1,6 @@
+UnitId: i32,
+GroupId: i32,
+MinNum: i32 = 0,
+MaxNum: i32 = 0,
+Interval: i32 = 0,
+DropShowPlan: i32 = 0,

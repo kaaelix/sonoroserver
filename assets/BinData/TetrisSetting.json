@@ -1,0 +1,63 @@
+[
+  {
+    "Key": "BasicScore",
+    "BasicScore": [
+      200,
+      500,
+      1000,
+      1500,
+      2500,
+      3500,
+      4500,
+      6000
+    ],
+    "ComboAddation": [],
+    "AllClear": 0,
+    "BombScore": [],
+    "RotationLength": 0
+  },
+  {
+    "Key": "ComboAddation",
+    "BasicScore": [],
+    "ComboAddation": [
+      0,
+      20,
+      30,
+      50,
+      100
+    ],
+    "AllClear": 0,
+    "BombScore": [],
+    "RotationLength": 0
+  },
+  {
+    "Key": "AllClear",
+    "BasicScore": [],
+    "ComboAddation": [],
+    "AllClear": 1000,
+    "BombScore": [],
+    "RotationLength": 0
+  },
+  {
+    "Key": "BombScore",
+    "BasicScore": [],
+    "ComboAddation": [],
+    "AllClear": 0,
+    "BombScore": [
+      50,
+      100,
+      150,
+      200,
+      250
+    ],
+    "RotationLength": 0
+  },
+  {
+    "Key": "RotationLength",
+    "BasicScore": [],
+    "ComboAddation": [],
+    "AllClear": 0,
+    "BombScore": [],
+    "RotationLength": 60
+  }
+]

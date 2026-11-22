@@ -1,0 +1,5 @@
+Id: i32,
+MapId: i32,
+FogId: i32 = 0,
+Type: i32 = 0,
+TeleportEntityConfigId: i64,

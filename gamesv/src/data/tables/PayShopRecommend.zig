@@ -1,0 +1,7 @@
+Id: i32,
+RecommendType: i32 = 0,
+RecommendId: i32 = 0,
+TabName: []const u8 = "",
+PrefabPath: []const u8 = "",
+Sort: i32 = 0,
+Show: bool = false,

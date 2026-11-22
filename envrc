@@ -1,0 +1,21 @@
+#!/bin/sh
+# DEPENDS: curl, tar, xz, realpath
+
+ZIG_VERSION="0.16.0"
+ZIG_PLATFORM="x86_64-linux"
+ZIG_DIST="zig-${ZIG_PLATFORM}-${ZIG_VERSION}"
+ZIG_DIR="./.direnv/${ZIG_DIST}/"
+SAFE_BIN_DIR="./.direnv/bin"
+
+mkdir -p "$SAFE_BIN_DIR"
+ln -sf "$(pwd)/build-safe.sh" "$SAFE_BIN_DIR/zig"
+chmod +x "$(pwd)/build-safe.sh"
+
+if [ ! -d $ZIG_DIR ]; then
+	mkdir -p ./.direnv
+	curl -L "https://ziglang.org/download/${ZIG_VERSION}/${ZIG_DIST}.tar.xz" |
+	xz -T1 -dc | tar x -C ./.direnv/ &&
+	export PATH=$(realpath "$SAFE_BIN_DIR"):$(realpath $ZIG_DIR):$PATH
+else
+	export PATH=$(realpath "$SAFE_BIN_DIR"):$(realpath $ZIG_DIR):$PATH
+fi

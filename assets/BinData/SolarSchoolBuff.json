@@ -1,0 +1,172 @@
+[
+  {
+    "Id": 9001,
+    "EffectIds": [
+      900101,
+      900102
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9002,
+    "EffectIds": [
+      900201,
+      900202
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9003,
+    "EffectIds": [
+      900301,
+      900302
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9004,
+    "EffectIds": [
+      900401,
+      900402
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9005,
+    "EffectIds": [
+      900501
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9006,
+    "EffectIds": [
+      900601
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9007,
+    "EffectIds": [
+      900701
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9008,
+    "EffectIds": [
+      900801
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9009,
+    "EffectIds": [
+      900901
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9010,
+    "EffectIds": [
+      901001
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9011,
+    "EffectIds": [
+      901101
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 901201,
+    "EffectIds": [],
+    "DurationDays": -1,
+    "WeeklyRewardId": 9012001
+  },
+  {
+    "Id": 901202,
+    "EffectIds": [],
+    "DurationDays": -1,
+    "WeeklyRewardId": 9012002
+  },
+  {
+    "Id": 901203,
+    "EffectIds": [],
+    "DurationDays": -1,
+    "WeeklyRewardId": 9012003
+  },
+  {
+    "Id": 901204,
+    "EffectIds": [],
+    "DurationDays": -1,
+    "WeeklyRewardId": 9012004
+  },
+  {
+    "Id": 901205,
+    "EffectIds": [],
+    "DurationDays": -1,
+    "WeeklyRewardId": 9012005
+  },
+  {
+    "Id": 9013,
+    "EffectIds": [
+      901301,
+      901302,
+      901303,
+      901304,
+      901305
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9014,
+    "EffectIds": [],
+    "DurationDays": -1,
+    "WeeklyRewardId": 9014001
+  },
+  {
+    "Id": 9015,
+    "EffectIds": [
+      901501
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9016,
+    "EffectIds": [
+      901601
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  },
+  {
+    "Id": 9017,
+    "EffectIds": [],
+    "DurationDays": 0,
+    "WeeklyRewardId": 9017001
+  },
+  {
+    "Id": 9018,
+    "EffectIds": [
+      901801
+    ],
+    "DurationDays": -1,
+    "WeeklyRewardId": 0
+  }
+]

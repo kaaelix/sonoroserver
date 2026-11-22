@@ -1,0 +1,8 @@
+Id: i32,
+ShopTabViewType: i32 = 0,
+DynamicTabId: i32 = 0,
+Sort: i32 = 0,
+Name: []const u8 = "",
+Money: []const i32 = &.{},
+Enable: bool = true,
+SortRule: i32 = 0,
