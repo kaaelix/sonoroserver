@@ -338,6 +338,19 @@ fn isTerminalQuestNode(node_type: []const u8) bool {
     return std.mem.eql(u8, node_type, "QuestSucceed") or std.mem.eql(u8, node_type, "QuestFailed");
 }
 
+fn manualSequenceOrder(owner_id: i32, parent_id: i32) ?[]const i32 {
+    if (owner_id == 145000005) {
+        return switch (parent_id) {
+            24 => &.{ 36, 585, 37, 304, 414, 501, 349, 306, 361 },
+            304 => &.{ 303, 413 },
+            306 => &.{ 422, 309 },
+            361 => &.{ 310, 210, 41, 42 },
+            else => null,
+        };
+    }
+    return null;
+}
+
 /// Restores DFS execution order for `Sequence`/`Select` children when `QuestNodeData.json`
 /// rows are out of order (e.g. `QuestSucceed` appearing before patched sibling steps):
 /// 1) Terminal `QuestSucceed`/`QuestFailed` children move after non-terminal siblings in `Sequence`.
@@ -457,56 +470,80 @@ fn normalizeSequenceChildOrder(arena: Allocator, owner_id: i32, nodes: []NodeEnt
         }
         if (positions.items.len <= 1) continue;
 
-        var tagged_indices: std.ArrayListUnmanaged(usize) = .empty;
-        var tagged_items: std.ArrayListUnmanaged(TidSlot) = .empty;
-        for (non_term.items, 0..) |c, idx| {
-            if (c.tid_key) |tk| {
-                try tagged_indices.append(arena, idx);
-                try tagged_items.append(arena, .{
-                    .tid_key = tk,
-                    .tp_dungeon = c.tp_dungeon,
-                    .sub_dungeon = c.sub_dungeon,
-                    .orig_pos = c.orig_pos,
-                    .entry = c.entry,
-                });
-            }
-        }
-        if (tagged_items.items.len > 1) {
-            std.mem.sort(TidSlot, tagged_items.items, {}, struct {
-                fn lessThan(_: void, a: TidSlot, b: TidSlot) bool {
-                    if (a.tid_key != b.tid_key) return a.tid_key < b.tid_key;
+        if (manualSequenceOrder(owner_id, parent_id)) |order| {
+            const Ctx = struct {
+                order: []const i32,
+                fn rank(self: @This(), node_id: i32) usize {
+                    for (self.order, 0..) |id, idx| {
+                        if (id == node_id) return idx;
+                    }
+                    return self.order.len;
+                }
+            };
+            const ctx = Ctx{ .order = order };
+            const sorted_slots = try arena.alloc(ChildSlot, non_term.items.len);
+            @memcpy(sorted_slots, non_term.items);
+            std.mem.sort(ChildSlot, sorted_slots, ctx, struct {
+                fn lessThan(c: Ctx, a: ChildSlot, b: ChildSlot) bool {
+                    const ra = c.rank(a.entry.id);
+                    const rb = c.rank(b.entry.id);
+                    if (ra != rb) return ra < rb;
                     return a.orig_pos < b.orig_pos;
                 }
             }.lessThan);
-            for (tagged_indices.items, tagged_items.items) |slot_idx, sorted_item| {
-                non_term.items[slot_idx] = .{
-                    .entry = sorted_item.entry,
-                    .tid_key = sorted_item.tid_key,
-                    .tp_dungeon = sorted_item.tp_dungeon,
-                    .sub_dungeon = sorted_item.sub_dungeon,
-                    .orig_pos = sorted_item.orig_pos,
-                };
-            }
-        }
-
-        if (is_sequence and non_term.items.len > 1) {
-            var k: usize = 0;
-            while (k < non_term.items.len) : (k += 1) {
-                const tp_did = non_term.items[k].tp_dungeon;
-                if (tp_did <= 0) continue;
-                var found_idx: ?usize = null;
-                for (non_term.items, 0..) |cand, m| {
-                    if (m != k and !cand.paired and cand.sub_dungeon == tp_did) {
-                        found_idx = m;
-                        break;
-                    }
+            @memcpy(non_term.items, sorted_slots);
+        } else {
+            var tagged_indices: std.ArrayListUnmanaged(usize) = .empty;
+            var tagged_items: std.ArrayListUnmanaged(TidSlot) = .empty;
+            for (non_term.items, 0..) |c, idx| {
+                if (c.tid_key) |tk| {
+                    try tagged_indices.append(arena, idx);
+                    try tagged_items.append(arena, .{
+                        .tid_key = tk,
+                        .tp_dungeon = c.tp_dungeon,
+                        .sub_dungeon = c.sub_dungeon,
+                        .orig_pos = c.orig_pos,
+                        .entry = c.entry,
+                    });
                 }
-                if (found_idx) |m| {
-                    var target = non_term.orderedRemove(m);
-                    target.paired = true;
-                    const insert_idx = if (m < k) k else k + 1;
-                    try non_term.insert(arena, insert_idx, target);
-                    k = insert_idx;
+            }
+            if (tagged_items.items.len > 1) {
+                std.mem.sort(TidSlot, tagged_items.items, {}, struct {
+                    fn lessThan(_: void, a: TidSlot, b: TidSlot) bool {
+                        if (a.tid_key != b.tid_key) return a.tid_key < b.tid_key;
+                        return a.orig_pos < b.orig_pos;
+                    }
+                }.lessThan);
+                for (tagged_indices.items, tagged_items.items) |slot_idx, sorted_item| {
+                    non_term.items[slot_idx] = .{
+                        .entry = sorted_item.entry,
+                        .tid_key = sorted_item.tid_key,
+                        .tp_dungeon = sorted_item.tp_dungeon,
+                        .sub_dungeon = sorted_item.sub_dungeon,
+                        .orig_pos = sorted_item.orig_pos,
+                    };
+                }
+            }
+
+            if (is_sequence and non_term.items.len > 1) {
+                var k: usize = 0;
+                while (k < non_term.items.len) : (k += 1) {
+                    const tp_did = non_term.items[k].tp_dungeon;
+                    if (tp_did <= 0) continue;
+                    var found_idx: ?usize = null;
+                    for (non_term.items, 0..) |cand, m| {
+                        if (m != k and !cand.paired and cand.sub_dungeon == tp_did) {
+                            found_idx = m;
+                            break;
+                        }
+                    }
+                    if (found_idx) |m| {
+                        var target = non_term.orderedRemove(m);
+                        target.paired = true;
+                        const insert_idx = if (m < k) k else k + 1;
+                        try non_term.insert(arena, insert_idx, target);
+                        k = insert_idx;
+                    }
                 }
             }
         }
@@ -577,4 +614,55 @@ test "normalizeSequenceChildOrder pairs TeleportDungeon with sibling DungeonId s
     }
     try std.testing.expectEqual(@as(usize, 4), ci);
     try std.testing.expectEqualSlices(i32, &.{ 13, 190, 24, 26 }, &child_order);
+}
+
+test "normalizeSequenceChildOrder keeps 145000005 N24 doors before secret room climax" {
+    var arena = ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const raw_nodes = [_][]const u8{
+        "{\"Type\":\"Sequence\",\"Id\":24,\"ParentNodeId\":2,\"DungeonId\":904}",
+        "{\"Type\":\"ChildQuest\",\"Id\":36,\"ParentNodeId\":24,\"TidTip\":\"Quest_145000005_ChildQuestTip_145_32\"}",
+        "{\"Type\":\"ChildQuest\",\"Id\":37,\"ParentNodeId\":24,\"TidTip\":\"Quest_145000005_ChildQuestTip_145_33\"}",
+        "{\"Type\":\"Sequence\",\"Id\":304,\"ParentNodeId\":24}",
+        "{\"Type\":\"ChildQuest\",\"Id\":303,\"ParentNodeId\":304,\"TidTip\":\"Quest_145000005_ChildQuestTip_145_211\"}",
+        "{\"Type\":\"ChildQuest\",\"Id\":413,\"ParentNodeId\":304,\"TidTip\":\"Quest_145000005_ChildQuestTip_114_11\"}",
+        "{\"Type\":\"Sequence\",\"Id\":306,\"ParentNodeId\":24}",
+        "{\"Type\":\"ChildQuest\",\"Id\":309,\"ParentNodeId\":306,\"TidTip\":\"Quest_145000005_ChildQuestTip_145_215\"}",
+        "{\"Type\":\"ChildQuest\",\"Id\":422,\"ParentNodeId\":306,\"TidTip\":\"Quest_145000005_ChildQuestTip_114_22\"}",
+        "{\"Type\":\"Sequence\",\"Id\":349,\"ParentNodeId\":24}",
+        "{\"Type\":\"Sequence\",\"Id\":361,\"ParentNodeId\":24}",
+        "{\"Type\":\"ChildQuest\",\"Id\":41,\"ParentNodeId\":361,\"TidTip\":\"Quest_145000005_ChildQuestTip_145_37\"}",
+        "{\"Type\":\"ChildQuest\",\"Id\":42,\"ParentNodeId\":361,\"TidTip\":\"Quest_145000005_ChildQuestTip_145_38\"}",
+        "{\"Type\":\"ChildQuest\",\"Id\":210,\"ParentNodeId\":361,\"TidTip\":\"Quest_145000005_ChildQuestTip_145_156\"}",
+        "{\"Type\":\"ChildQuest\",\"Id\":310,\"ParentNodeId\":361,\"TidTip\":\"Quest_145000005_ChildQuestTip_145_216\"}",
+        "{\"Type\":\"ChildQuest\",\"Id\":414,\"ParentNodeId\":24,\"TidTip\":\"Quest_145000005_ChildQuestTip_114_12\"}",
+        "{\"Type\":\"ParallelSelect\",\"Id\":501,\"ParentNodeId\":24}",
+        "{\"Type\":\"ParallelSelect\",\"Id\":585,\"ParentNodeId\":24}",
+    };
+
+    var nodes: std.ArrayListUnmanaged(NodeEntry) = .empty;
+    for (raw_nodes) |raw| {
+        const val = try std.json.parseFromSliceLeaky(std.json.Value, alloc, raw, .{ .allocate = .alloc_always });
+        try appendNodeFlattened(alloc, &nodes, val, null);
+    }
+
+    try normalizeSequenceChildOrder(alloc, 145000005, nodes.items);
+
+    var n24_order: [9]i32 = undefined;
+    var idx24: usize = 0;
+    var n361_order: [4]i32 = undefined;
+    var idx361: usize = 0;
+    for (nodes.items) |n| {
+        if (n.parent_id == 24) {
+            n24_order[idx24] = n.id;
+            idx24 += 1;
+        } else if (n.parent_id == 361) {
+            n361_order[idx361] = n.id;
+            idx361 += 1;
+        }
+    }
+    try std.testing.expectEqualSlices(i32, &.{ 36, 585, 37, 304, 414, 501, 349, 306, 361 }, &n24_order);
+    try std.testing.expectEqualSlices(i32, &.{ 310, 210, 41, 42 }, &n361_order);
 }

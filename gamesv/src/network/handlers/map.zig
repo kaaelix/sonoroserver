@@ -15,6 +15,7 @@ const PlayerEchoComponent = @import("../../logic/component/player/PlayerEchoComp
 const RewardService = @import("../../logic/helpers/reward.zig");
 const PlayerProgressComponent = @import("../../logic/component/player/PlayerProgressComponent.zig");
 const Scene = @import("../../logic/Scene.zig");
+const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
 const lahai_roi_dungeon_id = 906;
 
 fn appendTrackedIds(arena: std.mem.Allocator, map_comp: *const PlayerMapComponent) !std.ArrayList(i32) {
@@ -650,27 +651,44 @@ fn trackRangeArea(
     assets: *const Assets,
     scene_opt: *?Scene,
     map_comp: *PlayerMapComponent,
-    progress_comp: *PlayerProgressComponent,
+    quest_ctx: QuestEngine.QuestContext,
     range_entity_id: i64,
     is_enter: bool,
     out_results: *std.ArrayList(pb.MapEntry(i32, pb.ErrorCode)),
+    progress_dirty: *bool,
 ) !void {
     // AccessRangeResultType: Trigger=0, EffectArea=3, Range=5
     try out_results.append(alloc.arena, .{ .key = 5, .value = .Success });
     var area_id: i32 = 0;
     var has_range_comp = false;
+    var cfg_id: i32 = std.math.cast(i32, range_entity_id) orelse 0;
+    var trigger_comp: ?@import("../../data/tables/entity_components/Trigger.zig") = null;
     if (scene_opt.*) |*scene| {
-        const cfg_id = scene.findConfigIdByNetId(range_entity_id) orelse range_entity_id;
-        if (assets.findLevelEntity(scene.instance_id, cfg_id)) |lcfg| {
+        const resolved = scene.findConfigIdByNetId(range_entity_id) orelse range_entity_id;
+        cfg_id = std.math.cast(i32, resolved) orelse cfg_id;
+        if (assets.findLevelEntity(scene.instance_id, resolved)) |lcfg| {
             area_id = lcfg.AreaId;
-            has_range_comp = lcfg.ComponentsData.RangeComponent != null;
+            var components = lcfg.ComponentsData;
+            if (assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+                tpl.ComponentsData.mergeInto(&components);
+            }
+            has_range_comp = components.RangeComponent != null;
+            trigger_comp = components.TriggerComponent;
         }
     }
     if (has_range_comp) {
         try out_results.append(alloc.arena, .{ .key = 3, .value = .Success });
     }
-    const rkey = try std.fmt.allocPrint(alloc.arena, "range:player:{d}", .{range_entity_id});
-    try progress_comp.info.setKeyInt(alloc.gpa, rkey, if (is_enter) 1 else 0);
+
+    if (trigger_comp) |trig| {
+        if (!(trig.Disabled orelse false)) {
+            try out_results.append(alloc.arena, .{ .key = 0, .value = .Success });
+            if (try QuestEngine.handleEntityRangeTrigger(quest_ctx, range_entity_id, cfg_id, trig, is_enter)) {
+                progress_dirty.* = true;
+            }
+        }
+    }
+
     if (is_enter and area_id > 0) {
         if (try map_comp.info.unlockArea(alloc.gpa, area_id)) {
             try map_comp.save(fs, alloc.arena);
@@ -686,12 +704,16 @@ pub fn onPlayerAccessRangeRequest(
     scene_opt: *?Scene,
     map_comp: *PlayerMapComponent,
     progress_comp: *PlayerProgressComponent,
+    quest_ctx: QuestEngine.QuestContext,
 ) !void {
     const rtype = txn.message.AccessRangeType orelse .RangeEnter;
     const is_enter = rtype == .RangeEnter or rtype == .RangeInit;
     var results: std.ArrayList(pb.MapEntry(i32, pb.ErrorCode)) = .empty;
-    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, progress_comp, txn.message.RangeEntityId, is_enter, &results);
-    try progress_comp.save(fs, alloc.arena);
+    var progress_dirty = false;
+    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, quest_ctx, txn.message.RangeEntityId, is_enter, &results, &progress_dirty);
+    if (progress_dirty) {
+        try progress_comp.save(fs, alloc.arena);
+    }
 
     txn.respond(.{
         .AccessRangeResult = .{
@@ -712,22 +734,30 @@ pub fn onEntityAccessRangeRequest(
     scene_opt: *?Scene,
     map_comp: *PlayerMapComponent,
     progress_comp: *PlayerProgressComponent,
+    quest_ctx: QuestEngine.QuestContext,
 ) !void {
     const rtype = txn.message.RangeType orelse .RangeEnter;
     const is_enter = rtype == .RangeEnter or rtype == .RangeInit;
     var infos: std.ArrayList(pb.EntityAccessInfo) = .empty;
     var range_results: std.ArrayList(pb.MapEntry(i32, pb.ErrorCode)) = .empty;
-    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, progress_comp, txn.message.EntityId, is_enter, &range_results);
+    var progress_dirty = false;
+    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, quest_ctx, txn.message.EntityId, is_enter, &range_results, &progress_dirty);
+    const next_val: i64 = if (is_enter) 1 else 0;
     for (txn.message.EntitiesToCheck.items) |eid| {
         const ekey = try std.fmt.allocPrint(alloc.arena, "range:ent:{d}:{d}", .{ txn.message.EntityId, eid });
-        try progress_comp.info.setKeyInt(alloc.gpa, ekey, if (is_enter) 1 else 0);
+        if (progress_comp.info.getKeyInt(ekey) != next_val) {
+            try progress_comp.info.setKeyInt(alloc.gpa, ekey, next_val);
+            progress_dirty = true;
+        }
         try infos.append(alloc.arena, .{
             .EntityId = eid,
             .RangeType = txn.message.RangeType,
             .AcessRangeResults = range_results,
         });
     }
-    try progress_comp.save(fs, alloc.arena);
+    if (progress_dirty) {
+        try progress_comp.save(fs, alloc.arena);
+    }
     txn.respond(.{
         .ErrorCode = .Success,
         .EntityId = txn.message.EntityId,
@@ -743,20 +773,27 @@ pub fn onInitRangeRequest(
     scene_opt: *?Scene,
     map_comp: *PlayerMapComponent,
     progress_comp: *PlayerProgressComponent,
+    quest_ctx: QuestEngine.QuestContext,
 ) !void {
     var range_results: std.ArrayList(pb.MapEntry(i32, pb.ErrorCode)) = .empty;
-    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, progress_comp, txn.message.EntityId, txn.message.IsPlayerInRange, &range_results);
+    var progress_dirty = false;
+    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, quest_ctx, txn.message.EntityId, txn.message.IsPlayerInRange, &range_results, &progress_dirty);
     var infos: std.ArrayList(pb.EntityAccessInfo) = .empty;
     for (txn.message.EntitiesToRequest.items) |eid| {
         const ekey = try std.fmt.allocPrint(alloc.arena, "range:ent:{d}:{d}", .{ txn.message.EntityId, eid });
-        try progress_comp.info.setKeyInt(alloc.gpa, ekey, 1);
+        if (progress_comp.info.getKeyInt(ekey) != 1) {
+            try progress_comp.info.setKeyInt(alloc.gpa, ekey, 1);
+            progress_dirty = true;
+        }
         try infos.append(alloc.arena, .{
             .EntityId = eid,
             .RangeType = .RangeInit,
             .AcessRangeResults = range_results,
         });
     }
-    try progress_comp.save(fs, alloc.arena);
+    if (progress_dirty) {
+        try progress_comp.save(fs, alloc.arena);
+    }
     txn.respond(.{
         .ErrorCode = .Success,
         .EntityId = txn.message.EntityId,

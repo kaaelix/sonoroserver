@@ -336,6 +336,57 @@ pub fn doesFlowSwitchMainRole(val: std.json.Value) bool {
     return false;
 }
 
+/// Collects entity config IDs awakened or explicitly shown by `AwakeEntity`, `BeginFlowTemplate`, or `SetEntityVisible` (`Visible != false`).
+pub fn collectAwakeEntityIds(arena: Allocator, val: std.json.Value, out: *std.ArrayList(i32)) !void {
+    switch (val) {
+        .object => |obj| {
+            if (obj.get("Name")) |name_val| {
+                if (name_val == .string) {
+                    const name = name_val.string;
+                    if (obj.get("Params")) |params_val| {
+                        if (params_val == .object) {
+                            const p = params_val.object;
+                            if (std.mem.eql(u8, name, "AwakeEntity")) {
+                                try appendSingleEntityId(arena, p.get("EntityId"), out);
+                                try appendEntityIdList(arena, p.get("EntityIds"), out);
+                            } else if (std.mem.eql(u8, name, "SetEntityVisible")) {
+                                const visible = if (p.get("Visible")) |vv| switch (vv) {
+                                    .bool => |b| b,
+                                    else => true,
+                                } else true;
+                                if (visible) {
+                                    try appendSingleEntityId(arena, p.get("EntityId"), out);
+                                    try appendEntityIdList(arena, p.get("EntityIds"), out);
+                                }
+                            } else if (std.mem.eql(u8, name, "BeginFlowTemplate")) {
+                                if (p.get("Actors")) |actors_val| {
+                                    if (actors_val == .array) {
+                                        for (actors_val.array.items) |actor_item| {
+                                            if (actor_item == .object) {
+                                                try appendSingleEntityId(arena, actor_item.object.get("EntityId"), out);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                try collectAwakeEntityIds(arena, entry.value_ptr.*, out);
+            }
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                try collectAwakeEntityIds(arena, item, out);
+            }
+        },
+        else => {},
+    }
+}
+
 fn parseJsonInt(v_opt: ?std.json.Value) ?i32 {
     const v = v_opt orelse return null;
     return switch (v) {
@@ -495,4 +546,32 @@ test "collects AwakeEntity, ChangeEntityState, and BeginFlowTemplate actors plus
     try collectSetEntityVisibleIds(arena, parsed, &entity_ids);
     try testing.expectEqualSlices(i32, &.{ 145750135, 145000246, 145750147, 147900228 }, entity_ids.items);
     try testing.expect(doesFlowSwitchMainRole(parsed));
+
+    var awake_ids: std.ArrayList(i32) = .empty;
+    try collectAwakeEntityIds(arena, parsed, &awake_ids);
+    try testing.expectEqualSlices(i32, &.{ 145750135, 145000246, 145750147 }, awake_ids.items);
+}
+
+test "collectAwakeEntityIds skips SetEntityVisible hide and DestroyEntity" {
+    const testing = std.testing;
+    const sample =
+        \\{
+        \\  "StateKey": "剧情_test_1_2",
+        \\  "Actions": [
+        \\    { "Name": "SetEntityVisible", "Params": { "Visible": false, "EntityIds": [101, 102] } },
+        \\    { "Name": "DestroyEntity", "Params": { "EntityIds": [103] } },
+        \\    { "Name": "SetEntityVisible", "Params": { "Visible": true, "EntityIds": [104] } },
+        \\    { "Name": "AwakeEntity", "Params": { "EntityId": 105 } }
+        \\  ]
+        \\}
+    ;
+
+    var arena_state = ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena, sample, .{ .allocate = .alloc_always });
+
+    var awake_ids: std.ArrayList(i32) = .empty;
+    try collectAwakeEntityIds(arena, parsed, &awake_ids);
+    try testing.expectEqualSlices(i32, &.{ 104, 105 }, awake_ids.items);
 }

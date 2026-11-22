@@ -124,6 +124,73 @@ pub fn resolveEntityConfig(assets: *const Assets, scene_map_id: i32, config_id: 
     return null;
 }
 
+fn matchesSceneInstance(assets: *const Assets, lp: Assets.DataTables.LevelPlayData, scene_instance_id: i32) bool {
+    const expected_inst: i32 = if (lp.Data.InstanceId != 0) lp.Data.InstanceId else lp.Data.LevelId;
+    if (expected_inst == 0 or expected_inst == scene_instance_id) return true;
+    return assets.resolveMapConfigId(scene_instance_id) == expected_inst;
+}
+
+fn jsonFloat(v_opt: ?std.json.Value) ?f32 {
+    const v = v_opt orelse return null;
+    return switch (v) {
+        .integer => |n| @floatFromInt(n),
+        .float => |f| if (std.math.isFinite(f)) @floatCast(f) else null,
+        else => null,
+    };
+}
+
+fn isPlayerWithinReachArea(ctx: LevelPlayContext, cond_obj: std.json.ObjectMap, x: f32, y: f32) bool {
+    const range = jsonFloat(cond_obj.get("Range")) orelse return true;
+    if (range <= 0) return true;
+    const range_sq = range * range;
+
+    if (cond_obj.get("RangeEntities")) |re_val| {
+        if (re_val == .array and re_val.array.items.len > 0) {
+            var resolved_any = false;
+            for (re_val.array.items) |item| {
+                const eid = jsonInt(item) orelse continue;
+                var target_pos: ?[3]f32 = null;
+                const slice = ctx.scene.entities.slice();
+                for (slice.items(.config), slice.items(.position)) |cfg, pos_opt| {
+                    if (cfg.config_id == eid) {
+                        if (pos_opt) |p| {
+                            target_pos = p.location;
+                            break;
+                        }
+                    }
+                }
+                if (target_pos == null) {
+                    if (ctx.assets.findLevelEntity(ctx.scene.instance_id, eid)) |lcfg| {
+                        target_pos = Assets.AssetIndexes.entityWorldPos(lcfg);
+                    }
+                }
+                if (target_pos) |tp| {
+                    resolved_any = true;
+                    const dx = tp[0] - x;
+                    const dy = tp[1] - y;
+                    if (dx * dx + dy * dy <= range_sq) return true;
+                }
+            }
+            return !resolved_any;
+        }
+    }
+
+    if (cond_obj.get("Pos")) |pos_val| {
+        if (pos_val == .object) {
+            const px = jsonFloat(pos_val.object.get("X")) orelse 0;
+            const py = jsonFloat(pos_val.object.get("Y")) orelse 0;
+            const pz = jsonFloat(pos_val.object.get("Z")) orelse 0;
+            if (px != 0 or py != 0 or pz != 0) {
+                const dx = px - x;
+                const dy = py - y;
+                return dx * dx + dy * dy <= range_sq;
+            }
+        }
+    }
+
+    return true;
+}
+
 fn jsonInt(v_opt: ?std.json.Value) ?i32 {
     const v = v_opt orelse return null;
     return switch (v) {
@@ -315,11 +382,7 @@ fn checkLevelPlayKillProgress(ctx: LevelPlayContext, killed_cfg_id: i32, killed_
 
     for (candidate_lp_indices.items) |lp_idx| {
         const lp = ctx.assets.tables.level_play_data.items[lp_idx];
-        if (lp.Data.InstanceId != 0 and lp.Data.InstanceId != ctx.scene.instance_id and
-            lp.Data.LevelId != 0 and lp.Data.LevelId != ctx.scene.instance_id)
-        {
-            continue;
-        }
+        if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) continue;
         if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp.LevelPlayId)) continue;
 
         const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp.LevelPlayId) catch continue;
@@ -517,12 +580,14 @@ pub fn onGetRewardTreasureBox(ctx: LevelPlayContext, net_id: i64) !void {
     if (cfg_id > 0) {
         if (std.math.cast(i32, cfg_id)) |cfg_id32| {
             const reward_indices = ctx.assets.indexes.levelPlayIndicesForRewardEntity(cfg_id32);
-            if (reward_indices.len > 0) {
-                const lp = ctx.assets.tables.level_play_data.items[reward_indices[0]];
+            for (reward_indices) |lp_idx| {
+                const lp = ctx.assets.tables.level_play_data.items[lp_idx];
+                if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) continue;
                 if (lp.Data.LevelPlayRewardConfig) |rc| {
                     if (reward_id == 0 and rc.RewardId > 0) reward_id = rc.RewardId;
                 }
                 completed_lp_id = lp.LevelPlayId;
+                break;
             }
         }
     }
@@ -584,8 +649,7 @@ pub fn onEntityInteractFallback(ctx: LevelPlayContext, net_id: i64) !bool {
     const cfg_id32 = std.math.cast(i32, cfg_id) orelse return false;
     for (ctx.assets.indexes.levelPlayIndicesForRefEntity(cfg_id32)) |lp_idx| {
         const lp = ctx.assets.tables.level_play_data.items[lp_idx];
-        if (lp.Data.InstanceId != 0 and lp.Data.InstanceId != ctx.scene.instance_id and
-            lp.Data.LevelId != 0 and lp.Data.LevelId != ctx.scene.instance_id) continue;
+        if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) continue;
         if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp.LevelPlayId)) continue;
 
         const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp.LevelPlayId) catch continue;
@@ -656,17 +720,19 @@ pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32) !void {
             const lp_opt = ctx.assets.tables.level_play_data.getDataById(lpid);
             var still_inside = false;
             if (lp_opt) |lp| {
-                const enter_r: f32 = if (lp.Data.EnterRadius > 0) @floatFromInt(lp.Data.EnterRadius) else 3000.0;
-                const leave_r: f32 = if (lp.Data.LeaveRadius > 0) @floatFromInt(lp.Data.LeaveRadius) else enter_r + 1500.0;
-                for (configs, positions) |cfg, pos_opt| {
-                    if (cfg.config_id != lp.Data.LevelPlayEntityId) continue;
-                    const pos = pos_opt orelse continue;
-                    const dx = pos.location[0] - x;
-                    const dy = pos.location[1] - y;
-                    if (dx * dx + dy * dy <= leave_r * leave_r) {
-                        still_inside = true;
+                if (matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) {
+                    const enter_r: f32 = if (lp.Data.EnterRadius > 0) @floatFromInt(lp.Data.EnterRadius) else 3000.0;
+                    const leave_r: f32 = if (lp.Data.LeaveRadius > 0) @floatFromInt(lp.Data.LeaveRadius) else enter_r + 1500.0;
+                    for (configs, positions) |cfg, pos_opt| {
+                        if (cfg.config_id != lp.Data.LevelPlayEntityId) continue;
+                        const pos = pos_opt orelse continue;
+                        const dx = pos.location[0] - x;
+                        const dy = pos.location[1] - y;
+                        if (dx * dx + dy * dy <= leave_r * leave_r) {
+                            still_inside = true;
+                        }
+                        break;
                     }
-                    break;
                 }
             }
             if (!still_inside) {
@@ -699,6 +765,8 @@ pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32) !void {
     for (candidates.items) |cand| {
         for (ctx.assets.indexes.levelPlayIndicesForEntity(cand.cfg_id)) |lp_idx| {
             const lp = ctx.assets.tables.level_play_data.items[lp_idx];
+            if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) continue;
+            if (std.mem.eql(u8, lp.Data.Type, "Quest")) continue;
             if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp.LevelPlayId)) continue;
             const enter_r: f32 = if (lp.Data.EnterRadius > 0) @floatFromInt(lp.Data.EnterRadius) else 3000.0;
             if (cand.dist2 > enter_r * enter_r) continue;
@@ -728,7 +796,7 @@ pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32) !void {
                 const cond_val = node.data.object.get("Condition") orelse continue;
                 if (cond_val != .object) continue;
                 const ctype = jsonStr(cond_val.object.get("Type")) orelse continue;
-                if (std.mem.eql(u8, ctype, "ReachArea")) {
+                if (std.mem.eql(u8, ctype, "ReachArea") and isPlayerWithinReachArea(ctx, cond_val.object, x, y)) {
                     runLevelPlayActions(ctx, lp.LevelPlayId, node.id, node.data.object.get("FinishActions"));
                     reach_area_done = true;
                 }
@@ -743,4 +811,72 @@ pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32) !void {
     if (dirty_entered) {
         ctx.quest_comp.save(ctx.fs, ctx.alloc.arena) catch {};
     }
+}
+
+fn makeTestInstanceDungeon(id: i32, map_config_id: i32) Assets.DataTables.InstanceDungeon {
+    return .{
+        .Id = id,
+        .MapConfigId = map_config_id,
+        .MapName = "",
+        .InstType = 0,
+        .InstSubType = 0,
+        .WorldDungeonSubType = 0,
+        .OnlineType = 0,
+        .CustomTypes = &.{},
+        .MiniMapId = 0,
+        .FightFormationId = 0,
+        .RoleTypeList = .{ 0, 0, 0 },
+        .TrialRoleInfo = .{ 0, 0, 0 },
+        .ReviveId = 0,
+        .BornPosition = .{ 0, 0, 0 },
+        .BornRotation = .{ 0, 0, 0 },
+        .RecoverWorldLocation = &.{},
+        .ExitDungeonConfirmId = &.{},
+        .EntranceEntities = &.{},
+        .ExitEntities = &.{},
+        .FirstRewardId = 0,
+        .RewardId = 0,
+        .RepeatRewardId = 0,
+        .ExchangeRewardId = 0,
+        .DropVisionLimit = 0,
+        .SharedTreasureGroup = &.{},
+        .EnterControlId = 0,
+        .EnterCondition = &.{},
+        .EntityLevel = 0,
+        .AutoLeaveTime = 0,
+        .VerifyCreatureGen = false,
+    };
+}
+
+test "matchesSceneInstance respects InstanceId override and rejects cross-map LevelId" {
+    const testing = std.testing;
+    const dungeons = [_]Assets.DataTables.InstanceDungeon{
+        makeTestInstanceDungeon(8, 8),
+        makeTestInstanceDungeon(904, 904),
+        makeTestInstanceDungeon(909, 909),
+        makeTestInstanceDungeon(1500, 8),
+    };
+    var inst_map: std.array_hash_map.Auto(i32, usize) = .empty;
+    defer inst_map.deinit(testing.allocator);
+    for (dungeons, 0..) |d, i| try inst_map.put(testing.allocator, d.Id, i);
+
+    var assets: Assets = undefined;
+    assets.tables.instance_dungeon = .{ .items = &dungeons, .index = inst_map };
+
+    const lp_909: Assets.DataTables.LevelPlayData = .{
+        .LevelPlayId = 109000078,
+        .Data = .{ .LevelId = 909, .InstanceId = 0, .Type = "Quest" },
+    };
+    try testing.expect(!matchesSceneInstance(&assets, lp_909, 904));
+    try testing.expect(!matchesSceneInstance(&assets, lp_909, 8));
+    try testing.expect(matchesSceneInstance(&assets, lp_909, 909));
+
+    // InstanceId overrides LevelId when both are set.
+    const lp_inst_override: Assets.DataTables.LevelPlayData = .{
+        .LevelPlayId = 16000004,
+        .Data = .{ .LevelId = 100, .InstanceId = 8, .Type = "Challenge" },
+    };
+    try testing.expect(matchesSceneInstance(&assets, lp_inst_override, 8));
+    try testing.expect(!matchesSceneInstance(&assets, lp_inst_override, 100));
+    try testing.expect(matchesSceneInstance(&assets, lp_inst_override, 1500));
 }

@@ -385,7 +385,7 @@ pub fn onUpdateFormationRequest(
 
     try buff_timers.ensureAllRegistered(alloc.gpa, scene, assets, now_ms);
     buff_timers.syncAllLeftDurations(scene, now_ms);
-    try scene.save(fs, alloc.gpa);
+    try scene.savePersistent(fs, alloc.gpa);
     try events.enqueue(.update_formations, .{});
     txn.respond(.{ .ErrorCode = .Success });
     try QuestEngine.onConditionStateChanged(qctx);
@@ -426,7 +426,7 @@ pub fn onRenameFormationRequest(
         if (old_name.len != 0) alloc.gpa.free(old_name);
     }
     scene.formation_info.formations[idx].name = owned;
-    try scene.save(fs, alloc.gpa);
+    try scene.savePersistent(fs, alloc.gpa);
     try events.enqueue(.update_formations, .{});
     txn.respond(.{ .ErrorCode = .Success });
 }

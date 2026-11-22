@@ -78,6 +78,7 @@ pub fn onTeleportTransferRequest(
             .MapId = teleporter.MapId,
             .Pos = .{ .X = x, .Y = y, .Z = z },
             .Rot = .{ .X = 0, .Y = 0, .Z = spawn.yaw },
+            .Gravity = if (spawn.has_gravity_config) .{ .X = spawn.gravity[0], .Y = spawn.gravity[1], .Z = spawn.gravity[2] } else null,
             .Reason = .Transfer,
             .GameCtx = .{ .CtxInfo = .{ .Transfer = .{ .TeleportId = teleporter.Id } } },
         });
@@ -207,7 +208,64 @@ const SpawnTransform = struct {
     y: f32,
     z: f32,
     yaw: f32,
+    gravity: [3]f32 = .{ 0, 0, -1 },
+    has_gravity_config: bool = false,
 };
+
+fn resolveEntityGravity(entity_cfg: *const LevelEntityConfig, base_rot: [3]f32) struct { dir: [3]f32, configured: bool } {
+    const base_info = entity_cfg.ComponentsData.BaseInfoComponent orelse return .{ .dir = .{ 0, 0, -1 }, .configured = false };
+    const gravity_config = base_info.GravityConfig orelse return .{ .dir = .{ 0, 0, -1 }, .configured = false };
+    const direction = gravity_config.GravityDirection orelse return .{ .dir = .{ 0, 0, -1 }, .configured = false };
+
+    if (direction.Direction) |v| {
+        return .{ .dir = .{ v.X, v.Y, v.Z }, .configured = true };
+    }
+    if (direction.WorldAxis) |axis| {
+        if (std.mem.eql(u8, axis, "PositiveX")) return .{ .dir = .{ 1, 0, 0 }, .configured = true };
+        if (std.mem.eql(u8, axis, "NegativeX")) return .{ .dir = .{ -1, 0, 0 }, .configured = true };
+        if (std.mem.eql(u8, axis, "PositiveY")) return .{ .dir = .{ 0, 1, 0 }, .configured = true };
+        if (std.mem.eql(u8, axis, "NegativeY")) return .{ .dir = .{ 0, -1, 0 }, .configured = true };
+        if (std.mem.eql(u8, axis, "PositiveZ")) return .{ .dir = .{ 0, 0, 1 }, .configured = true };
+        if (std.mem.eql(u8, axis, "NegativeZ")) return .{ .dir = .{ 0, 0, -1 }, .configured = true };
+    }
+    if (direction.Type) |kind| {
+        if (std.mem.eql(u8, kind, "SelfRotation")) {
+            const to_rad = std.math.pi / 180.0;
+            const sr = @sin(base_rot[0] * to_rad);
+            const cr = @cos(base_rot[0] * to_rad);
+            const sp = @sin(base_rot[1] * to_rad);
+            const cp = @cos(base_rot[1] * to_rad);
+            const sy = @sin(base_rot[2] * to_rad);
+            const cy = @cos(base_rot[2] * to_rad);
+            return .{
+                .dir = .{
+                    cr * sp * cy + sr * sy,
+                    cr * sp * sy - cy * sr,
+                    -(cr * cp),
+                },
+                .configured = true,
+            };
+        }
+    }
+    return .{ .dir = .{ 0, 0, -1 }, .configured = false };
+}
+
+fn rotateLocalOffsetUe(local: [3]f32, rot_deg: [3]f32) [3]f32 {
+    const to_rad = std.math.pi / 180.0;
+    const sr = @sin(rot_deg[0] * to_rad);
+    const cr = @cos(rot_deg[0] * to_rad);
+    const sp = @sin(rot_deg[1] * to_rad);
+    const cp = @cos(rot_deg[1] * to_rad);
+    const sy = @sin(rot_deg[2] * to_rad);
+    const cy = @cos(rot_deg[2] * to_rad);
+
+    // UE FRotationMatrix::MakeFromRotator(Pitch=rot_deg[1], Yaw=rot_deg[2], Roll=rot_deg[0]):
+    return .{
+        local[0] * (cp * cy) + local[1] * (sr * sp * cy - cr * sy) + local[2] * (-(cr * sp * cy + sr * sy)),
+        local[0] * (cp * sy) + local[1] * (sr * sp * sy + cr * cy) + local[2] * (cy * sr - cr * sp * sy),
+        local[0] * sp + local[1] * (-sr * cp) + local[2] * (cr * cp),
+    };
+}
 
 fn resolveTeleporterSpawn(
     is_nexus: bool,
@@ -215,47 +273,52 @@ fn resolveTeleporterSpawn(
 ) ?SpawnTransform {
     const base_pos = Assets.AssetIndexes.entityWorldPos(entity_cfg) orelse return null;
     const base_rot = Assets.AssetIndexes.entityWorldRot(entity_cfg);
-    const yaw_rad = base_rot[2] * (std.math.pi / 180.0);
-    const cos_y = @cos(yaw_rad);
-    const sin_y = @sin(yaw_rad);
-
-    const tc_opt = entity_cfg.ComponentsData.TeleportComponent orelse entity_cfg.ComponentsData.DynamicTeleportComponent;
-    if (tc_opt) |tc| {
-        if (tc.TeleportPos) |p| {
-            const ox = p.X orelse 0.0;
-            const oy = p.Y orelse 0.0;
-            const oz = p.Z orelse 85.0;
-            return .{
-                .x = base_pos[0] + ox * cos_y - oy * sin_y,
-                .y = base_pos[1] + ox * sin_y + oy * cos_y,
-                .z = base_pos[2] + oz,
-                .yaw = base_rot[2] + (p.A orelse 0.0),
-            };
-        }
-    }
+    const grav = resolveEntityGravity(entity_cfg, base_rot);
 
     const is_pillar_tp = is_nexus or
         (std.mem.indexOf(u8, entity_cfg.BlueprintType, "Teleport") != null and
             std.mem.indexOf(u8, entity_cfg.BlueprintType, "TeleportPoint") == null);
-    const ox: f32 = 0.0;
-    const oy: f32 = if (is_pillar_tp) 300.0 else 0.0;
-    const oz: f32 = 85.0;
+
+    var ox: f32 = 0.0;
+    var oy: f32 = if (is_pillar_tp) 300.0 else 0.0;
+    var oz: f32 = 85.0;
+    var yaw: f32 = base_rot[2];
+
+    const tc_opt = entity_cfg.ComponentsData.TeleportComponent orelse entity_cfg.ComponentsData.DynamicTeleportComponent;
+    if (tc_opt) |tc| {
+        if (tc.TeleportPos) |p| {
+            const px = p.X orelse 0.0;
+            const py = p.Y orelse 0.0;
+            // Some pillar teleporters (e.g. 3520003) carry null/near-zero X/Y; keep them beside the pillar.
+            if (!is_pillar_tp or (px * px + py * py >= 1.0)) {
+                ox = px;
+                oy = py;
+            }
+            // TeleportPos.Z is ground surface height relative to entity origin; always add +85cm capsule half-height.
+            oz = (p.Z orelse 0.0) + 85.0;
+            yaw = base_rot[2] + (p.A orelse 0.0);
+        }
+    }
+
+    const rotated = rotateLocalOffsetUe(.{ ox, oy, oz }, base_rot);
     return .{
-        .x = base_pos[0] + ox * cos_y - oy * sin_y,
-        .y = base_pos[1] + ox * sin_y + oy * cos_y,
-        .z = base_pos[2] + oz,
-        .yaw = base_rot[2],
+        .x = base_pos[0] + rotated[0],
+        .y = base_pos[1] + rotated[1],
+        .z = base_pos[2] + rotated[2],
+        .yaw = yaw,
+        .gravity = grav.dir,
+        .has_gravity_config = grav.configured,
     };
 }
 
-test "resolveTeleporterSpawn applies TeleportComponent offset, Z lift, and pillar fallback" {
+test "resolveTeleporterSpawn applies TeleportComponent offset, capsule Z lift, 3D gravity rotation, and pillar fallback" {
     var transform_90 = [_]LevelEntityConfig.Vector{
         .{ .X = 100000, .Y = 200000, .Z = 30000 },
         .{ .X = 0, .Y = 0, .Z = 9000 }, // 90 deg yaw
         .{ .X = 100, .Y = 100, .Z = 100 },
     };
 
-    // 1. With TeleportPos rotated by 90 deg: (ox=100, oy=200) -> (-200, 100)
+    // 1. With TeleportPos rotated by 90 deg: (ox=100, oy=200, oz=117.25+85) -> (-200, 100, +202.25)
     const cfg_with_pos: LevelEntityConfig = .{
         .Id = 1,
         .EntityId = 113003404,
@@ -275,8 +338,9 @@ test "resolveTeleporterSpawn applies TeleportComponent offset, Z lift, and pilla
     const s1 = resolveTeleporterSpawn(false, &cfg_with_pos).?;
     try std.testing.expectApproxEqAbs(@as(f32, 800.0), s1.x, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 2100.0), s1.y, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 417.25), s1.z, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 502.25), s1.z, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 45.0), s1.yaw, 0.01);
+    try std.testing.expect(!s1.has_gravity_config);
 
     // 2. With TeleportPos where Z is null -> lifted by +85cm
     const cfg_null_z: LevelEntityConfig = .{
@@ -317,4 +381,39 @@ test "resolveTeleporterSpawn applies TeleportComponent offset, Z lift, and pilla
     try std.testing.expectApproxEqAbs(@as(f32, 700.0), s3.x, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 2000.0), s3.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 385.0), s3.z, 0.01);
+
+    // 4. Upside-down Avinoleum beacon (Roll=180 deg, Yaw=0, Gravity=PositiveZ, TeleportPos.Z=null)
+    // Local (100, 200, 85) with Roll=180 flips Y & Z -> (+100, -200, -85) with Gravity=(0,0,1).
+    var transform_inverted = [_]LevelEntityConfig.Vector{
+        .{ .X = 100000, .Y = 200000, .Z = 30000 },
+        .{ .X = 18000, .Y = 0, .Z = 0 },
+        .{ .X = 100, .Y = 100, .Z = 100 },
+    };
+    const cfg_inverted: LevelEntityConfig = .{
+        .Id = 4,
+        .EntityId = 169750416,
+        .BlueprintType = "Teleport2",
+        .InSleep = false,
+        .IsHidden = false,
+        .MapId = 903,
+        .AreaId = 1,
+        .Transform = &transform_inverted,
+        .ComponentsData = .{
+            .BaseInfoComponent = .{
+                .GravityConfig = .{
+                    .GravityDirection = .{ .Type = "WorldAxis", .WorldAxis = "PositiveZ" },
+                },
+            },
+            .TeleportComponent = .{
+                .TeleporterId = 390302,
+                .TeleportPos = .{ .X = 100.0, .Y = 200.0, .Z = null, .A = 90.0 },
+            },
+        },
+    };
+    const s4 = resolveTeleporterSpawn(false, &cfg_inverted).?;
+    try std.testing.expectApproxEqAbs(@as(f32, 1100.0), s4.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 1800.0), s4.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 215.0), s4.z, 0.01);
+    try std.testing.expect(s4.has_gravity_config);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), s4.gravity[2], 0.01);
 }

@@ -1090,13 +1090,76 @@ pub fn onGravityHookLockPointChangeGravityRequest(
     txn.respond(.{ .ErrorCode = .Success });
 }
 
+const HookInteractConfig = @import("../../data/tables/entity_components/Extra.zig").HookInteractConfig;
+
+fn resolveHookInteractConfig(
+    assets: *const Assets,
+    map_id: i32,
+    cfg_id: i64,
+) ?HookInteractConfig {
+    const level_cfg = assets.findLevelEntity(map_id, cfg_id) orelse return null;
+    for (level_cfg.ComponentsData.extra) |entry| {
+        if (entry == .HookLockPoint) {
+            if (entry.HookLockPoint.HookInteractConfig) |cfg| return cfg;
+        }
+    }
+    if (assets.findTemplateConfig(level_cfg.BlueprintType)) |tpl_cfg| {
+        for (tpl_cfg.ComponentsData.extra) |entry| {
+            if (entry == .HookLockPoint) {
+                if (entry.HookLockPoint.HookInteractConfig) |cfg| return cfg;
+            }
+        }
+    }
+    return null;
+}
+
+fn handleHookLockPointAction(
+    qctx: QuestEngine.QuestContext,
+    entity_id: i64,
+    action_type: pb.HookInteractActionType,
+) !void {
+    const scene = qctx.scene orelse return;
+    const idx = scene.net_id_map.get(entity_id) orelse return;
+    const cfg_id = scene.entities.items(.config)[idx].config_id;
+    if (cfg_id <= 0) return;
+
+    const hook_cfg = resolveHookInteractConfig(qctx.assets, scene.instance_id, cfg_id) orelse return;
+    const actions = switch (action_type) {
+        .Hooked => hook_cfg.HookActions,
+        .ExitEndpoint => hook_cfg.FinishActions,
+        .ExitMidway => hook_cfg.ExitHookActions,
+    } orelse return;
+    if (actions.len == 0) return;
+
+    try QuestEngine.executeEntityActions(qctx, entity_id, cfg_id, actions);
+    const end_idx: i32 = @intCast(actions.len - 1);
+    const total_cnt: i32 = @intCast(actions.len);
+    try qctx.conn.push(qctx.alloc.gpa, qctx.io, pb.ActionNotify{
+        .GameCtx = .{
+            .CtxType = .HookLockPointActionCtx,
+            .CtxInfo = .{ .HookLockPointAction = .{
+                .EntityCtx = .{ .ConfigId = cfg_id, .IncId = entity_id },
+                .InteractionType = action_type,
+            } },
+        },
+        .TotalCount = total_cnt,
+        .PlayerId = scene.player_id,
+        .StartIndex = 0,
+        .EndIndex = end_idx,
+        .NeedFinishReq = false,
+        .IncId = scene.allocActionIncId(),
+    });
+}
+
 pub fn onHookLockPointRequest(
     txn: *Transaction(pb.HookLockPointRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistIntKey(alloc, fs, pc, "hook_point:active", txn.message.EntityId, 1);
+    try handleHookLockPointAction(qctx, txn.message.EntityId, .Hooked);
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -1105,8 +1168,10 @@ pub fn onHookLockPointFinishRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistClaimKey(alloc, fs, pc, "hook_point:fin", txn.message.EntityId);
+    try handleHookLockPointAction(qctx, txn.message.EntityId, .ExitEndpoint);
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -1115,8 +1180,10 @@ pub fn onHookLockPointExitRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistIntKey(alloc, fs, pc, "hook_point:active", txn.message.EntityId, 0);
+    try handleHookLockPointAction(qctx, txn.message.EntityId, .ExitMidway);
     txn.respond(.{ .ErrorCode = .Success });
 }
 

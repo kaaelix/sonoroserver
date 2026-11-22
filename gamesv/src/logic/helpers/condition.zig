@@ -33,6 +33,7 @@ pub const EvalContext = struct {
     scene: ?*const Scene = null,
     owner_quest_id: i32 = 0,
     target_role_id: i32 = 0,
+    self_entity_config_id: i32 = 0,
 };
 
 pub fn pushFuncOpenNotify(
@@ -1068,6 +1069,40 @@ pub fn evalInlineConditionBlock(ctx: EvalContext, block_val: std.json.Value) boo
     return !is_or;
 }
 
+/// Resolves persisted entity state first, falling back to the entity/template configured default state.
+fn resolveCurrentEntityState(ctx: EvalContext, eid: i32) []const u8 {
+    if (ctx.quest_comp.info.getEntityState(eid)) |saved| return saved;
+    if (ctx.assets) |assets| {
+        const inst_id: i32 = if (ctx.scene) |s| s.instance_id else 8;
+        if (assets.findLevelEntity(inst_id, eid)) |lcfg| {
+            var comps = lcfg.ComponentsData;
+            if (assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+                tpl.ComponentsData.mergeInto(&comps);
+            }
+            if (comps.EntityStateComponent) |esc| {
+                if (esc.State) |st| {
+                    if (st.len > 0) return st;
+                }
+            }
+        }
+    }
+    return "关卡.Common.状态.常态";
+}
+
+fn evalEntityStateCompare(ctx: EvalContext, eid: i32, obj: std.json.ObjectMap) bool {
+    const want_state = if (obj.get("State")) |v| switch (v) {
+        .string => |s| s,
+        else => return false,
+    } else return false;
+    const cmp = if (obj.get("Compare")) |v| switch (v) {
+        .string => |s| s,
+        else => "Eq",
+    } else "Eq";
+    const cur = resolveCurrentEntityState(ctx, eid);
+    const eq = std.mem.eql(u8, cur, want_state);
+    return if (std.mem.eql(u8, cmp, "Ne") or std.mem.eql(u8, cmp, "NotEq")) !eq else eq;
+}
+
 fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
     if (c_val != .object) return true;
     const obj = c_val.object;
@@ -1103,17 +1138,10 @@ fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
         return true;
     } else if (std.mem.eql(u8, ct, "CompareEntityState")) {
         const eid = jsonInt(obj.get("EntityId")) orelse return false;
-        const want_state = if (obj.get("State")) |v| switch (v) {
-            .string => |s| s,
-            else => return false,
-        } else return false;
-        const cmp = if (obj.get("Compare")) |v| switch (v) {
-            .string => |s| s,
-            else => "Eq",
-        } else "Eq";
-        const cur = ctx.quest_comp.info.getEntityState(eid) orelse "关卡.Common.状态.常态";
-        const eq = std.mem.eql(u8, cur, want_state);
-        return if (std.mem.eql(u8, cmp, "Ne") or std.mem.eql(u8, cmp, "NotEq")) !eq else eq;
+        return evalEntityStateCompare(ctx, eid, obj);
+    } else if (std.mem.eql(u8, ct, "CompareEntitySelfState")) {
+        if (ctx.self_entity_config_id <= 0) return false;
+        return evalEntityStateCompare(ctx, ctx.self_entity_config_id, obj);
     } else if (std.mem.eql(u8, ct, "CheckLevelPlay")) {
         if (jsonInt(obj.get("LevelPlayId"))) |lpid| {
             return containsInt(ctx.quest_comp.info.completed_level_plays, lpid);

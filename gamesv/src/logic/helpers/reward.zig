@@ -105,7 +105,7 @@ pub fn grantTreasureBoxReward(
         .{ .item_id = 1, .count = tier * 10 },
         .{ .item_id = 2, .count = tier * 1000 },
         .{ .item_id = 41100011, .count = 1 + @divTrunc(tier, 2) },
-        .{ .item_id = 41200011, .count = 1 + @divTrunc(tier, 2) },
+        .{ .item_id = 41100021, .count = 1 + @divTrunc(tier, 2) },
     };
     return try grantItems(ctx, if (drop_id > 0) drop_id else 1001, true, &items, reason);
 }
@@ -207,15 +207,16 @@ pub fn grantItems(
 
     for (items) |entry| {
         if (entry.item_id <= 0 or entry.count <= 0) continue;
-        result.granted_count += 1;
 
         if (entry.item_id == 1) {
+            result.granted_count += 1;
             // Item 1: Union EXP -> PlayerBasicComponent level progression
             addUnionExp(ctx.assets, ctx.basic_comp, entry.count, &result);
             basic_dirty = true;
 
             try reward_infos.append(ctx.alloc.arena, .{ .ItemId = 1, .Count = entry.count });
         } else if (entry.item_id == 2) {
+            result.granted_count += 1;
             // Item 2: Shell Credit
             ctx.basic_comp.info.attributes.coin +|= entry.count;
             basic_dirty = true;
@@ -226,6 +227,7 @@ pub fn grantItems(
             });
             try reward_infos.append(ctx.alloc.arena, .{ .ItemId = 2, .Count = entry.count });
         } else if (entry.item_id == 3) {
+            result.granted_count += 1;
             // Item 3: Astrite
             ctx.basic_comp.info.attributes.rare_coin +|= entry.count;
             basic_dirty = true;
@@ -241,6 +243,7 @@ pub fn grantItems(
             }
             try reward_infos.append(ctx.alloc.arena, .{ .ItemId = 3, .Count = entry.count });
         } else if (entry.item_id == 4) {
+            result.granted_count += 1;
             // Item 4: Lunite
             ctx.basic_comp.info.attributes.cash_coin +|= entry.count;
             basic_dirty = true;
@@ -251,6 +254,7 @@ pub fn grantItems(
             });
             try reward_infos.append(ctx.alloc.arena, .{ .ItemId = 4, .Count = entry.count });
         } else if (entry.item_id == 5) {
+            result.granted_count += 1;
             // Item 5: Waveplate
             const now_sec = EnergyHelper.nowSeconds(ctx.io);
             _ = EnergyHelper.syncEnergy(ctx.basic_comp, now_sec);
@@ -259,6 +263,7 @@ pub fn grantItems(
             energy_dirty = true;
             try reward_infos.append(ctx.alloc.arena, .{ .ItemId = 5, .Count = entry.count });
         } else if (entry.item_id == 6) {
+            result.granted_count += 1;
             // Item 6: Crystalwave Plate
             const now_sec = EnergyHelper.nowSeconds(ctx.io);
             _ = EnergyHelper.syncEnergy(ctx.basic_comp, now_sec);
@@ -267,6 +272,7 @@ pub fn grantItems(
             energy_dirty = true;
             try reward_infos.append(ctx.alloc.arena, .{ .ItemId = 6, .Count = entry.count });
         } else if (ctx.assets.tables.weapon_conf.getDataById(entry.item_id) != null) {
+            result.granted_count += 1;
             // Weapon item
             var n: i32 = 0;
             while (n < entry.count) : (n += 1) {
@@ -286,6 +292,7 @@ pub fn grantItems(
                 try reward_infos.append(ctx.alloc.arena, .{ .ItemId = entry.item_id, .Count = 1, .IncrId = incr_id });
             }
         } else if (ctx.assets.tables.phantom_item.getDataById(entry.item_id)) |phantom_cfg| {
+            result.granted_count += 1;
             // Echo (Phantom) item
             if (EchoInfo.validDefaultOwnedItem(ctx.assets, phantom_cfg)) {
                 const fetter = phantom_cfg.FetterGroup[0];
@@ -314,7 +321,8 @@ pub fn grantItems(
                     bonus_union_exp += discovery.union_exp;
                 }
             }
-        } else {
+        } else if (ctx.assets.tables.item_info.getDataById(entry.item_id) != null) {
+            result.granted_count += 1;
             // Normal inventory item (consumables, upgrade materials, quest items, etc.)
             const old_count = ctx.inventory_comp.info.normalItemCount(entry.item_id);
             try InventoryInfo.addNormalItem(&ctx.inventory_comp.info, ctx.alloc.gpa, entry.item_id, entry.count);

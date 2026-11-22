@@ -172,7 +172,7 @@ pub fn onExploreSkillRouletteSetRequest(
         }
         try buff_timers.ensureAllRegistered(alloc.gpa, scene, assets, now_ms);
         buff_timers.syncAllLeftDurations(scene, now_ms);
-        try scene.save(fs, alloc.gpa);
+        try scene.savePersistent(fs, alloc.gpa);
     }
 
     var roulette_info: std.ArrayList(pb.ExploreSkillRoulette) = .empty;

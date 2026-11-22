@@ -1,4 +1,12 @@
+const std = @import("std");
+
 pub const EmptyObj = struct {};
+
+pub const HookInteractConfig = struct {
+    HookActions: ?[]const std.json.Value = null,
+    FinishActions: ?[]const std.json.Value = null,
+    ExitHookActions: ?[]const std.json.Value = null,
+};
 
 pub const AdsorbComponent = struct {
     Acceleration: ?i64 = null,
@@ -401,7 +409,7 @@ pub const HookLockPoint = struct {
     GazeNextPointAfterInteract: ?EmptyObj = null,
     GravityConfig: ?EmptyObj = null,
     HookEnableCondition: ?EmptyObj = null,
-    HookInteractConfig: ?EmptyObj = null,
+    HookInteractConfig: ?HookInteractConfig = null,
     HookLockCd: ?i64 = null,
     IgnorePlayCollision: ?bool = null,
     InheritSpeed: ?bool = null,
@@ -1026,3 +1034,26 @@ pub const Entry = union(enum) {
     WindSourceComponent: *const WindSourceComponent,
     WuWaGoComponent: *const WuWaGoComponent,
 };
+
+test "HookLockPoint HookInteractConfig parses HookActions, FinishActions, and ExitHookActions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const parsed = try std.json.parseFromSliceLeaky(HookLockPoint, alloc,
+        \\{
+        \\  "Type": {
+        \\    "Type": "KiteHook",
+        \\    "UseHookInteract": true
+        \\  },
+        \\  "HookInteractConfig": {
+        \\    "HookActions": [{ "Name": "MoveWithSpline", "Params": { "SplineEntityId": 114900196 } }],
+        \\    "FinishActions": [{ "Name": "LeisureInteract" }],
+        \\    "ExitHookActions": [{ "Name": "StopNewMoveWithSpline" }]
+        \\  }
+        \\}
+    , .{ .ignore_unknown_fields = true });
+    const hic = parsed.HookInteractConfig.?;
+    try std.testing.expectEqual(@as(usize, 1), hic.HookActions.?.len);
+    try std.testing.expectEqual(@as(usize, 1), hic.FinishActions.?.len);
+    try std.testing.expectEqual(@as(usize, 1), hic.ExitHookActions.?.len);
+}

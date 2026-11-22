@@ -459,7 +459,7 @@ pub fn onMovePackagePush(
 
     for (txn.message.MovingEntities.items) |data| {
         const entity, const position_comp = movable_entities.byNetId(data.EntityId) orelse {
-            log.warn(
+            log.debug(
                 "entity with id {d} is not movable (originator: {d}, sender: {d})",
                 .{ data.EntityId, data.Originator, sender.id },
             );
@@ -501,10 +501,10 @@ pub fn onMovePackagePush(
                             events.enqueueBestEffort(.spatial_spawns_check, .{ .location = player.location });
                         }
                         if (quest_comp.info.active_quests.len > 0) {
-                            const mdx = player.location[0] - position_comp.location[0];
-                            const mdy = player.location[1] - position_comp.location[1];
-                            const mdz = player.location[2] - position_comp.location[2];
-                            if (mdx * mdx + mdy * mdy + mdz * mdz >= 100.0 * 100.0) {
+                            const mdx = player.location[0] - scene.last_quest_move_loc[0];
+                            const mdy = player.location[1] - scene.last_quest_move_loc[1];
+                            const mdz = player.location[2] - scene.last_quest_move_loc[2];
+                            if (!scene.has_quest_move_loc or mdx * mdx + mdy * mdy + mdz * mdz >= 50.0 * 50.0) {
                                 move_quest_pos = player.location;
                             }
                         }
@@ -532,6 +532,8 @@ pub fn onMovePackagePush(
             }
             // Run QuestEngine.onMove after mutating position_comp since quest actions can spawn/remove entities and reallocate storage.
             if (move_quest_pos) |pos| {
+                scene.last_quest_move_loc = pos;
+                scene.has_quest_move_loc = true;
                 try QuestEngine.onMove(qctx, pos);
             }
         }

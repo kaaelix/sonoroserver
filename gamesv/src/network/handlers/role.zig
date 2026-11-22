@@ -434,7 +434,7 @@ pub fn SwitchRoleRequest(
 
     try buff_timers.ensureAllRegistered(alloc.gpa, scene, assets, now_ms);
     buff_timers.syncAllLeftDurations(scene, now_ms);
-    try scene.save(fs, alloc.gpa);
+    try scene.savePersistent(fs, alloc.gpa);
     txn.respond(.{ .ErrorCode = .Success, .RoleId = request.RoleId });
 }
 
@@ -446,7 +446,7 @@ pub fn ClientCurrentRoleReportPush(
 ) !void {
     if (push.CurrentRoleId <= 0) return;
     if (applyActiveRoleSwitch(scene, push.CurrentRoleId)) {
-        try scene.save(fs, alloc.gpa);
+        try scene.savePersistent(fs, alloc.gpa);
     }
 }
 

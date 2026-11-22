@@ -209,7 +209,7 @@ pub fn executeAction(
         }
     } else if (std.mem.eql(u8, name, "SetPlayerPos") or std.mem.eql(u8, name, "ServerSetPlayerPos")) {
         const action_id = quest_types.jsonInt(act.object.get("ActionId")) orelse 0;
-        teleportPlayerFromAction(ctx, params, action_id);
+        teleportPlayerFromAction(ctx, params, action_id, callbacks.is_flow_action);
     } else if (std.mem.eql(u8, name, "SetVar")) {
         try applySetVar(ctx, params);
     } else if (std.mem.eql(u8, name, "CalculateVar")) {
@@ -1133,6 +1133,10 @@ pub fn transitionToScene(
     }
 
     if (ctx.scene) |scene| {
+        if (scene.pending_transition_instance_id) |pending_id| {
+            if (pending_id == target_dungeon_id) return;
+        }
+        scene.pending_transition_instance_id = target_dungeon_id;
         if (cur_inst_id == 8 and scene.instance.players.len > 0) {
             scene.instance.prev_world_instance_id = 8;
             scene.instance.prev_world_location = scene.instance.players[0].location;
@@ -2016,7 +2020,7 @@ fn applyEnableFunctionAction(ctx: QuestContext, params: std.json.ObjectMap) !voi
     }
 }
 
-fn teleportPlayerFromAction(ctx: QuestContext, params: std.json.ObjectMap, action_id: i32) void {
+fn teleportPlayerFromAction(ctx: QuestContext, params: std.json.ObjectMap, action_id: i32, is_flow_action: bool) void {
     const scene = ctx.scene orelse return;
     const tp_cfg = params.get("TelePortConfig") orelse return;
     if (tp_cfg != .object) return;
@@ -2061,7 +2065,7 @@ fn teleportPlayerFromAction(ctx: QuestContext, params: std.json.ObjectMap, actio
         .Rot = .{ .X = 0, .Y = 0, .Z = yaw },
         .Reason = .Action,
     };
-    if (action_id > 0 and scene.active_flow_list_name.len != 0) {
+    if (is_flow_action and action_id > 0 and scene.active_flow_list_name.len != 0) {
         notify.Reason = .FlowAction;
         notify.GameCtx = .{
             .CtxType = .FlowActionCtx,
@@ -2123,6 +2127,14 @@ fn applyCalculateVar(ctx: QuestContext, params: std.json.ObjectMap) !void {
     try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, res_key, out);
 }
 
+/// Clears any persisted hidden state and guarantees the quest/flow entity is spawned in the active scene.
+pub fn ensureQuestEntityAwakened(ctx: QuestContext, entity_config_id: i32) void {
+    if (entity_config_id <= 0) return;
+    _ = QuestInfo.appendUniqueInt(&ctx.quest_comp.info.world.shown_entities, ctx.alloc.gpa, entity_config_id) catch {};
+    _ = QuestInfo.removeIntValue(&ctx.quest_comp.info.world.hidden_entities, ctx.alloc.gpa, entity_config_id) catch {};
+    ensureQuestEntitySpawned(ctx, entity_config_id);
+}
+
 fn applyAwakeEntity(ctx: QuestContext, params: std.json.ObjectMap) !void {
     var ids: std.ArrayList(i32) = .empty;
     if (quest_types.jsonInt(params.get("EntityId"))) |eid| {
@@ -2135,9 +2147,7 @@ fn applyAwakeEntity(ctx: QuestContext, params: std.json.ObjectMap) !void {
         }
     }
     for (ids.items) |eid| {
-        _ = try QuestInfo.appendUniqueInt(&ctx.quest_comp.info.world.shown_entities, ctx.alloc.gpa, eid);
-        _ = try QuestInfo.removeIntValue(&ctx.quest_comp.info.world.hidden_entities, ctx.alloc.gpa, eid);
-        ensureQuestEntitySpawned(ctx, eid);
+        ensureQuestEntityAwakened(ctx, eid);
     }
     if (ids.items.len > 0) {
         try sendQuestEntityVisibility(ctx, ids.items, true);
@@ -2728,7 +2738,12 @@ fn applyServerMoveAction(ctx: QuestContext, name: []const u8, params: std.json.O
             try pushEntityMoved(ctx, net_id, pos, null);
         }
     } else if (std.mem.eql(u8, name, "MoveWithSpline") or std.mem.eql(u8, name, "NewMoveWithSpline")) {
-        const target = parseQuestEntityId(params.get("MoveTarget")) orelse return;
+        var target = parseQuestEntityId(params.get("MoveTarget")) orelse 0;
+        if (target <= 0 and scene.active_flow_owner_entity_id != 0) {
+            if (scene.findConfigIdByNetId(scene.active_flow_owner_entity_id)) |owner_cfg| {
+                target = std.math.cast(i32, owner_cfg) orelse 0;
+            }
+        }
         const spline_id = quest_types.jsonInt(params.get("SplineEntityId")) orelse return;
         if (target <= 0 or spline_id <= 0) return;
         ensureQuestEntitySpawned(ctx, target);
@@ -3338,7 +3353,18 @@ test "executeAction SetPlayerPos attaches FlowActionCtx when executed inside an 
         \\{"Name":"SetPlayerPos","ActionId":5000073,"Params":{"TelePortConfig":{"Type":0,"TargetPos":{"X":-114682,"Y":71774,"Z":13457,"A":30}}}}
     ;
     const act = try std.json.parseFromSliceLeaky(std.json.Value, aalloc, act_json, .{});
-    try executeAction(ctx, .{}, 139000025, 21, act);
+    // Non-flow SetPlayerPos while a flow happens to be open must not steal FlowActionCtx.
+    try executeAction(ctx, .{ .is_flow_action = false }, 139000025, 21, act);
+    const non_flow_frame = try outbound.getOne(io);
+    defer gpa.free(non_flow_frame.bytes);
+    var r_nf = std.Io.Reader.fixed(non_flow_frame.bytes[3..]);
+    const msg_nf = try Message.decode(&r_nf);
+    var pr_nf = std.Io.Reader.fixed(msg_nf.payload);
+    const notify_nf = try proto.decodeMessage(&pr_nf, aalloc, pb.TeleportNotify, proto.pb_desc);
+    try std.testing.expectEqual(pb.TeleportReason.Action, notify_nf.Reason.?);
+    try std.testing.expect(notify_nf.GameCtx == null);
+
+    try executeAction(ctx, .{ .is_flow_action = true }, 139000025, 21, act);
     outbound.close(io);
 
     const frame = try outbound.getOne(io);

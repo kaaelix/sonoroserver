@@ -39,6 +39,8 @@ player_in_battle: bool = false,
 battle_state_notified: bool = false,
 battle_state_dirty: bool = false,
 last_spatial_check_loc: [3]f32 = .{ 0, 0, 0 },
+last_quest_move_loc: [3]f32 = .{ 0, 0, 0 },
+has_quest_move_loc: bool = false,
 player_movement_mode: i32 = 1,
 current_quest_node: i32 = 19,
 current_quest_id: i32 = 139000025,
@@ -50,6 +52,8 @@ active_flow_list_name: []u8 = &.{},
 active_flow_id: i32 = 0,
 active_flow_state_id: i32 = 0,
 active_flow_owner_entity_id: i64 = 0,
+pending_transition_instance_id: ?i32 = null,
+next_action_inc_id: i32 = 1,
 client_black_screen_open: bool = false,
 next_entity_id: i64 = 1,
 plot_added_rover_slot: ?usize = null,
@@ -63,6 +67,12 @@ trial_role_ids: std.ArrayListUnmanaged(i32) = .empty,
 pending_killed_removals: std.ArrayListUnmanaged(i64) = .empty,
 dynamic_interact_options: std.ArrayListUnmanaged(DynamicInteractOption) = .empty,
 play_bubbles: std.ArrayListUnmanaged(PlayBubbleRecord) = .empty,
+player_range_states: std.AutoHashMapUnmanaged(i64, RangeTriggerState) = .empty,
+
+pub const RangeTriggerState = struct {
+    in_range: bool = false,
+    enter_fired: bool = false,
+};
 
 pub const DynamicInteractOption = struct {
     option_guid: []u8,
@@ -414,6 +424,7 @@ pub fn deinit(scene: *Scene, gpa: Allocator, fs: *FileSystem) void {
     scene.dynamic_interact_options.deinit(gpa);
     for (scene.play_bubbles.items) |*rec| rec.deinit(gpa);
     scene.play_bubbles.deinit(gpa);
+    scene.player_range_states.deinit(gpa);
     _ = fs;
 }
 
@@ -855,6 +866,12 @@ pub fn collectEntitiesInRadius(
             try out_net_ids.append(gpa, id.net_id);
         }
     }
+}
+
+pub fn allocActionIncId(scene: *Scene) i32 {
+    const id = scene.next_action_inc_id;
+    scene.next_action_inc_id = if (id == std.math.maxInt(i32)) 1 else id + 1;
+    return id;
 }
 
 pub fn setEntityVisibility(

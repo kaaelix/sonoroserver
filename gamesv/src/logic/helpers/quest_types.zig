@@ -73,6 +73,7 @@ pub const ActionCallbacks = struct {
     on_destroy_quest: ?*const fn (ctx: QuestContext, quest_id: i32) anyerror!void = null,
     on_finish_condition: ?*const fn (ctx: QuestContext, quest_id: i32, node_id: i32) anyerror!void = null,
     on_trace_current_quest: ?*const fn (ctx: QuestContext, quest_id: i32) anyerror!void = null,
+    is_flow_action: bool = false,
 };
 
 pub fn makeEvalContext(ctx: QuestContext) ConditionEvaluator.EvalContext {

@@ -22,6 +22,7 @@ const QuestActions = @import("quest_actions.zig");
 const RoleHelper = @import("role.zig");
 const RoleEntityTemplates = @import("../templates/RoleEntityTemplates.zig");
 const entity_proto = @import("entity_proto.zig");
+const TriggerConfig = @import("../../data/tables/entity_components/Trigger.zig");
 
 const log = std.log.scoped(.quest_engine);
 
@@ -501,8 +502,9 @@ pub fn onFlowEnd(ctx: QuestContext, flow_inc_id: i64) !void {
     }
 
     // Ignore stale/out-of-order FlowEndRequest when a different flow is active,
+    // when the client finished a non-quest/ambient flow (`flow_inc_id != 0`),
     // or when a normal non-quest NPC interact flow was active.
-    if (matched_inc != 0 or (owner_entity_id != 0 and matched_qid == 0)) return;
+    if (matched_inc != 0 or flow_inc_id != 0 or (owner_entity_id != 0 and matched_qid == 0)) return;
 
     // Fallback: complete the active PlayFlow node on tracked quest, or any active quest
     if (try completeFirstActivePlayFlow(ctx, ctx.quest_comp.info.tracked_quest_id)) {
@@ -545,7 +547,9 @@ pub fn onFlowAction(ctx: QuestContext, flow_inc_id: i64, action_id: i32) !void {
 
     const action_val = Assets.LazyFlowStore.findActionById(state_val, action_id) orelse return;
     const actions = [_]std.json.Value{action_val};
-    try executeActions(ctx, scene.active_flow_quest_id, scene.active_flow_node_id, &actions);
+    var cbs = actionCallbacks();
+    cbs.is_flow_action = true;
+    try QuestActions.executeActionList(ctx, cbs, scene.active_flow_quest_id, scene.active_flow_node_id, &actions);
 }
 
 fn dispatchPostFlowFollowups(ctx: QuestContext, scene: *Scene) !void {
@@ -576,6 +580,7 @@ fn dispatchPostFlowFollowups(ctx: QuestContext, scene: *Scene) !void {
     }
 
     if (scene.active_flow_inc_id != 0) return;
+    try reevaluateInRangeTriggers(ctx);
     for (scene.instance.players) |player| {
         if (player.id == scene.player_id) {
             try onMove(ctx, player.location);
@@ -1433,6 +1438,18 @@ pub fn onSubmitPhotoNode(ctx: QuestContext, owner_id: i32, node_id: i32) !void {
     }
 }
 
+fn allowsClientSubmitNode(data: std.json.Value) bool {
+    const cond = getChildCondition(data) orelse return true;
+    const ctype = jsonStr(cond.get("Type")) orelse return true;
+    return !(std.mem.eql(u8, ctype, "DoInteract") or
+        std.mem.eql(u8, ctype, "PlayFlow") or
+        std.mem.eql(u8, ctype, "HandInItems") or
+        std.mem.eql(u8, ctype, "Kill") or
+        std.mem.eql(u8, ctype, "MonsterCreator") or
+        std.mem.eql(u8, ctype, "Timer") or
+        std.mem.eql(u8, ctype, "WaitTime"));
+}
+
 pub fn onSubmitNode(ctx: QuestContext, owner_id: i32, tree_inc_id: i64, node_id: i32) !pb.ErrorCode {
     const quest_id: i32 = if (owner_id > 0)
         owner_id
@@ -1447,6 +1464,7 @@ pub fn onSubmitNode(ctx: QuestContext, owner_id: i32, tree_inc_id: i64, node_id:
     const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, quest_id) catch return .Success;
     const node = findNodeById(nodes, node_id) orelse return .Success;
     if (!std.mem.eql(u8, node.node_type, "ChildQuest")) return .Success;
+    if (!allowsClientSubmitNode(node.data)) return .Success;
 
     try completeChildQuest(ctx, quest_id, nodes, node.*);
     try finalizeProgression(ctx);
@@ -2326,6 +2344,7 @@ pub fn onConditionStateChanged(ctx: QuestContext) !void {
     if (cond_prog or quest_added) {
         try finalizeProgression(ctx);
     }
+    try reevaluateInRangeTriggers(ctx);
 }
 
 pub fn onProgressionUnlockChanged(ctx: QuestContext) !void {
@@ -3421,6 +3440,151 @@ fn executeActions(
     try QuestActions.executeActionList(ctx, actionCallbacks(), quest_id, node_id, actions);
 }
 
+/// Temporarily binds an entity as the action owner, runs `actions`, and persists quest state.
+pub fn executeEntityActions(
+    ctx: QuestContext,
+    entity_id: i64,
+    cfg_id: i32,
+    actions: []const std.json.Value,
+) !void {
+    if (actions.len == 0) return;
+
+    var owner_nid: i64 = entity_id;
+    const prev_owner: i64 = if (ctx.scene) |scene| blk: {
+        const prev = scene.active_flow_owner_entity_id;
+        if (!scene.net_id_map.contains(owner_nid)) {
+            const slice = scene.entities.slice();
+            for (slice.items(.config), slice.items(.entity_id)) |cfg, nid| {
+                if (cfg.config_id == cfg_id) {
+                    owner_nid = nid.net_id;
+                    break;
+                }
+            }
+        }
+        scene.active_flow_owner_entity_id = owner_nid;
+        break :blk prev;
+    } else 0;
+    defer if (ctx.scene) |scene| {
+        scene.active_flow_owner_entity_id = prev_owner;
+    };
+
+    try executeActions(ctx, 0, 0, actions);
+    try ctx.quest_comp.save(ctx.fs, ctx.alloc.arena);
+}
+
+threadlocal var reevaluating_range_triggers: bool = false;
+
+/// Tracks runtime player overlap with a `TriggerComponent` entity and runs
+/// enter/exit trigger actions once its condition is satisfied.
+pub fn handleEntityRangeTrigger(
+    ctx: QuestContext,
+    entity_id: i64,
+    cfg_id: i32,
+    trig: TriggerConfig,
+    is_enter: bool,
+) !bool {
+    const scene = ctx.scene orelse return false;
+    const gop = try scene.player_range_states.getOrPut(ctx.alloc.gpa, entity_id);
+    if (!gop.found_existing) gop.value_ptr.* = .{};
+
+    var progress_dirty = false;
+    if (is_enter) {
+        gop.value_ptr.in_range = true;
+        if (!gop.value_ptr.enter_fired) {
+            const max_times = trig.MaxTriggerTimes orelse 0;
+            var can_fire = true;
+            var cnt_key: []const u8 = "";
+            var cur_cnt: i64 = 0;
+            if (max_times > 0 and cfg_id > 0) {
+                if (ctx.progress_comp) |pc| {
+                    cnt_key = try std.fmt.allocPrint(ctx.alloc.arena, "trig:cnt:{d}", .{cfg_id});
+                    cur_cnt = pc.info.getKeyInt(cnt_key);
+                    if (cur_cnt >= max_times) can_fire = false;
+                }
+            }
+            if (can_fire and try executeTriggerActions(ctx, entity_id, cfg_id, trig.Condition, trig.Actions)) {
+                gop.value_ptr.enter_fired = true;
+                if (max_times > 0 and cfg_id > 0) {
+                    if (ctx.progress_comp) |pc| {
+                        try pc.info.setKeyInt(ctx.alloc.gpa, cnt_key, cur_cnt + 1);
+                        progress_dirty = true;
+                    }
+                }
+            }
+        }
+    } else {
+        const was_in_range = gop.value_ptr.in_range;
+        gop.value_ptr.in_range = false;
+        gop.value_ptr.enter_fired = false;
+        if (was_in_range and trig.ExitConfig == .object) {
+            const exit_obj = trig.ExitConfig.object;
+            const exit_cond = exit_obj.get("Condition") orelse .null;
+            const exit_acts = exit_obj.get("Actions") orelse .null;
+            _ = try executeTriggerActions(ctx, entity_id, cfg_id, exit_cond, exit_acts);
+        }
+    }
+    return progress_dirty;
+}
+
+/// Re-evaluates `TriggerComponent` entities the player is currently standing inside
+/// whose enter condition was not yet met (e.g. door unlocked after dialogue/quest update).
+pub fn reevaluateInRangeTriggers(ctx: QuestContext) !void {
+    if (reevaluating_range_triggers) return;
+    const scene = ctx.scene orelse return;
+    if (scene.player_range_states.count() == 0) return;
+
+    reevaluating_range_triggers = true;
+    defer reevaluating_range_triggers = false;
+
+    var pending_ids: std.ArrayList(i64) = .empty;
+    var it = scene.player_range_states.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.in_range and !entry.value_ptr.enter_fired) {
+            try pending_ids.append(ctx.alloc.arena, entry.key_ptr.*);
+        }
+    }
+    if (pending_ids.items.len == 0) return;
+
+    var dirty = false;
+    for (pending_ids.items) |eid| {
+        const resolved = scene.findConfigIdByNetId(eid) orelse eid;
+        const cfg_id = std.math.cast(i32, resolved) orelse continue;
+        const lcfg = ctx.assets.findLevelEntity(scene.instance_id, resolved) orelse continue;
+        var components = lcfg.ComponentsData;
+        if (ctx.assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+            tpl.ComponentsData.mergeInto(&components);
+        }
+        const trig = components.TriggerComponent orelse continue;
+        if (trig.Disabled orelse false) continue;
+        if (try handleEntityRangeTrigger(ctx, eid, cfg_id, trig, true)) {
+            dirty = true;
+        }
+    }
+    if (dirty) {
+        if (ctx.progress_comp) |pc| {
+            try pc.save(ctx.fs, ctx.alloc.arena);
+        }
+    }
+}
+
+pub fn executeTriggerActions(
+    ctx: QuestContext,
+    entity_id: i64,
+    cfg_id: i32,
+    cond_val: std.json.Value,
+    actions_val: std.json.Value,
+) !bool {
+    if (actions_val != .array or actions_val.array.items.len == 0) return false;
+    if (cond_val == .object) {
+        var eval_ctx = makeEvalContext(ctx);
+        eval_ctx.self_entity_config_id = cfg_id;
+        if (!ConditionEvaluator.evalInlineConditionBlock(eval_ctx, cond_val)) return false;
+    }
+
+    try executeEntityActions(ctx, entity_id, cfg_id, actions_val.array.items);
+    return true;
+}
+
 fn completeGuideById(ctx: QuestContext, guide_id: i32) anyerror!void {
     if (guide_id <= 0) return;
     if (ctx.guide_comp) |gc| {
@@ -3507,6 +3671,15 @@ fn prepareFlowStateEntities(ctx: QuestContext, flow_name: []const u8, flow_id: i
         flow_id,
         state_id,
     ) catch return) orelse return;
+
+    var awake_ids: std.ArrayList(i32) = .empty;
+    Assets.LazyFlowStore.collectAwakeEntityIds(ctx.alloc.arena, state_val, &awake_ids) catch {};
+    for (awake_ids.items) |eid| {
+        QuestActions.ensureQuestEntityAwakened(ctx, eid);
+    }
+    if (awake_ids.items.len > 0) {
+        QuestActions.sendQuestEntityVisibility(ctx, awake_ids.items, true) catch {};
+    }
 
     var entity_ids: std.ArrayList(i32) = .empty;
     Assets.LazyFlowStore.collectSetEntityVisibleIds(ctx.alloc.arena, state_val, &entity_ids) catch return;
@@ -4592,6 +4765,7 @@ fn ensureTrackedFocusValid(ctx: QuestContext) void {
 
 fn syncSceneCurrentNode(ctx: QuestContext) void {
     const scene = ctx.scene orelse return;
+    scene.has_quest_move_loc = false;
     if (ctx.quest_comp.info.findActiveQuest(ctx.quest_comp.info.tracked_quest_id)) |aq| {
         if (aq.active_nodes.len > 0) {
             scene.current_quest_node = aq.active_nodes[0];
@@ -5422,4 +5596,26 @@ test "reentrant refreshAvailableQuests and shouldHideWorldEntity prevent recursi
     try std.testing.expect(shouldHideWorldEntity(info, &targets, 310000014));
     // Explicitly shown entity is not hidden
     try std.testing.expect(!shouldHideWorldEntity(info, &targets, 880700164));
+}
+
+test "allowsClientSubmitNode blocks DoInteract and PlayFlow while allowing ReachArea" {
+    const gpa = std.testing.allocator;
+
+    const interact_node = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"Type":"ChildQuest","Condition":{"Type":"DoInteract"}}
+    , .{});
+    defer interact_node.deinit();
+    try std.testing.expect(!allowsClientSubmitNode(interact_node.value));
+
+    const playflow_node = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"Type":"ChildQuest","Condition":{"Type":"PlayFlow"}}
+    , .{});
+    defer playflow_node.deinit();
+    try std.testing.expect(!allowsClientSubmitNode(playflow_node.value));
+
+    const reach_node = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"Type":"ChildQuest","Condition":{"Type":"ReachArea"}}
+    , .{});
+    defer reach_node.deinit();
+    try std.testing.expect(allowsClientSubmitNode(reach_node.value));
 }
