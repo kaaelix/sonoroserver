@@ -45,6 +45,8 @@ player_movement_mode: i32 = 1,
 has_player_movement_mode: bool = false,
 player_motion_type: pb.MotionType = .Spurt,
 has_player_motion: bool = false,
+active_sneak_id: i32 = 0,
+failed_dungeons: std.ArrayListUnmanaged(i32) = .empty,
 current_quest_node: i32 = 19,
 current_quest_id: i32 = 139000025,
 prologue_flow_started: bool = false,
@@ -451,6 +453,7 @@ pub fn deinit(scene: *Scene, gpa: Allocator, fs: *FileSystem) void {
     scene.save_node_keys.deinit(gpa);
     scene.trial_role_ids.deinit(gpa);
     scene.pending_killed_removals.deinit(gpa);
+    scene.failed_dungeons.deinit(gpa);
     for (scene.dynamic_interact_options.items) |*opt| opt.deinit(gpa);
     scene.dynamic_interact_options.deinit(gpa);
     for (scene.play_bubbles.items) |*rec| rec.deinit(gpa);
@@ -1216,6 +1219,29 @@ pub fn setCurrentRoleGravity(scene: *Scene, gravity_dir: [3]f32) void {
     const idx = scene.net_id_map.get(role_eid) orelse return;
     if (idx >= scene.entities.len) return;
     scene.entities.items(.world_item)[idx].gravity = .{ .location = gravity_dir };
+}
+
+pub fn hasFailedDungeon(scene: *const Scene, inst_id: i32) bool {
+    for (scene.failed_dungeons.items) |id| {
+        if (id == inst_id) return true;
+    }
+    return false;
+}
+
+pub fn recordFailedDungeon(scene: *Scene, gpa: Allocator, inst_id: i32) !void {
+    if (inst_id <= 0 or scene.hasFailedDungeon(inst_id)) return;
+    try scene.failed_dungeons.append(gpa, inst_id);
+}
+
+pub fn clearFailedDungeon(scene: *Scene, inst_id: i32) void {
+    var i: usize = 0;
+    while (i < scene.failed_dungeons.items.len) {
+        if (scene.failed_dungeons.items[i] == inst_id) {
+            _ = scene.failed_dungeons.swapRemove(i);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 pub fn upsertDynamicInteractOption(

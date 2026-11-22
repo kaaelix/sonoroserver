@@ -393,6 +393,7 @@ pub fn onWorldLevelDownRequest(
     fs: *FileSystem,
     io: std.Io,
     basic_comp: *PlayerBasicComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     if (basic_comp.info.attributes.cur_world_level > 1 and
         basic_comp.info.attributes.cur_world_level == basic_comp.info.attributes.origin_world_level)
@@ -400,6 +401,7 @@ pub fn onWorldLevelDownRequest(
         basic_comp.info.attributes.cur_world_level -= 1;
         basic_comp.info.attributes.world_level_time_stamp = @intCast(EnergyHelper.nowSeconds(io));
         try comp_util.saveStruct(fs, basic_comp.info, try std.fmt.allocPrint(alloc.arena, "player/{}/basic_info", .{basic_comp.player_id}), alloc.arena);
+        QuestEngine.onDifficultyChanged(qctx) catch |err| QuestEngine.logHookErr("onWorldLevelDown", err);
     }
     txn.respond(.{
         .ErrorCode = .Success,
@@ -415,10 +417,15 @@ pub fn onWorldLevelRegainRequest(
     fs: *FileSystem,
     io: std.Io,
     basic_comp: *PlayerBasicComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
+    const changed = basic_comp.info.attributes.cur_world_level != basic_comp.info.attributes.origin_world_level;
     basic_comp.info.attributes.cur_world_level = basic_comp.info.attributes.origin_world_level;
     basic_comp.info.attributes.world_level_time_stamp = @intCast(EnergyHelper.nowSeconds(io));
     try comp_util.saveStruct(fs, basic_comp.info, try std.fmt.allocPrint(alloc.arena, "player/{}/basic_info", .{basic_comp.player_id}), alloc.arena);
+    if (changed) {
+        QuestEngine.onDifficultyChanged(qctx) catch |err| QuestEngine.logHookErr("onWorldLevelRegain", err);
+    }
     txn.respond(.{
         .ErrorCode = .Success,
         .OriginWorldLevel = basic_comp.info.attributes.origin_world_level,

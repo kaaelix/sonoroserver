@@ -743,10 +743,13 @@ pub fn AiHateRequest(
     events: *EventQueue,
     io: std.Io,
     alloc: mem.Alloc,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     if (commonEntityId(txn.common)) |entity_id| {
         if (query.byNetId(entity_id)) |item| {
-            try applyAiHate(scene, item, txn.payload.HateList.items, events, queryNow(io), alloc, txn.receive_data_pack);
+            if (try applyAiHate(scene, item, txn.payload.HateList.items, events, queryNow(io), alloc, txn.receive_data_pack)) {
+                QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("AiHateRequest", err);
+            }
         }
     }
 
@@ -831,10 +834,13 @@ pub fn AiHatePush(
     io: std.Io,
     alloc: mem.Alloc,
     receive_data_pack: *std.ArrayList(pb.CombatReceiveData),
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const entity_id = commonEntityId(common) orelse return;
     if (query.byNetId(entity_id)) |item| {
-        try applyAiHate(scene, item, push.HateList.items, events, queryNow(io), alloc, receive_data_pack);
+        if (try applyAiHate(scene, item, push.HateList.items, events, queryNow(io), alloc, receive_data_pack)) {
+            QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("AiHatePush", err);
+        }
     }
 }
 
@@ -845,11 +851,14 @@ pub fn AiInformationRequest(
     events: *EventQueue,
     io: std.Io,
     alloc: mem.Alloc,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     if (commonEntityId(txn.common)) |entity_id| {
         if (txn.payload.AiInfo) |ai_info| {
             if (query.byNetId(entity_id)) |item| {
-                try applyAiHate(scene, item, ai_info.HateList.items, events, queryNow(io), alloc, txn.receive_data_pack);
+                if (try applyAiHate(scene, item, ai_info.HateList.items, events, queryNow(io), alloc, txn.receive_data_pack)) {
+                    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("AiInfoRequest", err);
+                }
             }
         }
     }
@@ -865,11 +874,14 @@ pub fn AiInformationPush(
     io: std.Io,
     alloc: mem.Alloc,
     receive_data_pack: *std.ArrayList(pb.CombatReceiveData),
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const entity_id = commonEntityId(common) orelse return;
     const ai_info = push.AiInfo orelse return;
     if (query.byNetId(entity_id)) |item| {
-        try applyAiHate(scene, item, ai_info.HateList.items, events, queryNow(io), alloc, receive_data_pack);
+        if (try applyAiHate(scene, item, ai_info.HateList.items, events, queryNow(io), alloc, receive_data_pack)) {
+            QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("AiInfoPush", err);
+        }
     }
 }
 
@@ -1038,7 +1050,7 @@ fn applyAiHate(
     now_ms: i64,
     alloc: mem.Alloc,
     receive_data_pack: *std.ArrayList(pb.CombatReceiveData),
-) !void {
+) !bool {
     const entity, const optional_fsm, const attribute, const buffs, const logic_state, const tags, const parts = item;
 
     try scene.updateBattleEntityFromHate(alloc.gpa, entity.net_id, hate_list);
@@ -1051,9 +1063,9 @@ fn applyAiHate(
             break;
         }
     }
-    _ = try scene.updateFsmHateTarget(alloc.gpa, entity.net_id, has_target);
+    const hate_changed = try scene.updateFsmHateTarget(alloc.gpa, entity.net_id, has_target);
 
-    const fsm = optional_fsm orelse return;
+    const fsm = optional_fsm orelse return (hate_changed and has_target);
     try fsm.initRuntime(alloc.gpa, now_ms);
     defer fsm.finishTick(now_ms);
     if (!try FsmLifecycle.enqueueEffects(entity, fsm, events, alloc, now_ms)) {
@@ -1067,6 +1079,7 @@ fn applyAiHate(
         });
     }
     try scene.syncFsmDeadlines(alloc.gpa, entity.net_id, fsm);
+    return hate_changed and has_target;
 }
 
 fn applyGameplayTagChange(

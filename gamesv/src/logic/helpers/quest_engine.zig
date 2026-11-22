@@ -2577,6 +2577,7 @@ pub fn changeSubLevels(
 
 pub fn enterInst(ctx: QuestContext, inst_id: i32, pos_entity_id: i32) !void {
     if (inst_id <= 0) return;
+    if (ctx.scene) |scene| scene.clearFailedDungeon(inst_id);
     try QuestActions.applyInstanceTrialRoles(ctx, inst_id);
     var target_pos: ?[3]f32 = null;
     if (pos_entity_id > 0) {
@@ -2592,6 +2593,11 @@ pub fn leaveInst(ctx: QuestContext, pos_entity_id: i32) !void {
     const prev_inst = if (ctx.scene) |s| s.instance_id else 0;
     try QuestActions.leaveCurrentDungeon(ctx, pos_entity_id);
     if (prev_inst > 0 and prev_inst != 8) {
+        if (ctx.scene) |scene| {
+            if (!QuestInfo.containsInt(ctx.quest_comp.info.completed_dungeons, prev_inst)) {
+                scene.recordFailedDungeon(ctx.alloc.gpa, prev_inst) catch {};
+            }
+        }
         try onDungeonEvent(ctx, prev_inst, true);
     }
 }
@@ -2744,6 +2750,90 @@ pub fn onPlayerTransferOrLeaveInst(ctx: QuestContext, is_leave_dungeon: bool) !v
                     if (try LevelPlayHelper.onFailTimerDue(lp_ctx, lpid, node.id)) {
                         changed = true;
                     }
+                    break;
+                }
+            }
+        }
+    }
+    if (changed) {
+        try finalizeProgression(ctx);
+    }
+}
+
+pub fn onDifficultyChanged(ctx: QuestContext) !void {
+    const aq_snapshot = try ctx.alloc.arena.dupe(QuestInfo.ActiveQuest, ctx.quest_comp.info.active_quests);
+    var changed = false;
+    for (aq_snapshot) |aq| {
+        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, aq.quest_id) catch continue;
+        for (nodes) |node| {
+            if (!std.mem.eql(u8, node.node_type, "QuestFailed")) continue;
+            if (QuestInfo.isNodeFinished(aq, node.id)) continue;
+            if (!isSubtreeActiveForMonitor(nodes, aq.active_nodes, node.parent_id)) continue;
+            if (node.data != .object) continue;
+            const fc_val = node.data.object.get("FailedCondition") orelse continue;
+            if (fc_val == .object and (jsonBool(fc_val.object.get("SwitchGameDifficulty")) orelse false)) {
+                try rollbackQuestToNode(ctx, aq.quest_id, node.id, .DefaultFail, false);
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        const entered_snap = try ctx.alloc.arena.dupe(i32, ctx.quest_comp.info.progress.entered_level_plays);
+        for (entered_snap) |lpid| {
+            if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lpid)) continue;
+            const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lpid) catch continue;
+            for (nodes) |node| {
+                if (!std.mem.eql(u8, node.node_type, "QuestFailed")) continue;
+                if (node.data != .object) continue;
+                const fc_val = node.data.object.get("FailedCondition") orelse continue;
+                if (fc_val == .object and (jsonBool(fc_val.object.get("SwitchGameDifficulty")) orelse false)) {
+                    if (try LevelPlayHelper.onFailTimerDue(lp_ctx, lpid, node.id)) changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (changed) {
+        try finalizeProgression(ctx);
+    }
+}
+
+pub fn onSneakFailed(ctx: QuestContext, owner_id: i32, tree_inc_id: i64) !void {
+    const target_qid = if (owner_id > 0) owner_id else (std.math.cast(i32, tree_inc_id) orelse 0);
+    var changed = false;
+    if (target_qid > 0 and ctx.quest_comp.info.hasActiveQuest(target_qid)) {
+        try rollbackQuestToNode(ctx, target_qid, 0, .SneakTimeoutFail, false);
+        changed = true;
+    } else {
+        const aq_snapshot = try ctx.alloc.arena.dupe(QuestInfo.ActiveQuest, ctx.quest_comp.info.active_quests);
+        for (aq_snapshot) |aq| {
+            const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, aq.quest_id) catch continue;
+            for (nodes) |node| {
+                if (!std.mem.eql(u8, node.node_type, "QuestFailed")) continue;
+                if (QuestInfo.isNodeFinished(aq, node.id)) continue;
+                if (!isSubtreeActiveForMonitor(nodes, aq.active_nodes, node.parent_id)) continue;
+                if (node.data != .object) continue;
+                const fc_val = node.data.object.get("FailedCondition") orelse continue;
+                if (fc_val == .object and fc_val.object.get("SneakPlayCondition") != null) {
+                    try rollbackQuestToNode(ctx, aq.quest_id, node.id, .SneakTimeoutFail, false);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        const entered_snap = try ctx.alloc.arena.dupe(i32, ctx.quest_comp.info.progress.entered_level_plays);
+        for (entered_snap) |lpid| {
+            if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lpid)) continue;
+            const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lpid) catch continue;
+            for (nodes) |node| {
+                if (!std.mem.eql(u8, node.node_type, "QuestFailed")) continue;
+                if (node.data != .object) continue;
+                const fc_val = node.data.object.get("FailedCondition") orelse continue;
+                if (fc_val == .object and fc_val.object.get("SneakPlayCondition") != null) {
+                    if (try LevelPlayHelper.onFailTimerDue(lp_ctx, lpid, node.id)) changed = true;
                     break;
                 }
             }
@@ -4227,7 +4317,9 @@ fn evalQuestFailedCondition(
         }
     }
 
-    if (jsonBool(fc.get("IsTeamDeathFailure")) orelse false) {
+    if ((jsonBool(fc.get("IsTeamDeathFailure")) orelse false) or
+        (jsonBool(fc.get("IsNonAiTeamDeathFailure")) orelse false))
+    {
         if (ctx.scene) |scene| {
             const form_idx = std.math.cast(usize, scene.formation_info.cur_formation);
             if (form_idx) |fi| {
@@ -4236,6 +4328,60 @@ fn evalQuestFailedCondition(
                     const cur_eid = scene.currentRoleEntityId();
                     if (cur_eid > 0 and RoleHelper.formationLivingStatus(scene, form) == .Dead) {
                         return .CharacterDieFail;
+                    }
+                }
+            }
+        }
+    }
+
+    if (fc.get("CheckDungeonFailure")) |cdf_val| {
+        if (cdf_val == .array) {
+            if (ctx.scene) |scene| {
+                for (cdf_val.array.items) |v| {
+                    const did = jsonInt(v) orelse continue;
+                    if (did > 0 and scene.hasFailedDungeon(did)) return .InstFail;
+                }
+            }
+        }
+    }
+
+    if (fc.get("EntityAlert")) |ea_val| {
+        if (ea_val == .object) {
+            if (ea_val.object.get("EntityIds")) |eids_val| {
+                if (eids_val == .array) {
+                    if (ctx.scene) |scene| {
+                        const slice = scene.entities.slice();
+                        const configs = slice.items(.config);
+                        const net_ids = slice.items(.entity_id);
+                        for (eids_val.array.items) |v| {
+                            const target_cfg = jsonInt(v) orelse continue;
+                            if (target_cfg <= 0) continue;
+                            for (configs, net_ids) |cfg, nid| {
+                                if (cfg.config_id == target_cfg) {
+                                    if (scene.fsm_hate_states.get(nid.net_id) orelse false) {
+                                        return .DefaultFail;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (fc.get("SneakPlayCondition")) |sp_val| {
+        if (sp_val == .object) {
+            if (ctx.scene) |scene| {
+                if (scene.active_sneak_id > 0) {
+                    const secs = jsonFloat(sp_val.object.get("Time")) orelse 0;
+                    if (std.math.isFinite(secs) and secs > 0 and !fail_queue.contains(quest_id, node.id)) {
+                        const delay_ms: i64 = @intFromFloat(@round(@as(f64, secs) * 1000.0));
+                        try fail_queue.upsert(ctx.alloc.gpa, .{
+                            .quest_id = quest_id,
+                            .node_id = node.id,
+                            .due_ms = nowMs(ctx.io) + delay_ms,
+                        });
                     }
                 }
             }

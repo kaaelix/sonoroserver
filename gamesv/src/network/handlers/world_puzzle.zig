@@ -1596,12 +1596,40 @@ pub fn onSneakRequest(
     txn: *Transaction(pb.SneakRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
     qctx: QuestEngine.QuestContext,
 ) !void {
+    if (scene_opt.*) |*scene| {
+        scene.active_sneak_id = if (txn.message.IsStart) @max(1, txn.message.NodeId) else 0;
+        if (!txn.message.IsStart) {
+            if (txn.message.TreeOwnerId > 0) scene.fail_timers.cancel(txn.message.TreeOwnerId, txn.message.NodeId);
+        }
+    }
     try persistIntKey(alloc, fs, pc, "sneak:node", txn.message.NodeId, if (txn.message.IsStart) 1 else 0);
     QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onSneak", err);
     txn.respond(.{ .ErrorId = .Success });
+}
+
+pub fn onSneakFinishRequest(
+    txn: *Transaction(pb.SneakFinishRequest),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    scene_opt: *?Scene,
+    pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    if (scene_opt.*) |*scene| {
+        scene.active_sneak_id = 0;
+    }
+    const ft = txn.message.FinishType orelse .SneakSuccess;
+    try persistIntKey(alloc, fs, pc, "sneak:finish", txn.message.SneakId, @intFromEnum(ft));
+    if (ft == .SneakFail) {
+        QuestEngine.onSneakFailed(qctx, 0, 0) catch |err| QuestEngine.logHookErr("onSneakFinishFail", err);
+    } else {
+        QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onSneakFinish", err);
+    }
+    txn.respond(.{ .ErrorCode = .Success });
 }
 
 pub fn onSneakTimeRequest(
