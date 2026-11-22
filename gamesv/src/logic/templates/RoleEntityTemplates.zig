@@ -439,16 +439,8 @@ pub fn createRoleEntity(
         },
         Entity.FightBuffComponent{},
         Entity.PositionComponent{
-            .location = .{
-                scene.instance.players[0].location[0],
-                scene.instance.players[0].location[1],
-                scene.instance.players[0].location[2],
-            },
-            .rotation = .{
-                scene.instance.players[0].rotation[0],
-                scene.instance.players[0].rotation[1],
-                scene.instance.players[0].rotation[2],
-            },
+            .location = if (scene.instance.players.len > 0) scene.instance.players[0].location else .{ 0, 0, 0 },
+            .rotation = if (scene.instance.players.len > 0) scene.instance.players[0].rotation else .{ 0, 0, 0 },
         },
         Entity.PlayerIDComponent{ .id = player_id },
         Entity.ActorVisibleMarker{},

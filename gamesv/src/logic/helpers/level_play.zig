@@ -139,56 +139,8 @@ fn jsonFloat(v_opt: ?std.json.Value) ?f32 {
     };
 }
 
-fn isPlayerWithinReachArea(ctx: LevelPlayContext, cond_obj: std.json.ObjectMap, x: f32, y: f32) bool {
-    const range = jsonFloat(cond_obj.get("Range")) orelse return true;
-    if (range <= 0) return true;
-    const range_sq = range * range;
-
-    if (cond_obj.get("RangeEntities")) |re_val| {
-        if (re_val == .array and re_val.array.items.len > 0) {
-            var resolved_any = false;
-            for (re_val.array.items) |item| {
-                const eid = jsonInt(item) orelse continue;
-                var target_pos: ?[3]f32 = null;
-                const slice = ctx.scene.entities.slice();
-                for (slice.items(.config), slice.items(.position)) |cfg, pos_opt| {
-                    if (cfg.config_id == eid) {
-                        if (pos_opt) |p| {
-                            target_pos = p.location;
-                            break;
-                        }
-                    }
-                }
-                if (target_pos == null) {
-                    if (ctx.assets.findLevelEntity(ctx.scene.instance_id, eid)) |lcfg| {
-                        target_pos = Assets.AssetIndexes.entityWorldPos(lcfg);
-                    }
-                }
-                if (target_pos) |tp| {
-                    resolved_any = true;
-                    const dx = tp[0] - x;
-                    const dy = tp[1] - y;
-                    if (dx * dx + dy * dy <= range_sq) return true;
-                }
-            }
-            return !resolved_any;
-        }
-    }
-
-    if (cond_obj.get("Pos")) |pos_val| {
-        if (pos_val == .object) {
-            const px = jsonFloat(pos_val.object.get("X")) orelse 0;
-            const py = jsonFloat(pos_val.object.get("Y")) orelse 0;
-            const pz = jsonFloat(pos_val.object.get("Z")) orelse 0;
-            if (px != 0 or py != 0 or pz != 0) {
-                const dx = px - x;
-                const dy = py - y;
-                return dx * dx + dy * dy <= range_sq;
-            }
-        }
-    }
-
-    return true;
+fn isPlayerWithinReachArea(ctx: LevelPlayContext, node_data: std.json.Value, cond_obj: std.json.ObjectMap, pos: [3]f32) bool {
+    return QuestEngine.matchesReachAreaPub(toQuestCtx(ctx), 0, node_data, cond_obj, pos);
 }
 
 fn jsonInt(v_opt: ?std.json.Value) ?i32 {
@@ -257,13 +209,794 @@ fn ensureEntitySpawned(ctx: LevelPlayContext, config_id: i32) void {
     );
 }
 
+var lp_step_depth: u32 = 0;
+var lp_recheck_pending: bool = false;
+
+const LpStepResult = enum {
+    running,
+    completed,
+    failed,
+    tree_ended,
+};
+
+fn lpKeyBuf(buf: *[48]u8, prefix: []const u8, a: i32, b: i32) []const u8 {
+    return std.fmt.bufPrint(buf, "{s}:{d}:{d}", .{ prefix, a, b }) catch "";
+}
+
+fn isLpNodeActive(progress_comp: ?*const PlayerProgressComponent, lp_id: i32, node_id: i32) bool {
+    const pc = progress_comp orelse return false;
+    var buf: [48]u8 = undefined;
+    const key = lpKeyBuf(&buf, "lp_act", lp_id, node_id);
+    return key.len > 0 and pc.info.getKeyInt(key) != 0;
+}
+
+fn setLpNodeActive(ctx: LevelPlayContext, lp_id: i32, node_id: i32, active: bool, dirty_pc: *bool) void {
+    const pc = ctx.progress_comp orelse return;
+    var buf: [48]u8 = undefined;
+    const key = lpKeyBuf(&buf, "lp_act", lp_id, node_id);
+    if (key.len == 0) return;
+    const target: i64 = if (active) 1 else 0;
+    if (pc.info.getKeyInt(key) != target) {
+        pc.info.setKeyInt(ctx.alloc.gpa, key, target) catch {};
+        dirty_pc.* = true;
+    }
+}
+
+fn markLpNodeFinished(ctx: LevelPlayContext, lp_id: i32, node_id: i32, dirty_pc: *bool) void {
+    setLpNodeActive(ctx, lp_id, node_id, false, dirty_pc);
+    const pc = ctx.progress_comp orelse return;
+    var buf: [48]u8 = undefined;
+    const key = lpKeyBuf(&buf, "lp_node", lp_id, node_id);
+    if (key.len == 0) return;
+    if (pc.info.markClaim(ctx.alloc.gpa, key) catch false) {
+        dirty_pc.* = true;
+    }
+    if (pc.info.getKeyInt(key) == 0) {
+        pc.info.setKeyInt(ctx.alloc.gpa, key, 1) catch {};
+        dirty_pc.* = true;
+    }
+}
+
+fn isLpBtBooted(progress_comp: ?*const PlayerProgressComponent, lp_id: i32) bool {
+    const pc = progress_comp orelse return false;
+    var buf: [48]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "lp_bt:{d}", .{lp_id}) catch return false;
+    return pc.info.getKeyInt(key) != 0;
+}
+
+fn markLpBtBooted(ctx: LevelPlayContext, lp_id: i32, dirty_pc: *bool) void {
+    const pc = ctx.progress_comp orelse return;
+    var buf: [48]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "lp_bt:{d}", .{lp_id}) catch return;
+    if (pc.info.getKeyInt(key) == 0) {
+        pc.info.setKeyInt(ctx.alloc.gpa, key, 1) catch {};
+        dirty_pc.* = true;
+    }
+}
+
+fn findLpNodeById(nodes: []const LazyNodeStore.NodeEntry, node_id: i32) ?*const LazyNodeStore.NodeEntry {
+    for (nodes) |*node| {
+        if (node.id == node_id) return node;
+    }
+    return null;
+}
+
+fn findLpRootNode(nodes: []const LazyNodeStore.NodeEntry) ?LazyNodeStore.NodeEntry {
+    for (nodes) |node| {
+        if (node.parent_id == 0) return node;
+    }
+    return if (nodes.len > 0) nodes[0] else null;
+}
+
+fn resolveLevelPlayAnchorPos(ctx: LevelPlayContext, lp: Assets.DataTables.LevelPlayData) ?[3]f32 {
+    if (lp.Data.LevelPlayEntityId <= 0) return null;
+    const slice = ctx.scene.entities.slice();
+    for (slice.items(.config), slice.items(.position)) |cfg, pos_opt| {
+        if (cfg.config_id != lp.Data.LevelPlayEntityId) continue;
+        if (pos_opt) |pos| return pos.location;
+    }
+    if (ctx.assets.findLevelEntity(ctx.scene.instance_id, lp.Data.LevelPlayEntityId)) |cfg| {
+        return Assets.AssetIndexes.entityWorldPos(cfg);
+    }
+    const indices = ctx.assets.indexes.levelEntityIndicesById(lp.Data.LevelPlayEntityId);
+    if (indices.len > 0) {
+        if (ctx.assets.getLevelEntityByIdx(indices[0])) |cfg| {
+            return Assets.AssetIndexes.entityWorldPos(cfg);
+        }
+    }
+    return null;
+}
+
+fn currentPlayerPos(ctx: LevelPlayContext) ?[3]f32 {
+    for (ctx.scene.instance.players) |player| {
+        if (player.id == ctx.scene.player_id) {
+            return player.location;
+        }
+    }
+    if (ctx.scene.instance.players.len > 0) {
+        return ctx.scene.instance.players[0].location;
+    }
+    return null;
+}
+
+pub fn syncDynamicInteractOptionsForEntity(
+    scene: *Scene,
+    assets: *const Assets,
+    conn: *Connection,
+    quest_info: QuestInfo,
+    progress_comp: ?*const PlayerProgressComponent,
+    alloc: mem.Alloc,
+    io: std.Io,
+    cfg_id: i64,
+) !void {
+    if (cfg_id <= 0) return;
+    for (quest_info.progress.entered_level_plays) |lp_id| {
+        const nodes = assets.level_play_nodes.getOwnerNodes(io, lp_id) catch continue;
+        for (nodes) |node| {
+            if (!isLpNodeActive(progress_comp, lp_id, node.id)) continue;
+            try QuestEngine.pushDoInteractOptionsForBtNode(scene, conn, alloc, io, .BtTypeLevelPlay, lp_id, node, cfg_id);
+        }
+    }
+}
+
+fn conditionReferencesLevelPlayId(cond: std.json.ObjectMap, lp_id: i32) bool {
+    if ((jsonInt(cond.get("LevelPlayId")) orelse 0) == lp_id) return true;
+    if (cond.get("LevelPlayIds")) |ids_val| {
+        if (ids_val == .array) {
+            for (ids_val.array.items) |v| {
+                if ((jsonInt(v) orelse 0) == lp_id) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn appendConditionLevelPlayIds(arena: std.mem.Allocator, out: *std.ArrayList(i32), cond: std.json.ObjectMap) !void {
+    if (jsonInt(cond.get("LevelPlayId"))) |lpid| {
+        if (lpid > 0 and !QuestInfo.containsInt(out.items, lpid)) {
+            try out.append(arena, lpid);
+        }
+    }
+    if (cond.get("LevelPlayIds")) |ids_val| {
+        if (ids_val == .array) {
+            for (ids_val.array.items) |v| {
+                const lpid = jsonInt(v) orelse continue;
+                if (lpid > 0 and !QuestInfo.containsInt(out.items, lpid)) {
+                    try out.append(arena, lpid);
+                }
+            }
+        }
+    }
+}
+
+fn isQuestCheckingLevelPlay(ctx: LevelPlayContext, lp_id: i32) bool {
+    for (ctx.quest_comp.info.active_quests) |aq| {
+        if (aq.active_nodes.len == 0) continue;
+        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, aq.quest_id) catch continue;
+        for (aq.active_nodes) |nid| {
+            const node = findLpNodeById(nodes, nid) orelse continue;
+            if (!std.mem.eql(u8, node.node_type, "ChildQuest")) continue;
+            const cond = QuestEngine.getChildConditionPub(node.data) orelse continue;
+            const ctype = jsonStr(cond.get("Type")) orelse continue;
+            if (!std.mem.eql(u8, ctype, "CheckLevelPlay")) continue;
+            if (conditionReferencesLevelPlayId(cond, lp_id)) return true;
+        }
+    }
+    return false;
+}
+
+fn canEnterLevelPlay(ctx: LevelPlayContext, lp: Assets.DataTables.LevelPlayData) bool {
+    if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) return false;
+    if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp.LevelPlayId)) return false;
+    if (!std.mem.eql(u8, lp.Data.Type, "Quest")) return true;
+
+    if (ctx.progress_comp) |pc| {
+        var buf: [48]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "lp_state:{d}", .{lp.LevelPlayId}) catch "";
+        if (key.len > 0 and pc.info.getKeyInt(key) == 2) return true;
+    }
+    return isQuestCheckingLevelPlay(ctx, lp.LevelPlayId);
+}
+
+fn isLpChildQuestSatisfiedNow(
+    ctx: LevelPlayContext,
+    lp_id: i32,
+    node: LazyNodeStore.NodeEntry,
+    player_pos_opt: ?[3]f32,
+) bool {
+    const cond = QuestEngine.getChildConditionPub(node.data) orelse return true;
+    const ctype = jsonStr(cond.get("Type")) orelse return true;
+    if (std.mem.eql(u8, ctype, "ReachArea")) {
+        const pos = player_pos_opt orelse currentPlayerPos(ctx) orelse return false;
+        return isPlayerWithinReachArea(ctx, node.data, cond, pos);
+    }
+    return QuestEngine.evalChildConditionAuto(toQuestCtx(ctx), lp_id, node);
+}
+
+fn pushLevelPlayBehaviorTreeInfo(
+    ctx: LevelPlayContext,
+    lp_id: i32,
+    nodes: []const LazyNodeStore.NodeEntry,
+) !void {
+    var tree_nodes: std.ArrayList(pb.MapEntry(i32, pb.NodeInfo)) = .empty;
+    var timer_infos: std.ArrayList(pb.TimerInfoPb) = .empty;
+    for (nodes) |node| {
+        const finished = isLevelPlayNodeMarked(ctx.progress_comp, lp_id, node.id);
+        const active = !finished and isLpNodeActive(ctx.progress_comp, lp_id, node.id);
+        if (!finished and !active) continue;
+
+        const status: pb.NodeStatus = if (finished) .CompletedSuccess else .Activate;
+        var node_info: pb.NodeInfo = .{ .Status = status };
+        if (std.mem.eql(u8, node.node_type, "ChildQuest")) {
+            node_info.ExtraInfo = .{ .ChildQuestNodeInfo = .{
+                .Status = if (finished) .Finished else .Progress,
+            } };
+            if (active) {
+                if (ctx.scene.lp_timers.getDueMs(lp_id, node.id)) |due_ms| {
+                    try timer_infos.append(ctx.alloc.arena, .{
+                        .TimerType = "WaitTime",
+                        .NodeId = node.id,
+                        .EndTime = @divTrunc(due_ms, 1000),
+                    });
+                }
+            }
+        }
+        try tree_nodes.append(ctx.alloc.arena, .{
+            .key = node.id,
+            .value = node_info,
+        });
+    }
+
+    var tree_infos: std.ArrayList(pb.TreeInfo) = .empty;
+    try tree_infos.append(ctx.alloc.arena, .{
+        .TreeOwnerId = lp_id,
+        .TreeIncId = lp_id,
+        .BtType = .BtTypeLevelPlay,
+        .BlackboardId = lp_id,
+        .Nodes = tree_nodes,
+        .TimerInfos = timer_infos,
+    });
+    try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BehaviorTreeInfoNotify{
+        .TreeInfos = tree_infos,
+    });
+}
+
+fn finishLpNonChildNode(
+    ctx: LevelPlayContext,
+    lp_id: i32,
+    node: LazyNodeStore.NodeEntry,
+    push_updates: bool,
+    dirty_pc: *bool,
+) void {
+    ctx.scene.releaseOccupationsForNode(ctx.alloc.gpa, lp_id, node.id);
+    markLpNodeFinished(ctx, lp_id, node.id, dirty_pc);
+    if (push_updates) {
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateNodeStatusNotify{
+            .TreeOwnerId = lp_id,
+            .TreeIncId = lp_id,
+            .NodeId = node.id,
+            .Status = .CompletedSuccess,
+        }) catch {};
+    }
+}
+
+fn deactivateLpSubtree(
+    ctx: LevelPlayContext,
+    lp_id: i32,
+    nodes: []const LazyNodeStore.NodeEntry,
+    parent_id: i32,
+    push_updates: bool,
+    dirty_pc: *bool,
+) void {
+    const qctx = toQuestCtx(ctx);
+    for (nodes) |child| {
+        if (child.parent_id != parent_id) continue;
+        ctx.scene.lp_timers.cancel(lp_id, child.id);
+        ctx.scene.releaseOccupationsForNode(ctx.alloc.gpa, lp_id, child.id);
+        if (isLpNodeActive(ctx.progress_comp, lp_id, child.id)) {
+            setLpNodeActive(ctx, lp_id, child.id, false, dirty_pc);
+            QuestEngine.removeDoInteractOptionsForBtNode(qctx, .BtTypeLevelPlay, lp_id, child.id);
+            if (push_updates) {
+                ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateNodeStatusNotify{
+                    .TreeOwnerId = lp_id,
+                    .TreeIncId = lp_id,
+                    .NodeId = child.id,
+                    .Status = .Destroy,
+                }) catch {};
+            }
+        }
+        deactivateLpSubtree(ctx, lp_id, nodes, child.id, push_updates, dirty_pc);
+    }
+}
+
+fn completeLpChildQuest(
+    ctx: LevelPlayContext,
+    lp_id: i32,
+    nodes: []const LazyNodeStore.NodeEntry,
+    node: LazyNodeStore.NodeEntry,
+    push_updates: bool,
+    dirty_pc: *bool,
+) !void {
+    _ = nodes;
+    ctx.scene.lp_timers.cancel(lp_id, node.id);
+    if (isLevelPlayNodeMarked(ctx.progress_comp, lp_id, node.id)) return;
+    markLpNodeFinished(ctx, lp_id, node.id, dirty_pc);
+    if (dirty_pc.*) {
+        if (ctx.progress_comp) |pc| {
+            pc.save(ctx.fs, ctx.alloc.arena) catch {};
+            dirty_pc.* = false;
+        }
+    }
+
+    const qctx = toQuestCtx(ctx);
+    QuestEngine.removeDoInteractOptionsForBtNode(qctx, .BtTypeLevelPlay, lp_id, node.id);
+
+    if (push_updates) {
+        QuestEngine.pushBtChildNodeStatus(qctx, .BtTypeLevelPlay, lp_id, &node, .CompletedSuccess, .Finished) catch {};
+    }
+    if (node.data == .object) {
+        runLevelPlayActions(ctx, lp_id, node.id, node.data.object.get("FinishActions"));
+    }
+}
+
+fn stepLevelPlayNode(
+    ctx: LevelPlayContext,
+    lp_id: i32,
+    nodes: []const LazyNodeStore.NodeEntry,
+    node: LazyNodeStore.NodeEntry,
+    initial_boot: bool,
+    push_updates: bool,
+    player_pos_opt: ?[3]f32,
+    newly_activated: *std.ArrayList(LazyNodeStore.NodeEntry),
+    newly_actions: *std.ArrayList(LazyNodeStore.NodeEntry),
+    dirty_pc: *bool,
+    steps: *usize,
+) anyerror!LpStepResult {
+    if (steps.* >= 96) return .running;
+    steps.* += 1;
+
+    if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) return .tree_ended;
+    if (isLevelPlayNodeMarked(ctx.progress_comp, lp_id, node.id)) return .completed;
+
+    const qctx = toQuestCtx(ctx);
+    if (try QuestEngine.checkNodeOccupationAndSavePub(qctx, .BtTypeLevelPlay, lp_id, node, push_updates and !initial_boot)) {
+        return .running;
+    }
+
+    if (std.mem.eql(u8, node.node_type, "Sequence")) {
+        for (nodes) |child| {
+            if (child.parent_id != node.id) continue;
+            const res = try stepLevelPlayNode(ctx, lp_id, nodes, child, initial_boot, push_updates, player_pos_opt, newly_activated, newly_actions, dirty_pc, steps);
+            switch (res) {
+                .running => return .running,
+                .failed => return .failed,
+                .tree_ended => return .tree_ended,
+                .completed => continue,
+            }
+        }
+        finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+        return .completed;
+    } else if (std.mem.eql(u8, node.node_type, "Select")) {
+        var any_child = false;
+        for (nodes) |child| {
+            if (child.parent_id != node.id) continue;
+            any_child = true;
+            const res = try stepLevelPlayNode(ctx, lp_id, nodes, child, initial_boot, push_updates, player_pos_opt, newly_activated, newly_actions, dirty_pc, steps);
+            switch (res) {
+                .tree_ended => return .tree_ended,
+                .completed => {
+                    finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+                    return .completed;
+                },
+                .running => return .running,
+                .failed => continue,
+            }
+        }
+        if (any_child and node.parent_id != 0) return .failed;
+        finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+        return .completed;
+    } else if (std.mem.eql(u8, node.node_type, "ParallelSelect")) {
+        const needed: i32 = @max(1, node.count);
+        var finished_count: i32 = 0;
+        var failed_count: i32 = 0;
+        var total_children: i32 = 0;
+
+        for (nodes) |child| {
+            if (child.parent_id != node.id) continue;
+            total_children += 1;
+            if (isLevelPlayNodeMarked(ctx.progress_comp, lp_id, child.id)) {
+                finished_count += 1;
+                continue;
+            }
+            const res = try stepLevelPlayNode(ctx, lp_id, nodes, child, initial_boot, push_updates, player_pos_opt, newly_activated, newly_actions, dirty_pc, steps);
+            switch (res) {
+                .tree_ended => return .tree_ended,
+                .completed => {
+                    finished_count += 1;
+                    if (finished_count >= needed) break;
+                },
+                .failed => failed_count += 1,
+                .running => {},
+            }
+        }
+        if (finished_count >= needed) {
+            deactivateLpSubtree(ctx, lp_id, nodes, node.id, push_updates and !initial_boot, dirty_pc);
+            finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+            return .completed;
+        }
+        if (node.parent_id != 0 and total_children > 0 and (total_children - failed_count) < needed) {
+            return .failed;
+        }
+        return .running;
+    } else if (std.mem.eql(u8, node.node_type, "AlwaysFalse")) {
+        for (nodes) |child| {
+            if (child.parent_id != node.id) continue;
+            const res = try stepLevelPlayNode(ctx, lp_id, nodes, child, initial_boot, push_updates, player_pos_opt, newly_activated, newly_actions, dirty_pc, steps);
+            if (res == .tree_ended) return .tree_ended;
+        }
+        return .running;
+    } else if (std.mem.eql(u8, node.node_type, "AlwaysTrue")) {
+        for (nodes) |child| {
+            if (child.parent_id != node.id) continue;
+            const res = try stepLevelPlayNode(ctx, lp_id, nodes, child, initial_boot, push_updates, player_pos_opt, newly_activated, newly_actions, dirty_pc, steps);
+            if (res == .tree_ended) return .tree_ended;
+            if (res == .running) return .running;
+        }
+        finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+        return .completed;
+    } else if (std.mem.eql(u8, node.node_type, "QuestSucceed")) {
+        markLpNodeFinished(ctx, lp_id, node.id, dirty_pc);
+        if (dirty_pc.*) {
+            if (ctx.progress_comp) |pc| {
+                pc.save(ctx.fs, ctx.alloc.arena) catch {};
+                dirty_pc.* = false;
+            }
+        }
+        try completeLevelPlay(ctx, lp_id);
+        return .tree_ended;
+    } else if (std.mem.eql(u8, node.node_type, "QuestFailed")) {
+        if (try QuestEngine.evalQuestFailedConditionPub(qctx, lp_id, node, player_pos_opt, &ctx.scene.lp_fail_timers)) |_| {
+            if (node.data == .object) {
+                runLevelPlayActions(ctx, lp_id, node.id, node.data.object.get("FinishActions"));
+            }
+            try onLevelPlayEnabled(ctx, lp_id, false);
+            return .tree_ended;
+        }
+        return .running;
+    } else if (std.mem.eql(u8, node.node_type, "Action") or std.mem.eql(u8, node.node_type, "ActionWithResult")) {
+        if (node.data == .object) {
+            var single_buf: [1]std.json.Value = undefined;
+            const action_items: ?[]const std.json.Value = if (node.data.object.get("Actions")) |acts_val|
+                (if (acts_val == .array) acts_val.array.items else null)
+            else if (node.data.object.get("Action")) |single_act| blk: {
+                if (single_act != .object) break :blk null;
+                single_buf[0] = single_act;
+                break :blk single_buf[0..1];
+            } else null;
+            if (action_items) |items| {
+                if (items.len > 0) {
+                    if (initial_boot) {
+                        try newly_actions.append(ctx.alloc.arena, node);
+                    } else if (push_updates) {
+                        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateNodeStatusNotify{
+                            .TreeOwnerId = lp_id,
+                            .TreeIncId = lp_id,
+                            .NodeId = node.id,
+                            .Status = .Activate,
+                        }) catch {};
+                    }
+                    var lp_cbs = QuestEngine.actionCallbacks();
+                    lp_cbs.bt_type = .BtTypeLevelPlay;
+                    QuestEngine.executeActionList(qctx, lp_cbs, lp_id, node.id, items) catch {};
+                    if (!initial_boot and push_updates) {
+                        QuestEngine.pushBtLevelEventsForType(qctx, .BtTypeLevelPlay, lp_id, node.id, .ActionGroupNodeAction, items) catch {};
+                    }
+                    const is_async_flow = QuestEngine.hasAsyncPlayFlowAction(items);
+                    if (!is_async_flow and
+                        ((ctx.scene.active_flow_inc_id != 0 and
+                        ctx.scene.active_flow_quest_id == lp_id and
+                        ctx.scene.active_flow_node_id == node.id) or
+                        ctx.scene.hasPendingFlowForNode(lp_id, node.id)))
+                    {
+                        setLpNodeActive(ctx, lp_id, node.id, true, dirty_pc);
+                        return .running;
+                    }
+                }
+            }
+        }
+        finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+        return .completed;
+    } else if (std.mem.eql(u8, node.node_type, "Condition")) {
+        const wait_true = if (node.data == .object)
+            if (node.data.object.get("WaitUntilTrue")) |w| w == .bool and w.bool else false
+        else
+            false;
+        const ok = if (node.data == .object)
+            if (node.data.object.get("Condition")) |cb|
+                QuestEngine.evalInlineCondition(qctx, lp_id, cb)
+            else
+                true
+        else
+            true;
+        if (ok) {
+            finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+            return .completed;
+        }
+        return if (wait_true) .running else .failed;
+    } else if (std.mem.eql(u8, node.node_type, "ConditionSelector")) {
+        var selected_child_id: ?i32 = null;
+        if (node.data == .object) {
+            if (node.data.object.get("Slots")) |slots_val| {
+                if (slots_val == .array) {
+                    for (slots_val.array.items) |slot| {
+                        if (slot != .object) continue;
+                        const pass = if (slot.object.get("Condition")) |sc|
+                            QuestEngine.evalInlineCondition(qctx, lp_id, sc)
+                        else
+                            true;
+                        if (!pass) continue;
+                        if (slot.object.get("Node")) |sn| {
+                            if (sn == .object) {
+                                selected_child_id = jsonInt(sn.object.get("Id"));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (selected_child_id) |cid| {
+            if (findLpNodeById(nodes, cid)) |cnode| {
+                const res = try stepLevelPlayNode(ctx, lp_id, nodes, cnode.*, initial_boot, push_updates, player_pos_opt, newly_activated, newly_actions, dirty_pc, steps);
+                if (res == .completed) {
+                    finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+                }
+                return res;
+            }
+        }
+        return .running;
+    } else if (std.mem.eql(u8, node.node_type, "Repeater")) {
+        while (steps.* < 96) {
+            if (node.data == .object) {
+                if (node.data.object.get("ExitCondition")) |ec| {
+                    if (QuestEngine.evalInlineCondition(qctx, lp_id, ec)) {
+                        finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+                        return .completed;
+                    }
+                }
+            }
+            var any_child = false;
+            var child_completed = false;
+            for (nodes) |child| {
+                if (child.parent_id != node.id) continue;
+                any_child = true;
+                const res = try stepLevelPlayNode(ctx, lp_id, nodes, child, initial_boot, push_updates, player_pos_opt, newly_activated, newly_actions, dirty_pc, steps);
+                if (res == .tree_ended) return .tree_ended;
+                if (res == .completed) {
+                    child_completed = true;
+                    break;
+                }
+                return .running;
+            }
+            if (!any_child or !child_completed) break;
+        }
+        if (steps.* >= 96) return .running;
+        finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+        return .completed;
+    } else if (std.mem.eql(u8, node.node_type, "ChildQuest")) {
+        const was_active = isLpNodeActive(ctx.progress_comp, lp_id, node.id);
+        if (!was_active) {
+            if (node.data == .object) {
+                runLevelPlayActions(ctx, lp_id, node.id, node.data.object.get("EnterActions"));
+            }
+            if (QuestEngine.getChildConditionPub(node.data)) |cond| {
+                if (QuestEngine.parseTimerDelayMsPub(cond)) |delay_ms| {
+                    if (delay_ms > 0 and !ctx.scene.lp_timers.contains(lp_id, node.id)) {
+                        try ctx.scene.lp_timers.upsert(ctx.alloc.gpa, .{
+                            .quest_id = lp_id,
+                            .node_id = node.id,
+                            .due_ms = QuestEngine.nowMsPub(ctx.io) + delay_ms,
+                        });
+                    }
+                }
+            }
+        }
+        if (isLpChildQuestSatisfiedNow(ctx, lp_id, node, player_pos_opt)) {
+            if (!was_active and !initial_boot and push_updates) {
+                QuestEngine.pushBtChildNodeStatus(qctx, .BtTypeLevelPlay, lp_id, &node, .Activate, .Progress) catch {};
+            }
+            try completeLpChildQuest(ctx, lp_id, nodes, node, push_updates and !initial_boot, dirty_pc);
+            return .completed;
+        }
+        if (!was_active) {
+            setLpNodeActive(ctx, lp_id, node.id, true, dirty_pc);
+            if (initial_boot) {
+                try newly_activated.append(ctx.alloc.arena, node);
+            } else if (push_updates) {
+                QuestEngine.pushBtChildNodeStatus(qctx, .BtTypeLevelPlay, lp_id, &node, .Activate, .Progress) catch {};
+                QuestEngine.pushDoInteractOptionsForBtNode(ctx.scene, ctx.conn, ctx.alloc, ctx.io, .BtTypeLevelPlay, lp_id, node, null) catch {};
+            }
+        }
+        return .running;
+    }
+
+    finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+    return .completed;
+}
+
+fn stepLevelPlayTree(
+    ctx: LevelPlayContext,
+    lp_id: i32,
+    nodes: []const LazyNodeStore.NodeEntry,
+    push_updates: bool,
+    player_pos_opt: ?[3]f32,
+) !void {
+    if (nodes.len == 0) return;
+    if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) return;
+    if (lp_step_depth > 0) {
+        lp_recheck_pending = true;
+        return;
+    }
+
+    lp_step_depth += 1;
+    defer {
+        lp_step_depth -= 1;
+        if (lp_step_depth == 0) lp_recheck_pending = false;
+    }
+
+    const root = findLpRootNode(nodes) orelse return;
+    var dirty_pc = false;
+    var pass: usize = 0;
+    while (pass < 4) : (pass += 1) {
+        lp_recheck_pending = false;
+        var newly_activated: std.ArrayList(LazyNodeStore.NodeEntry) = .empty;
+        var newly_actions: std.ArrayList(LazyNodeStore.NodeEntry) = .empty;
+        var steps: usize = 0;
+        const res = try stepLevelPlayNode(
+            ctx,
+            lp_id,
+            nodes,
+            root,
+            false,
+            push_updates,
+            player_pos_opt,
+            &newly_activated,
+            &newly_actions,
+            &dirty_pc,
+            &steps,
+        );
+        if (dirty_pc) {
+            if (ctx.progress_comp) |pc| {
+                pc.save(ctx.fs, ctx.alloc.arena) catch {};
+                dirty_pc = false;
+            }
+        }
+        if (res == .completed and !QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) {
+            try completeLevelPlay(ctx, lp_id);
+            break;
+        }
+        if (!lp_recheck_pending or res == .tree_ended) break;
+    }
+}
+
+fn enterAndStartLevelPlay(
+    ctx: LevelPlayContext,
+    lp: Assets.DataTables.LevelPlayData,
+    player_pos_opt: ?[3]f32,
+    dirty_entered: *bool,
+) !void {
+    const lp_id = lp.LevelPlayId;
+    if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) return;
+    if (QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, lp_id)) return;
+
+    if (try QuestInfo.appendUniqueInt(&ctx.quest_comp.info.progress.entered_level_plays, ctx.alloc.gpa, lp_id)) {
+        dirty_entered.* = true;
+    }
+    ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LevelPlayStateNotify{
+        .Id = lp_id,
+        .State = 2,
+        .CompleteNumber = 0,
+    }) catch {};
+    ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.EnterLevelPlayNotify{
+        .Id = lp_id,
+        .State = 2,
+        .CanGetReward = true,
+    }) catch {};
+
+    const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp_id) catch &[_]LazyNodeStore.NodeEntry{};
+    if (nodes.len == 0) return;
+
+    const qctx = toQuestCtx(ctx);
+    const root = findLpRootNode(nodes) orelse nodes[0];
+    var dirty_pc = false;
+
+    if (!isLpBtBooted(ctx.progress_comp, lp_id)) {
+        markLpBtBooted(ctx, lp_id, &dirty_pc);
+        var newly_activated: std.ArrayList(LazyNodeStore.NodeEntry) = .empty;
+        var newly_actions: std.ArrayList(LazyNodeStore.NodeEntry) = .empty;
+        var steps: usize = 0;
+
+        lp_step_depth += 1;
+        const res = stepLevelPlayNode(
+            ctx,
+            lp_id,
+            nodes,
+            root,
+            true,
+            false,
+            player_pos_opt,
+            &newly_activated,
+            &newly_actions,
+            &dirty_pc,
+            &steps,
+        ) catch |err| {
+            lp_step_depth -= 1;
+            return err;
+        };
+        lp_step_depth -= 1;
+
+        if (dirty_pc) {
+            if (ctx.progress_comp) |pc| {
+                pc.save(ctx.fs, ctx.alloc.arena) catch {};
+                dirty_pc = false;
+            }
+        }
+
+        try pushLevelPlayBehaviorTreeInfo(ctx, lp_id, nodes);
+
+        for (newly_activated.items) |act_node| {
+            QuestEngine.pushBtLevelEventsForType(
+                qctx,
+                .BtTypeLevelPlay,
+                lp_id,
+                act_node.id,
+                .ChildQuestNodeEnterAction,
+                QuestEngine.nodeActionItemsPub(&act_node, "EnterActions"),
+            ) catch {};
+            QuestEngine.pushDoInteractOptionsForBtNode(ctx.scene, ctx.conn, ctx.alloc, ctx.io, .BtTypeLevelPlay, lp_id, act_node, null) catch {};
+        }
+        for (newly_actions.items) |act_node| {
+            var single_buf: [1]std.json.Value = undefined;
+            const action_items: ?[]const std.json.Value = if (act_node.data == .object) blk: {
+                if (act_node.data.object.get("Actions")) |av| {
+                    break :blk if (av == .array) av.array.items else null;
+                }
+                if (act_node.data.object.get("Action")) |sv| {
+                    if (sv != .object) break :blk null;
+                    single_buf[0] = sv;
+                    break :blk single_buf[0..1];
+                }
+                break :blk null;
+            } else null;
+            if (action_items) |items| {
+                QuestEngine.pushBtLevelEventsForType(qctx, .BtTypeLevelPlay, lp_id, act_node.id, .ActionGroupNodeAction, items) catch {};
+            }
+        }
+
+        if (res == .completed or lp_recheck_pending) {
+            lp_recheck_pending = false;
+            try stepLevelPlayTree(ctx, lp_id, nodes, true, player_pos_opt);
+        }
+    } else {
+        try pushLevelPlayBehaviorTreeInfo(ctx, lp_id, nodes);
+        for (nodes) |node| {
+            if (isLpNodeActive(ctx.progress_comp, lp_id, node.id)) {
+                QuestEngine.pushDoInteractOptionsForBtNode(ctx.scene, ctx.conn, ctx.alloc, ctx.io, .BtTypeLevelPlay, lp_id, node, null) catch {};
+            }
+        }
+        try stepLevelPlayTree(ctx, lp_id, nodes, true, player_pos_opt);
+    }
+}
+
 fn runLevelPlayActions(ctx: LevelPlayContext, owner_id: i32, node_id: i32, actions_opt: ?std.json.Value) void {
     const actions_val = actions_opt orelse return;
     if (actions_val != .array) return;
 
+    var lp_cbs = QuestEngine.actionCallbacks();
+    lp_cbs.bt_type = .BtTypeLevelPlay;
     QuestEngine.executeActionList(
         toQuestCtx(ctx),
-        QuestEngine.actionCallbacks(),
+        lp_cbs,
         owner_id,
         node_id,
         actions_val.array.items,
@@ -291,7 +1024,53 @@ fn runLevelPlayActions(ctx: LevelPlayContext, owner_id: i32, node_id: i32, actio
 
 pub fn completeLevelPlay(ctx: LevelPlayContext, level_play_id: i32) !void {
     if (level_play_id <= 0) return;
+    ctx.scene.lp_timers.cancelQuest(level_play_id);
+    ctx.scene.fail_timers.cancelQuest(level_play_id);
+    ctx.scene.lp_fail_timers.cancelQuest(level_play_id);
+    ctx.scene.releaseOccupationsForTree(ctx.alloc.gpa, level_play_id, level_play_id);
+    ctx.scene.clearSaveNodesForOwner(level_play_id);
     if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, level_play_id)) return;
+
+    const qctx = toQuestCtx(ctx);
+    const lp_nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, level_play_id) catch &[_]LazyNodeStore.NodeEntry{};
+
+    for (lp_nodes) |node| {
+        if (isLpNodeActive(ctx.progress_comp, level_play_id, node.id)) {
+            if (ctx.progress_comp) |pc| {
+                var dirty = false;
+                setLpNodeActive(ctx, level_play_id, node.id, false, &dirty);
+                if (dirty) pc.save(ctx.fs, ctx.alloc.arena) catch {};
+            }
+        }
+        QuestEngine.removeDoInteractOptionsForBtNode(qctx, .BtTypeLevelPlay, level_play_id, node.id);
+
+        if (!std.mem.eql(u8, node.node_type, "QuestSucceed")) continue;
+        if (isLpBtBooted(ctx.progress_comp, level_play_id)) {
+            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateNodeStatusNotify{
+                .TreeOwnerId = level_play_id,
+                .TreeIncId = level_play_id,
+                .NodeId = node.id,
+                .Status = .CompletedSuccess,
+            }) catch {};
+        }
+        if (node.data == .object) {
+            if (node.data.object.get("FinishActions")) |acts_val| {
+                if (acts_val == .array and acts_val.array.items.len > 0) {
+                    if (isLpBtBooted(ctx.progress_comp, level_play_id)) {
+                        QuestEngine.pushBtLevelEventsForType(
+                            qctx,
+                            .BtTypeLevelPlay,
+                            level_play_id,
+                            node.id,
+                            .SuccessNodeAction,
+                            acts_val.array.items,
+                        ) catch {};
+                    }
+                    QuestEngine.executeActionList(qctx, QuestEngine.actionCallbacks(), level_play_id, node.id, acts_val.array.items) catch {};
+                }
+            }
+        }
+    }
 
     const was_entered = try QuestInfo.removeIntValue(&ctx.quest_comp.info.progress.entered_level_plays, ctx.alloc.gpa, level_play_id);
     try ctx.quest_comp.info.markLevelPlayCompleted(ctx.alloc.gpa, level_play_id);
@@ -332,22 +1111,10 @@ pub fn completeLevelPlay(ctx: LevelPlayContext, level_play_id: i32) !void {
         .LevelPlayInfo = infos,
     });
 
-    const qctx = toQuestCtx(ctx);
     try QuestEngine.onLevelPlayCompleted(qctx, level_play_id);
     if (ctx.scene.instance_id != 8) {
         try QuestEngine.onDungeonEvent(qctx, ctx.scene.instance_id, true);
     }
-    if (ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, level_play_id)) |lp_nodes| {
-        for (lp_nodes) |node| {
-            if (!std.mem.eql(u8, node.node_type, "QuestSucceed")) continue;
-            if (node.data != .object) continue;
-            if (node.data.object.get("FinishActions")) |acts_val| {
-                if (acts_val == .array) {
-                    QuestEngine.executeActionList(qctx, QuestEngine.actionCallbacks(), level_play_id, node.id, acts_val.array.items) catch {};
-                }
-            }
-        }
-    } else |_| {}
     log.info("Completed LevelPlay {d}", .{level_play_id});
 }
 
@@ -393,33 +1160,25 @@ fn checkLevelPlayKillProgress(ctx: LevelPlayContext, killed_cfg_id: i32, killed_
             const cond_val = node.data.object.get("Condition") orelse continue;
             if (cond_val != .object) continue;
             const ctype = jsonStr(cond_val.object.get("Type")) orelse continue;
-            if (!std.mem.eql(u8, ctype, "Kill")) continue;
+            if (!std.mem.eql(u8, ctype, "Kill") and !std.mem.eql(u8, ctype, "MonsterCreator")) continue;
 
             const in_exist = jsonArrayContainsInt(cond_val.object.get("ExistTargets"), killed_cfg_id);
             const in_awake = jsonArrayContainsInt(cond_val.object.get("TargetsToAwake"), killed_cfg_id);
-            if (!in_exist and !in_awake) continue;
+            const in_mc = jsonArrayContainsInt(cond_val.object.get("MonsterCreatorEntityIds"), killed_cfg_id);
+            if (!in_exist and !in_awake and !in_mc) continue;
 
-            // Check whether all targets in this Kill node are now defeated.
+            // Check whether all targets in this Kill/MonsterCreator node are now defeated.
             var any_alive = false;
-            if (cond_val.object.get("ExistTargets")) |et| {
-                if (et == .array) {
-                    for (et.array.items) |item| {
-                        const tid = jsonInt(item) orelse continue;
-                        if (tid != killed_cfg_id and isTargetStillAliveInScene(ctx.scene, tid, killed_net_id)) {
-                            any_alive = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (!any_alive) {
-                if (cond_val.object.get("TargetsToAwake")) |ta| {
-                    if (ta == .array) {
-                        for (ta.array.items) |item| {
-                            const tid = jsonInt(item) orelse continue;
-                            if (tid != killed_cfg_id and isTargetStillAliveInScene(ctx.scene, tid, killed_net_id)) {
-                                any_alive = true;
-                                break;
+            inline for (.{ "ExistTargets", "TargetsToAwake", "MonsterCreatorEntityIds" }) |field| {
+                if (!any_alive) {
+                    if (cond_val.object.get(field)) |et| {
+                        if (et == .array) {
+                            for (et.array.items) |item| {
+                                const tid = jsonInt(item) orelse continue;
+                                if (tid != killed_cfg_id and isTargetStillAliveInScene(ctx.scene, tid, killed_net_id)) {
+                                    any_alive = true;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -427,8 +1186,12 @@ fn checkLevelPlayKillProgress(ctx: LevelPlayContext, killed_cfg_id: i32, killed_
             }
             if (any_alive) break;
 
-            // Kill objective cleared! Run node FinishActions (often spawns/unlocks chest).
-            runLevelPlayActions(ctx, lp.LevelPlayId, node.id, node.data.object.get("FinishActions"));
+            // Kill objective cleared!
+            var dirty_pc = false;
+            try completeLpChildQuest(ctx, lp.LevelPlayId, nodes, node, true, &dirty_pc);
+            if (dirty_pc) {
+                if (ctx.progress_comp) |pc| pc.save(ctx.fs, ctx.alloc.arena) catch {};
+            }
 
             const has_reward_chest = if (lp.Data.LevelPlayRewardConfig) |rc|
                 rc.RewardEntityId > 0 and !ctx.quest_comp.info.hasOpenedChest(rc.RewardEntityId)
@@ -447,7 +1210,11 @@ fn checkLevelPlayKillProgress(ctx: LevelPlayContext, killed_cfg_id: i32, killed_
                         _ = try RewardService.grantTreasureBoxReward(toRewardCtx(ctx), 2, rc.RewardId, 7000);
                     }
                 }
-                try completeLevelPlay(ctx, lp.LevelPlayId);
+                if (isLpBtBooted(ctx.progress_comp, lp.LevelPlayId)) {
+                    try stepLevelPlayTree(ctx, lp.LevelPlayId, nodes, true, null);
+                } else {
+                    try completeLevelPlay(ctx, lp.LevelPlayId);
+                }
             }
             break;
         }
@@ -649,24 +1416,50 @@ pub fn onEntityInteractFallback(ctx: LevelPlayContext, net_id: i64) !bool {
     const cfg_id32 = std.math.cast(i32, cfg_id) orelse return false;
     for (ctx.assets.indexes.levelPlayIndicesForRefEntity(cfg_id32)) |lp_idx| {
         const lp = ctx.assets.tables.level_play_data.items[lp_idx];
-        if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) continue;
-        if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp.LevelPlayId)) continue;
+        if (!canEnterLevelPlay(ctx, lp)) continue;
 
         const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp.LevelPlayId) catch continue;
-        var matched_interact = false;
+        var has_tree_active = false;
+        for (nodes) |n| {
+            if (isLpNodeActive(ctx.progress_comp, lp.LevelPlayId, n.id)) {
+                has_tree_active = true;
+                break;
+            }
+        }
+        var matched_node: ?LazyNodeStore.NodeEntry = null;
         for (nodes) |node| {
             if (node.data != .object) continue;
-            const ntype = jsonStr(node.data.object.get("Type")) orelse continue;
-            if (!std.mem.eql(u8, ntype, "ChildQuest")) continue;
+            if (!std.mem.eql(u8, node.node_type, "ChildQuest")) continue;
+            if (has_tree_active and !isLpNodeActive(ctx.progress_comp, lp.LevelPlayId, node.id)) continue;
             const cond_val = node.data.object.get("Condition") orelse continue;
             if (cond_val != .object) continue;
             const ctype = jsonStr(cond_val.object.get("Type")) orelse continue;
             if (!std.mem.eql(u8, ctype, "DoInteract")) continue;
-            runLevelPlayActions(ctx, lp.LevelPlayId, node.id, node.data.object.get("FinishActions"));
-            matched_interact = true;
+            if ((jsonInt(cond_val.object.get("EntityId")) orelse 0) == cfg_id32) {
+                matched_node = node;
+                break;
+            }
+            if (cond_val.object.get("AddOptions")) |opts_val| {
+                if (opts_val == .array) {
+                    for (opts_val.array.items) |opt_v| {
+                        if (opt_v == .object and (jsonInt(opt_v.object.get("EntityId")) orelse 0) == cfg_id32) {
+                            matched_node = node;
+                            break;
+                        }
+                    }
+                    if (matched_node != null) break;
+                }
+            }
         }
-        if (matched_interact) {
-            try completeLevelPlay(ctx, lp.LevelPlayId);
+        if (matched_node) |mnode| {
+            if (isLpBtBooted(ctx.progress_comp, lp.LevelPlayId) or has_tree_active) {
+                var dirty_pc = false;
+                try completeLpChildQuest(ctx, lp.LevelPlayId, nodes, mnode, true, &dirty_pc);
+                try stepLevelPlayTree(ctx, lp.LevelPlayId, nodes, true, null);
+            } else {
+                runLevelPlayActions(ctx, lp.LevelPlayId, mnode.id, mnode.data.object.get("FinishActions"));
+                try completeLevelPlay(ctx, lp.LevelPlayId);
+            }
             return true;
         }
     }
@@ -706,13 +1499,90 @@ pub fn onAnimalDestroy(ctx: LevelPlayContext, net_id: i64) !void {
     removeEntityFromSceneAndNotify(ctx, net_id);
 }
 
-pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32) !void {
-    const slice = ctx.scene.entities.slice();
-    const configs = slice.items(.config);
-    const positions = slice.items(.position);
-    var dirty_entered = false;
+pub fn ensureActiveTimersScheduled(ctx: LevelPlayContext) !void {
+    const now_ms = QuestEngine.nowMsPub(ctx.io);
+    for (ctx.quest_comp.info.progress.entered_level_plays) |lpid| {
+        if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lpid)) continue;
+        const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lpid) catch continue;
+        for (nodes) |node| {
+            if (!isLpNodeActive(ctx.progress_comp, lpid, node.id)) continue;
+            if (!std.mem.eql(u8, node.node_type, "ChildQuest")) continue;
+            if (ctx.scene.lp_timers.contains(lpid, node.id)) continue;
+            const cond = QuestEngine.getChildConditionPub(node.data) orelse continue;
+            const delay_ms = QuestEngine.parseTimerDelayMsPub(cond) orelse continue;
+            if (delay_ms > 0) {
+                try ctx.scene.lp_timers.upsert(ctx.alloc.gpa, .{
+                    .quest_id = lpid,
+                    .node_id = node.id,
+                    .due_ms = now_ms + delay_ms,
+                });
+            }
+        }
+    }
+}
 
-    // 1) Check currently entered LevelPlays for leaving LeaveRadius
+pub fn onTimerDue(ctx: LevelPlayContext, lp_id: i32, node_id: i32) !bool {
+    if (lp_id <= 0 or node_id <= 0) return false;
+    if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) return false;
+    if (!QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, lp_id)) return false;
+    if (!isLpNodeActive(ctx.progress_comp, lp_id, node_id)) return false;
+    const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp_id) catch return false;
+    const node = findLpNodeById(nodes, node_id) orelse return false;
+    var dirty_pc = false;
+    try completeLpChildQuest(ctx, lp_id, nodes, node.*, true, &dirty_pc);
+    try stepLevelPlayTree(ctx, lp_id, nodes, true, currentPlayerPos(ctx));
+    return true;
+}
+
+pub fn onFailTimerDue(ctx: LevelPlayContext, lp_id: i32, node_id: i32) !bool {
+    if (lp_id <= 0 or node_id <= 0) return false;
+    if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) return false;
+    if (!QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, lp_id)) return false;
+    const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp_id) catch return false;
+    if (findLpNodeById(nodes, node_id)) |node| {
+        if (node.data == .object) {
+            runLevelPlayActions(ctx, lp_id, node.id, node.data.object.get("FinishActions"));
+        }
+    }
+    try onLevelPlayEnabled(ctx, lp_id, false);
+    return true;
+}
+
+pub fn syncOnLogin(ctx: LevelPlayContext) !void {
+    try ensureActiveTimersScheduled(ctx);
+    const pos = currentPlayerPos(ctx);
+    const entered_snap = try ctx.alloc.arena.dupe(i32, ctx.quest_comp.info.progress.entered_level_plays);
+    for (entered_snap) |lpid| {
+        const lp = ctx.assets.tables.level_play_data.getDataById(lpid) orelse continue;
+        if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) continue;
+        if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lpid)) continue;
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LevelPlayStateNotify{
+            .Id = lpid,
+            .State = 2,
+            .CompleteNumber = 0,
+        }) catch {};
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.EnterLevelPlayNotify{
+            .Id = lpid,
+            .State = 2,
+            .CanGetReward = true,
+        }) catch {};
+        const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lpid) catch continue;
+        if (nodes.len == 0) continue;
+        try pushLevelPlayBehaviorTreeInfo(ctx, lpid, nodes);
+        for (nodes) |node| {
+            if (isLpNodeActive(ctx.progress_comp, lpid, node.id)) {
+                QuestEngine.pushDoInteractOptionsForBtNode(ctx.scene, ctx.conn, ctx.alloc, ctx.io, .BtTypeLevelPlay, lpid, node, null) catch {};
+            }
+        }
+        try stepLevelPlayTree(ctx, lpid, nodes, true, pos);
+    }
+}
+
+pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32, z: f32) !void {
+    var dirty_entered = false;
+    const player_pos: [3]f32 = .{ x, y, z };
+
+    // 1) Check currently entered LevelPlays for leaving LeaveRadius (3D spherical distance)
     if (ctx.quest_comp.info.progress.entered_level_plays.len > 0) {
         var idx: usize = 0;
         while (idx < ctx.quest_comp.info.progress.entered_level_plays.len) {
@@ -723,15 +1593,15 @@ pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32) !void {
                 if (matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) {
                     const enter_r: f32 = if (lp.Data.EnterRadius > 0) @floatFromInt(lp.Data.EnterRadius) else 3000.0;
                     const leave_r: f32 = if (lp.Data.LeaveRadius > 0) @floatFromInt(lp.Data.LeaveRadius) else enter_r + 1500.0;
-                    for (configs, positions) |cfg, pos_opt| {
-                        if (cfg.config_id != lp.Data.LevelPlayEntityId) continue;
-                        const pos = pos_opt orelse continue;
-                        const dx = pos.location[0] - x;
-                        const dy = pos.location[1] - y;
-                        if (dx * dx + dy * dy <= leave_r * leave_r) {
+                    if (resolveLevelPlayAnchorPos(ctx, lp)) |anchor| {
+                        const dx = anchor[0] - x;
+                        const dy = anchor[1] - y;
+                        const dz = anchor[2] - z;
+                        if (dx * dx + dy * dy + dz * dz <= leave_r * leave_r) {
                             still_inside = true;
                         }
-                        break;
+                    } else {
+                        still_inside = true;
                     }
                 }
             }
@@ -746,74 +1616,197 @@ pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32) !void {
         }
     }
 
-    // 2) Snapshot nearby LevelPlay candidate entities before running actions that may spawn/remove scene entities
-    const ProximityCandidate = struct { cfg_id: i32, dist2: f32 };
-    var candidates: std.ArrayList(ProximityCandidate) = .empty;
-    for (configs, positions) |cfg, pos_opt| {
-        const cfg_id = cfg.config_id;
-        if (cfg_id <= 0) continue;
-        const pos = pos_opt orelse continue;
-        const dx = pos.location[0] - x;
-        const dy = pos.location[1] - y;
-        const d2 = dx * dx + dy * dy;
-        if (d2 > 15000.0 * 15000.0) continue;
-        const cfg_id32 = std.math.cast(i32, cfg_id) orelse continue;
-        if (ctx.assets.indexes.levelPlayIndicesForEntity(cfg_id32).len == 0) continue;
-        try candidates.append(ctx.alloc.arena, .{ .cfg_id = cfg_id32, .dist2 = d2 });
+    // 2) Step currently entered LevelPlays (e.g. ReachArea child quests while inside the play)
+    const entered_snap = try ctx.alloc.arena.dupe(i32, ctx.quest_comp.info.progress.entered_level_plays);
+    for (entered_snap) |lpid| {
+        const lp = ctx.assets.tables.level_play_data.getDataById(lpid) orelse continue;
+        if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) continue;
+        const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lpid) catch continue;
+        try stepLevelPlayTree(ctx, lpid, nodes, true, player_pos);
     }
 
-    for (candidates.items) |cand| {
-        for (ctx.assets.indexes.levelPlayIndicesForEntity(cand.cfg_id)) |lp_idx| {
+    // 3) Collect nearby LevelPlay anchors + enabled/quest-referenced LevelPlays
+    const configs = ctx.scene.entities.slice().items(.config);
+    var candidate_lps: std.ArrayList(i32) = .empty;
+    for (configs) |cfg| {
+        if (cfg.config_id <= 0) continue;
+        const cfg_id32 = std.math.cast(i32, cfg.config_id) orelse continue;
+        for (ctx.assets.indexes.levelPlayIndicesForEntity(cfg_id32)) |lp_idx| {
             const lp = ctx.assets.tables.level_play_data.items[lp_idx];
-            if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) continue;
-            if (std.mem.eql(u8, lp.Data.Type, "Quest")) continue;
-            if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp.LevelPlayId)) continue;
-            const enter_r: f32 = if (lp.Data.EnterRadius > 0) @floatFromInt(lp.Data.EnterRadius) else 3000.0;
-            if (cand.dist2 > enter_r * enter_r) continue;
-            if (QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, lp.LevelPlayId)) continue;
-
-            if (try QuestInfo.appendUniqueInt(&ctx.quest_comp.info.progress.entered_level_plays, ctx.alloc.gpa, lp.LevelPlayId)) {
-                dirty_entered = true;
-            }
-            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LevelPlayStateNotify{
-                .Id = lp.LevelPlayId,
-                .State = 2,
-                .CompleteNumber = 0,
-            }) catch {};
-            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.EnterLevelPlayNotify{
-                .Id = lp.LevelPlayId,
-                .State = 2,
-                .CanGetReward = true,
-            }) catch {};
-
-            const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp.LevelPlayId) catch continue;
-            var reach_area_done = false;
-            var finished_reach_node: ?@import("../../data/LazyNodeStore.zig").NodeEntry = null;
-            for (nodes) |node| {
-                if (node.data != .object) continue;
-                const ntype = jsonStr(node.data.object.get("Type")) orelse continue;
-                if (!std.mem.eql(u8, ntype, "ChildQuest")) continue;
-                runLevelPlayActions(ctx, lp.LevelPlayId, node.id, node.data.object.get("EnterActions"));
-                const cond_val = node.data.object.get("Condition") orelse continue;
-                if (cond_val != .object) continue;
-                const ctype = jsonStr(cond_val.object.get("Type")) orelse continue;
-                if (std.mem.eql(u8, ctype, "ReachArea") and isPlayerWithinReachArea(ctx, cond_val.object, x, y)) {
-                    runLevelPlayActions(ctx, lp.LevelPlayId, node.id, node.data.object.get("FinishActions"));
-                    reach_area_done = true;
-                    finished_reach_node = node;
-                }
-            }
-            if (reach_area_done) {
-                if (!hasPendingSiblingChildQuests(nodes, finished_reach_node.?, null, lp.LevelPlayId)) {
-                    try completeLevelPlay(ctx, lp.LevelPlayId);
-                    dirty_entered = false;
-                }
+            if (!QuestInfo.containsInt(candidate_lps.items, lp.LevelPlayId)) {
+                try candidate_lps.append(ctx.alloc.arena, lp.LevelPlayId);
             }
         }
+    }
+    if (ctx.progress_comp) |pc| {
+        for (pc.info.dynamic.ints) |entry| {
+            if (!std.mem.startsWith(u8, entry.key, "lp_state:") or entry.val != 2) continue;
+            const lpid = std.fmt.parseInt(i32, entry.key["lp_state:".len..], 10) catch continue;
+            if (!QuestInfo.containsInt(candidate_lps.items, lpid)) {
+                try candidate_lps.append(ctx.alloc.arena, lpid);
+            }
+        }
+    }
+    for (ctx.quest_comp.info.active_quests) |aq| {
+        if (aq.active_nodes.len == 0) continue;
+        const qnodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, aq.quest_id) catch continue;
+        for (aq.active_nodes) |nid| {
+            const qnode = findLpNodeById(qnodes, nid) orelse continue;
+            if (!std.mem.eql(u8, qnode.node_type, "ChildQuest")) continue;
+            const cond = QuestEngine.getChildConditionPub(qnode.data) orelse continue;
+            if (!std.mem.eql(u8, jsonStr(cond.get("Type")) orelse "", "CheckLevelPlay")) continue;
+            try appendConditionLevelPlayIds(ctx.alloc.arena, &candidate_lps, cond);
+        }
+    }
+
+    for (candidate_lps.items) |lpid| {
+        const lp = ctx.assets.tables.level_play_data.getDataById(lpid) orelse continue;
+        if (!canEnterLevelPlay(ctx, lp)) continue;
+        if (QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, lpid)) continue;
+        if (lp.Data.EnterRadius > 0) {
+            if (resolveLevelPlayAnchorPos(ctx, lp)) |anchor| {
+                const enter_r: f32 = @floatFromInt(lp.Data.EnterRadius);
+                const dx = anchor[0] - x;
+                const dy = anchor[1] - y;
+                const dz = anchor[2] - z;
+                if (dx * dx + dy * dy + dz * dz > enter_r * enter_r) continue;
+            }
+        }
+        try enterAndStartLevelPlay(ctx, lp, player_pos, &dirty_entered);
+    }
+
+    // Also evaluate non-spawnable map LevelPlay anchors (`LevelPlayEntityId` with spawnable=0) within 3D EnterRadius
+    for (ctx.assets.tables.level_play_data.items) |lp| {
+        if (lp.Data.EnterRadius <= 0 or lp.Data.LevelPlayEntityId <= 0) continue;
+        if (std.mem.eql(u8, lp.Data.Type, "Quest") or std.mem.eql(u8, lp.Data.Type, "Dungeon") or std.mem.eql(u8, lp.Data.Type, "LordGym")) continue;
+        if (QuestInfo.containsInt(candidate_lps.items, lp.LevelPlayId)) continue;
+        if (!canEnterLevelPlay(ctx, lp)) continue;
+        if (QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, lp.LevelPlayId)) continue;
+        const lcfg = ctx.assets.findLevelEntity(ctx.scene.instance_id, lp.Data.LevelPlayEntityId) orelse continue;
+        const anchor = Assets.AssetIndexes.entityWorldPos(lcfg) orelse continue;
+        const enter_r: f32 = @floatFromInt(lp.Data.EnterRadius);
+        const dx = anchor[0] - x;
+        const dy = anchor[1] - y;
+        const dz = anchor[2] - z;
+        if (dx * dx + dy * dy + dz * dz > enter_r * enter_r) continue;
+        try enterAndStartLevelPlay(ctx, lp, player_pos, &dirty_entered);
     }
 
     if (dirty_entered) {
         ctx.quest_comp.save(ctx.fs, ctx.alloc.arena) catch {};
+    }
+}
+
+pub fn onLevelPlayEnabled(ctx: LevelPlayContext, level_play_id: i32, enabled: bool) !void {
+    if (level_play_id <= 0) return;
+    if (!enabled) {
+        ctx.scene.lp_timers.cancelQuest(level_play_id);
+        ctx.scene.fail_timers.cancelQuest(level_play_id);
+        ctx.scene.lp_fail_timers.cancelQuest(level_play_id);
+        ctx.scene.releaseOccupationsForTree(ctx.alloc.gpa, level_play_id, level_play_id);
+        ctx.scene.clearSaveNodesForOwner(level_play_id);
+        if (try QuestInfo.removeIntValue(&ctx.quest_comp.info.progress.entered_level_plays, ctx.alloc.gpa, level_play_id)) {
+            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LevelPlayStateNotify{
+                .Id = level_play_id,
+                .State = 0,
+                .CompleteNumber = 0,
+            }) catch {};
+            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LeaveLevelPlayNotify{ .Id = level_play_id }) catch {};
+            ctx.quest_comp.save(ctx.fs, ctx.alloc.arena) catch {};
+        }
+        return;
+    }
+
+    const lp = ctx.assets.tables.level_play_data.getDataById(level_play_id) orelse return;
+    if (!canEnterLevelPlay(ctx, lp)) return;
+    const pos = currentPlayerPos(ctx) orelse return;
+    if (lp.Data.EnterRadius > 0) {
+        if (resolveLevelPlayAnchorPos(ctx, lp)) |anchor| {
+            const enter_r: f32 = @floatFromInt(lp.Data.EnterRadius);
+            const dx = anchor[0] - pos[0];
+            const dy = anchor[1] - pos[1];
+            const dz = anchor[2] - pos[2];
+            if (dx * dx + dy * dy + dz * dz > enter_r * enter_r) return;
+        }
+    }
+    var dirty_entered = false;
+    try enterAndStartLevelPlay(ctx, lp, pos, &dirty_entered);
+    if (dirty_entered) {
+        ctx.quest_comp.save(ctx.fs, ctx.alloc.arena) catch {};
+    }
+}
+
+pub fn onDynamicInteract(ctx: LevelPlayContext, lp_id: i32, node_id: i32, entity_id: i64) !bool {
+    _ = entity_id;
+    if (lp_id <= 0 or node_id <= 0) return false;
+    const lp = ctx.assets.tables.level_play_data.getDataById(lp_id) orelse return false;
+    if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) return false;
+    if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) return false;
+
+    const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp_id) catch return false;
+    const node = findLpNodeById(nodes, node_id) orelse return false;
+    if (!std.mem.eql(u8, node.node_type, "ChildQuest")) return false;
+
+    var dirty_pc = false;
+    try completeLpChildQuest(ctx, lp_id, nodes, node.*, true, &dirty_pc);
+    try stepLevelPlayTree(ctx, lp_id, nodes, true, currentPlayerPos(ctx));
+    return true;
+}
+
+pub fn onVarChanged(ctx: LevelPlayContext, owner_id: i32, _: []const u8) !void {
+    try evaluateEnteredLevelPlayTrees(ctx, owner_id);
+}
+
+pub fn onEntityStateChanged(ctx: LevelPlayContext, _: i32, _: []const u8) !void {
+    try evaluateEnteredLevelPlayTrees(ctx, 0);
+}
+
+pub fn onConditionStateChanged(ctx: LevelPlayContext) !void {
+    try evaluateEnteredLevelPlayTrees(ctx, 0);
+}
+
+pub fn onFlowEnd(ctx: LevelPlayContext, lp_id: i32, node_id: i32) !void {
+    if (lp_id <= 0 or node_id <= 0) return;
+    if (ctx.assets.tables.level_play_data.getDataById(lp_id) == null) return;
+    if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) return;
+    const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp_id) catch return;
+    const node = findLpNodeById(nodes, node_id) orelse return;
+    var dirty_pc = false;
+    if (std.mem.eql(u8, node.node_type, "ChildQuest")) {
+        try completeLpChildQuest(ctx, lp_id, nodes, node.*, true, &dirty_pc);
+    } else if (std.mem.eql(u8, node.node_type, "Action") or std.mem.eql(u8, node.node_type, "ActionWithResult")) {
+        finishLpNonChildNode(ctx, lp_id, node.*, true, &dirty_pc);
+        if (dirty_pc) {
+            if (ctx.progress_comp) |pc| {
+                pc.save(ctx.fs, ctx.alloc.arena) catch {};
+                dirty_pc = false;
+            }
+        }
+    }
+    try stepLevelPlayTree(ctx, lp_id, nodes, true, currentPlayerPos(ctx));
+}
+
+fn evaluateEnteredLevelPlayTrees(ctx: LevelPlayContext, preferred_lp_id: i32) !void {
+    if (lp_step_depth > 0) {
+        lp_recheck_pending = true;
+        return;
+    }
+    const pos = currentPlayerPos(ctx);
+    const entered_snap = try ctx.alloc.arena.dupe(i32, ctx.quest_comp.info.progress.entered_level_plays);
+    for (entered_snap) |lpid| {
+        if (preferred_lp_id > 0 and lpid != preferred_lp_id) continue;
+        const lp = ctx.assets.tables.level_play_data.getDataById(lpid) orelse continue;
+        if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) continue;
+        const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lpid) catch continue;
+        try stepLevelPlayTree(ctx, lpid, nodes, true, pos);
+    }
+    if (preferred_lp_id > 0 and !QuestInfo.containsInt(entered_snap, preferred_lp_id)) {
+        if (ctx.assets.tables.level_play_data.getDataById(preferred_lp_id)) |lp| {
+            if (matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) {
+                const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, preferred_lp_id) catch return;
+                try stepLevelPlayTree(ctx, preferred_lp_id, nodes, true, pos);
+            }
+        }
     }
 }
 
@@ -882,6 +1875,9 @@ pub fn fromQuestContext(qctx: QuestEngine.QuestContext) ?LevelPlayContext {
         .map_comp = qctx.map_comp,
         .quest_comp = qctx.quest_comp,
         .role_comp = role_comp,
+        .guide_comp = qctx.guide_comp,
+        .mail_comp = qctx.mail_comp,
+        .progress_comp = qctx.progress_comp,
     };
 }
 
@@ -915,6 +1911,9 @@ pub fn allowsLevelPlayClientSubmit(ctype: []const u8) bool {
         "SlidingBlocks",
         "CrossSceneSyncKillMonster",
         "FinishKuroSimpleCombatKillMonster",
+        "ShowUi",
+        "AwakeAndLoadEntity",
+        "GetItem",
     };
     for (allowed) |name| {
         if (std.mem.eql(u8, ctype, name)) return true;
@@ -926,7 +1925,7 @@ fn isLevelPlayNodeMarked(progress_comp: ?*const PlayerProgressComponent, lp_id: 
     const pc = progress_comp orelse return false;
     var kbuf: [48]u8 = undefined;
     const key = std.fmt.bufPrint(&kbuf, "lp_node:{d}:{d}", .{ lp_id, node_id }) catch return false;
-    return pc.info.hasClaim(key);
+    return pc.info.hasClaim(key) or pc.info.getKeyInt(key) != 0;
 }
 
 fn jsonIntVal(v_opt: ?std.json.Value) i64 {
@@ -973,22 +1972,32 @@ fn finishLevelPlayNodeAndMaybeComplete(
     nodes: []const LazyNodeStore.NodeEntry,
     node: LazyNodeStore.NodeEntry,
 ) !void {
-    if (node.data == .object) {
-        runLevelPlayActions(ctx, lp_id, node.id, node.data.object.get("FinishActions"));
+    var eff_ctx = ctx;
+    if (eff_ctx.progress_comp == null and progress_comp != null) {
+        eff_ctx.progress_comp = progress_comp;
     }
-    if (progress_comp) |pc| {
+    var dirty_pc = false;
+    if (isLpBtBooted(eff_ctx.progress_comp, lp_id) or isLpNodeActive(eff_ctx.progress_comp, lp_id, node.id)) {
+        try completeLpChildQuest(eff_ctx, lp_id, nodes, node, true, &dirty_pc);
+        try stepLevelPlayTree(eff_ctx, lp_id, nodes, true, currentPlayerPos(eff_ctx));
+        return;
+    }
+    if (node.data == .object) {
+        runLevelPlayActions(eff_ctx, lp_id, node.id, node.data.object.get("FinishActions"));
+    }
+    if (eff_ctx.progress_comp) |pc| {
         var kbuf: [48]u8 = undefined;
         const key = std.fmt.bufPrint(&kbuf, "lp_node:{d}:{d}", .{ lp_id, node.id }) catch "";
         if (key.len > 0) {
-            if (try pc.info.markClaim(ctx.alloc.gpa, key)) {
-                try pc.save(ctx.fs, ctx.alloc.arena);
+            if (try pc.info.markClaim(eff_ctx.alloc.gpa, key)) {
+                try pc.save(eff_ctx.fs, eff_ctx.alloc.arena);
             }
         }
     }
-    if (!hasPendingSiblingChildQuests(nodes, node, if (progress_comp) |pc| pc else null, lp_id)) {
-        try completeLevelPlay(ctx, lp_id);
+    if (!hasPendingSiblingChildQuests(nodes, node, eff_ctx.progress_comp, lp_id)) {
+        try completeLevelPlay(eff_ctx, lp_id);
     } else {
-        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LevelPlayStateNotify{
+        eff_ctx.conn.push(eff_ctx.alloc.gpa, eff_ctx.io, pb.LevelPlayStateNotify{
             .Id = lp_id,
             .State = 2,
             .CompleteNumber = 0,

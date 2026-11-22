@@ -759,7 +759,7 @@ pub fn LogicStateInitRequest(
     query: LogicStateQuery,
     alloc: mem.Alloc,
 ) !void {
-    try updateLogicState(scene, query, txn.payload.EntityId, txn.payload.CombatCommon, txn.payload.InitData, alloc);
+    _ = try updateLogicState(scene, query, txn.payload.EntityId, txn.payload.CombatCommon, txn.payload.InitData, alloc);
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -768,8 +768,14 @@ pub fn SwitchLogicStateRequest(
     scene: *Scene,
     query: LogicStateQuery,
     alloc: mem.Alloc,
+    qctx: QuestEngine.QuestContext,
 ) !void {
-    try updateLogicState(scene, query, 0, txn.common, txn.payload.States, alloc);
+    const target_id = commonEntityId(txn.common) orelse 0;
+    const changed = try updateLogicState(scene, query, 0, txn.common, txn.payload.States, alloc);
+    if (changed and target_id == scene.currentRoleEntityId()) {
+        scene.has_player_motion = true;
+        QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("SwitchLogicStateReq", err);
+    }
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -951,7 +957,7 @@ pub fn LogicStateInitPush(
     query: LogicStateQuery,
     alloc: mem.Alloc,
 ) !void {
-    try updateLogicState(scene, query, push.EntityId, push.CombatCommon orelse common, push.InitData, alloc);
+    _ = try updateLogicState(scene, query, push.EntityId, push.CombatCommon orelse common, push.InitData, alloc);
 }
 
 pub fn SwitchLogicStatePush(
@@ -960,8 +966,14 @@ pub fn SwitchLogicStatePush(
     scene: *Scene,
     query: LogicStateQuery,
     alloc: mem.Alloc,
+    qctx: QuestEngine.QuestContext,
 ) !void {
-    try updateLogicState(scene, query, 0, common, push.States, alloc);
+    const target_id = commonEntityId(common) orelse 0;
+    const changed = try updateLogicState(scene, query, 0, common, push.States, alloc);
+    if (changed and target_id == scene.currentRoleEntityId()) {
+        scene.has_player_motion = true;
+        QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("SwitchLogicState", err);
+    }
 }
 
 fn updateLogicState(
@@ -971,9 +983,9 @@ fn updateLogicState(
     common: ?pb.CombatCommon,
     state_data: ?pb.LogicStateComponentPb,
     alloc: mem.Alloc,
-) !void {
-    const target_id = if (entity_id != 0) entity_id else commonEntityId(common) orelse return;
-    const data = state_data orelse return;
+) !bool {
+    const target_id = if (entity_id != 0) entity_id else commonEntityId(common) orelse return false;
+    const data = state_data orelse return false;
     if (query.byNetId(target_id)) |item| {
         _, const logic_state = item;
         const changed = logic_state.position_state != data.PositionState or
@@ -985,7 +997,9 @@ fn updateLogicState(
         logic_state.direction_state = data.DirectionState;
         logic_state.position_sub_state = data.PositionSubState;
         if (changed) try scene.markFsmDirty(alloc.gpa, target_id, Entity.FsmComponent.WakeReason.position);
+        return changed;
     }
+    return false;
 }
 
 fn appendFollowupTransition(

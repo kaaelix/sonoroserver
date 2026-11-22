@@ -7,8 +7,12 @@ pub const Vec3 = struct {
 pub const ShapeConfig = struct {
     Type: ?[]const u8 = null,
     Radius: ?f32 = null,
+    Height: ?f32 = null,
+    InnerRadius: ?f32 = null,
     Size: ?Vec3 = null,
     Center: ?Vec3 = null,
+    Rotator: ?Vec3 = null,
+    CombinationShapes: ?[]const @This() = null,
 };
 
 Shape: ?ShapeConfig = null,

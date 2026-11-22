@@ -113,11 +113,18 @@ pub fn executeAction(
             try cb(ctx, quest_id, node_id, params, true);
         }
     } else if (std.mem.eql(u8, name, "ChangeState")) {
-        if (callbacks.start_flow_state) |cb| {
-            if (ctx.scene) |scene| {
-                if (scene.active_flow_list_name.len != 0) {
-                    if (quest_types.jsonInt(params.get("StateId"))) |sid| {
-                        try cb(ctx, scene.active_flow_quest_id, scene.active_flow_node_id, scene.active_flow_list_name, scene.active_flow_id, sid, false);
+        if (ctx.scene) |scene| {
+            if (quest_types.jsonInt(params.get("StateId"))) |sid| {
+                if (callbacks.defer_flow_transition) {
+                    scene.flow_next_state_id = sid;
+                } else if (callbacks.start_flow_state) |cb| {
+                    if (scene.active_flow_list_name.len != 0) {
+                        const qid = scene.active_flow_quest_id;
+                        const nid = scene.active_flow_node_id;
+                        const fln = try ctx.alloc.arena.dupe(u8, scene.active_flow_list_name);
+                        const fid = scene.active_flow_id;
+                        scene.clearActiveFlow(ctx.alloc.gpa);
+                        try cb(ctx, qid, nid, fln, fid, sid, false);
                     }
                 }
             }
@@ -157,10 +164,31 @@ pub fn executeAction(
     } else if (std.mem.eql(u8, name, "UnlockSystemItem")) {
         if (params.get("SystemOption")) |opt_val| {
             if (opt_val == .object) {
-                if (opt_val.object.get("UnlockOption")) |uopt| {
-                    if (uopt == .object) {
-                        if (quest_types.jsonInt(uopt.object.get("Id"))) |item_id| {
-                            if (item_id > 0) _ = try ctx.quest_comp.info.unlockSystem(ctx.alloc.gpa, item_id);
+                const sys_type = quest_types.jsonStr(opt_val.object.get("Type")) orelse "";
+                const uopt_obj: ?std.json.ObjectMap = if (opt_val.object.get("UnlockOption")) |uopt|
+                    (if (uopt == .object) uopt.object else null)
+                else
+                    null;
+                const item_id = if (uopt_obj) |u| quest_types.jsonInt(u.get("Id")) else quest_types.jsonInt(opt_val.object.get("Id"));
+                if (item_id) |id| {
+                    if (id > 0) {
+                        _ = try ctx.quest_comp.info.unlockSystem(ctx.alloc.gpa, id);
+                        try pushFuncOpen(ctx);
+                        if (std.mem.eql(u8, sys_type, "AtlasSystem")) {
+                            const utype = if (uopt_obj) |u| (quest_types.jsonStr(u.get("Type")) orelse "") else "";
+                            const ill_type: ?pb.IllustratedType = if (std.mem.eql(u8, utype, "PlotPhoto"))
+                                .Photograph
+                            else if (std.mem.eql(u8, utype, "Noun"))
+                                .Noun
+                            else
+                                null;
+                            if (ill_type) |it| {
+                                ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.IllustratedUnlockNotify{
+                                    .IsNew = true,
+                                    .Type = it,
+                                    .Entry = .{ .Id = id, .Num = 1, .IsRead = false },
+                                }) catch {};
+                            }
                         }
                     }
                 }
@@ -211,9 +239,9 @@ pub fn executeAction(
         const action_id = quest_types.jsonInt(act.object.get("ActionId")) orelse 0;
         teleportPlayerFromAction(ctx, params, action_id, callbacks.is_flow_action);
     } else if (std.mem.eql(u8, name, "SetVar")) {
-        try applySetVar(ctx, params);
+        try applySetVar(ctx, callbacks, quest_id, params);
     } else if (std.mem.eql(u8, name, "CalculateVar")) {
-        try applyCalculateVar(ctx, params);
+        try applyCalculateVar(ctx, callbacks, quest_id, params);
     } else if (std.mem.eql(u8, name, "TeleportDungeon")) {
         if (quest_types.jsonInt(params.get("DungeonId"))) |did| {
             const loc_eid = quest_types.jsonI64(params.get("LocationEntityId"));
@@ -257,7 +285,7 @@ pub fn executeAction(
             if (al == .array) try executeActionList(ctx, callbacks, quest_id, node_id, al.array.items);
         }
     } else if (std.mem.eql(u8, name, "RandomVar")) {
-        try applyRandomVar(ctx, params);
+        try applyRandomVar(ctx, callbacks, quest_id, params);
     } else if (std.mem.eql(u8, name, "EnableTemporaryTeleport")) {
         if (quest_types.jsonInt(params.get("RangeEntity"))) |eid| {
             if (ctx.progress_comp) |pc| {
@@ -2082,32 +2110,137 @@ fn teleportPlayerFromAction(ctx: QuestContext, params: std.json.ObjectMap, actio
     ctx.conn.push(ctx.alloc.gpa, ctx.io, notify) catch {};
 }
 
-fn applySetVar(ctx: QuestContext, params: std.json.ObjectMap) !void {
+fn emitVarChanged(
+    ctx: QuestContext,
+    callbacks: ActionCallbacks,
+    owner_id: i32,
+    var_name: []const u8,
+    var_define: pb.VarDefinePb,
+    is_global: bool,
+) !void {
+    if (is_global) {
+        var entries: std.ArrayList(pb.MapEntry([]const u8, pb.VarDefinePb)) = .empty;
+        try entries.append(ctx.alloc.arena, .{ .key = var_name, .value = var_define });
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.PlayerVarNotify{
+            .VarInfos = entries,
+        }) catch {};
+    }
+    if (owner_id > 0) {
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BtVarUpdateNotify{
+            .TreeOwnerId = owner_id,
+            .TreeIncId = owner_id,
+            .VarName = var_name,
+            .VarDefine = var_define,
+        }) catch {};
+    }
+    if (callbacks.on_var_changed) |cb| {
+        try cb(ctx, owner_id, var_name);
+    }
+}
+
+fn persistGlobalVarInt(ctx: QuestContext, name: []const u8, val: i64) void {
+    const pc = ctx.progress_comp orelse return;
+    const key = std.fmt.allocPrint(ctx.alloc.arena, "var:{s}", .{name}) catch return;
+    pc.info.setKeyInt(ctx.alloc.gpa, key, val) catch {};
+    pc.save(ctx.fs, ctx.alloc.arena) catch {};
+}
+
+fn persistGlobalVarStr(ctx: QuestContext, name: []const u8, val: []const u8) void {
+    const pc = ctx.progress_comp orelse return;
+    const key = std.fmt.allocPrint(ctx.alloc.arena, "var:{s}", .{name}) catch return;
+    pc.info.setKeyStr(ctx.alloc.gpa, key, val) catch {};
+    pc.save(ctx.fs, ctx.alloc.arena) catch {};
+}
+
+fn applySetVar(ctx: QuestContext, callbacks: ActionCallbacks, owner_id: i32, params: std.json.ObjectMap) !void {
     const left = params.get("VarLeft") orelse return;
     if (left != .object) return;
-    const key = quest_types.jsonStr(left.object.get("Name")) orelse return;
+    const base_name = quest_types.resolveVarName(left.object) orelse return;
     const right = params.get("VarRight") orelse return;
     if (right != .object) return;
+
+    const src = quest_types.jsonStr(left.object.get("Source")) orelse "Self";
+    const is_global = std.mem.eql(u8, src, "Global");
+    const store_key: []const u8 = if (!is_global)
+        (quest_types.scopedVarKeyAlloc(ctx.alloc.arena, left.object, base_name) orelse base_name)
+    else
+        base_name;
 
     if (right.object.get("Value")) |val| {
         switch (val) {
             .bool => |b| {
-                try ctx.quest_comp.info.setVarBool(ctx.alloc.gpa, key, b);
-                try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, key, if (b) 1 else 0);
+                try ctx.quest_comp.info.setVarBool(ctx.alloc.gpa, store_key, b);
+                try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, store_key, if (b) 1 else 0);
+                if (is_global) persistGlobalVarInt(ctx, base_name, if (b) 1 else 0);
+                try emitVarChanged(ctx, callbacks, owner_id, base_name, .{
+                    .VarType = 0,
+                    .Value = .{ .Boolean = b },
+                }, is_global);
             },
-            .integer => |i| try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, key, std.math.cast(i32, i) orelse @intCast(std.math.clamp(i, std.math.minInt(i32), std.math.maxInt(i32)))),
-            .string => |s| try ctx.quest_comp.info.setVarStr(ctx.alloc.gpa, key, s),
+            .integer => |i| {
+                const iv = std.math.cast(i32, i) orelse @as(i32, @intCast(std.math.clamp(i, std.math.minInt(i32), std.math.maxInt(i32))));
+                try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, store_key, iv);
+                if (is_global) persistGlobalVarInt(ctx, base_name, i);
+                try emitVarChanged(ctx, callbacks, owner_id, base_name, .{
+                    .VarType = 1,
+                    .Value = .{ .Int = i },
+                }, is_global);
+            },
+            .float => |f| {
+                const iv: i32 = @intFromFloat(std.math.clamp(f, @as(f64, @floatFromInt(std.math.minInt(i32))), @as(f64, @floatFromInt(std.math.maxInt(i32)))));
+                try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, store_key, iv);
+                if (is_global) persistGlobalVarInt(ctx, base_name, @intFromFloat(f * 1000.0));
+                try emitVarChanged(ctx, callbacks, owner_id, base_name, .{
+                    .VarType = 3,
+                    .Value = .{ .Float = @floatCast(f) },
+                }, is_global);
+            },
+            .string => |s| {
+                try ctx.quest_comp.info.setVarStr(ctx.alloc.gpa, store_key, s);
+                if (is_global) persistGlobalVarStr(ctx, base_name, s);
+                try emitVarChanged(ctx, callbacks, owner_id, base_name, .{
+                    .VarType = 2,
+                    .Value = .{ .String = s },
+                }, is_global);
+            },
             else => {},
         }
-    } else if (quest_types.jsonStr(right.object.get("Name"))) |src_key| {
-        try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, key, ctx.quest_comp.info.getVarInt(src_key));
+    } else if (quest_types.resolveVarName(right.object)) |src_name| {
+        const src_type = quest_types.jsonStr(right.object.get("Type")) orelse "";
+        if (std.mem.eql(u8, src_type, "String")) {
+            const sk = quest_types.scopedVarKeyAlloc(ctx.alloc.arena, right.object, src_name) orelse src_name;
+            const sv = blk: {
+                const s1 = ctx.quest_comp.info.getVarStr(sk);
+                break :blk if (s1.len > 0) s1 else ctx.quest_comp.info.getVarStr(src_name);
+            };
+            try ctx.quest_comp.info.setVarStr(ctx.alloc.gpa, store_key, sv);
+            if (is_global) persistGlobalVarStr(ctx, base_name, sv);
+            try emitVarChanged(ctx, callbacks, owner_id, base_name, .{
+                .VarType = 2,
+                .Value = .{ .String = sv },
+            }, is_global);
+        } else {
+            const iv = quest_types.resolveVarInt(ctx, right);
+            try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, store_key, iv);
+            if (is_global) persistGlobalVarInt(ctx, base_name, iv);
+            try emitVarChanged(ctx, callbacks, owner_id, base_name, .{
+                .VarType = 1,
+                .Value = .{ .Int = iv },
+            }, is_global);
+        }
     }
 }
 
-fn applyCalculateVar(ctx: QuestContext, params: std.json.ObjectMap) !void {
+fn applyCalculateVar(ctx: QuestContext, callbacks: ActionCallbacks, owner_id: i32, params: std.json.ObjectMap) !void {
     const res_obj = params.get("Result") orelse return;
     if (res_obj != .object) return;
-    const res_key = quest_types.jsonStr(res_obj.object.get("Name")) orelse return;
+    const base_name = quest_types.resolveVarName(res_obj.object) orelse return;
+    const src = quest_types.jsonStr(res_obj.object.get("Source")) orelse "Self";
+    const is_global = std.mem.eql(u8, src, "Global");
+    const store_key: []const u8 = if (!is_global)
+        (quest_types.scopedVarKeyAlloc(ctx.alloc.arena, res_obj.object, base_name) orelse base_name)
+    else
+        base_name;
 
     const v1 = quest_types.resolveVarInt(ctx, params.get("Var1"));
     const v2 = quest_types.resolveVarInt(ctx, params.get("Var2"));
@@ -2124,7 +2257,12 @@ fn applyCalculateVar(ctx: QuestContext, params: std.json.ObjectMap) !void {
     else
         v1;
 
-    try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, res_key, out);
+    try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, store_key, out);
+    if (is_global) persistGlobalVarInt(ctx, base_name, out);
+    try emitVarChanged(ctx, callbacks, owner_id, base_name, .{
+        .VarType = 1,
+        .Value = .{ .Int = out },
+    }, is_global);
 }
 
 /// Clears any persisted hidden state and guarantees the quest/flow entity is spawned in the active scene.
@@ -2633,17 +2771,28 @@ fn recordProgressClaim(ctx: QuestContext, key: []const u8) !void {
     }
 }
 
-fn applyRandomVar(ctx: QuestContext, params: std.json.ObjectMap) !void {
+fn applyRandomVar(ctx: QuestContext, callbacks: ActionCallbacks, owner_id: i32, params: std.json.ObjectMap) !void {
     const rv = params.get("Result") orelse params.get("Var") orelse return;
     if (rv != .object) return;
-    const var_name = quest_types.jsonStr(rv.object.get("Name")) orelse return;
+    const base_name = quest_types.resolveVarName(rv.object) orelse return;
+    const src = quest_types.jsonStr(rv.object.get("Source")) orelse "Self";
+    const is_global = std.mem.eql(u8, src, "Global");
+    const store_key: []const u8 = if (!is_global)
+        (quest_types.scopedVarKeyAlloc(ctx.alloc.arena, rv.object, base_name) orelse base_name)
+    else
+        base_name;
     const max_val: i32 = if (params.get("RightVar")) |rw| switch (rw) {
         .object => |obj| quest_types.jsonInt(obj.get("Value")) orelse 1,
         else => 1,
     } else 1;
     const now_ns: u64 = @intCast(@max(0, (std.Io.Clock.awake).now(ctx.io).nanoseconds));
     const chosen: i32 = @intCast(now_ns % @as(u64, @intCast(@max(max_val, 1))));
-    try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, var_name, chosen);
+    try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, store_key, chosen);
+    if (is_global) persistGlobalVarInt(ctx, base_name, chosen);
+    try emitVarChanged(ctx, callbacks, owner_id, base_name, .{
+        .VarType = 1,
+        .Value = .{ .Int = chosen },
+    }, is_global);
 }
 
 fn applyResetEntityAction(ctx: QuestContext, params: std.json.ObjectMap) !void {
@@ -2913,6 +3062,33 @@ fn applyVehicleAction(ctx: QuestContext, name: []const u8, params: std.json.Obje
                     }
                 }
             }
+        } else if (params.get("ToVehicle")) |tv| {
+            if (tv == .object) {
+                const tv_type = quest_types.jsonStr(tv.object.get("Type")) orelse "";
+                if (quest_types.jsonInt(tv.object.get("EntityId"))) |vid| {
+                    ensureQuestEntitySpawned(ctx, vid);
+                    try recordProgressInt(ctx, "vehicle:cur", vid, false);
+                    try recordProgressInt(ctx, "vehicle:seat", seat, false);
+                } else if (std.mem.eql(u8, tv_type, "FishingBoat")) {
+                    try recordProgressInt(ctx, "fish:boat_active", 1, false);
+                    if (ctx.scene) |scene| {
+                        const slice = scene.entities.slice();
+                        for (slice.items(.entity_id), slice.items(.config), slice.items(.vehicle)) |nid, cfg, *veh_opt| {
+                            if (veh_opt.*) |*veh| {
+                                veh.occupied = true;
+                                try recordProgressInt(ctx, "vehicle:cur", cfg.config_id, false);
+                                try recordProgressInt(ctx, "vehicle:seat", seat, false);
+                                ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.VehicleUpdateNotify{
+                                    .EntityId = nid.net_id,
+                                    .PlayerId = ctx.basic_comp.player_id,
+                                    .SeatId = seat,
+                                }) catch {};
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
     } else if (std.mem.eql(u8, name, "VehicleExitPlayer")) {
         const vehicle_id = if (ctx.progress_comp) |pc| pc.info.getKeyInt("vehicle:cur") else 0;
@@ -3126,8 +3302,14 @@ test "executeAction handles RunActions, RandomVar, SheriffUnlockClue, SetWuYinQu
     var fs: FileSystem = .{ .root_dir = sub_dir, .gpa = gpa, .io = io };
     defer fs.deinit();
 
-    var dummy_buf: [2]@import("../../network.zig").OwnedFrame = undefined;
+    var dummy_buf: [16]@import("../../network.zig").OwnedFrame = undefined;
     var outbound = std.Io.Queue(@import("../../network.zig").OwnedFrame).init(&dummy_buf);
+    defer {
+        outbound.close(io);
+        while (outbound.getOne(io)) |f| {
+            gpa.free(f.bytes);
+        } else |_| {}
+    }
     var ev: std.Io.Event = .unset;
     var conn: Connection = .{ .outbound = &outbound, .transport_work = &ev };
 
@@ -3299,8 +3481,14 @@ test "executeAction SetPlayerPos attaches FlowActionCtx when executed inside an 
     var fs: FileSystem = .{ .root_dir = sub_dir, .gpa = gpa, .io = io };
     defer fs.deinit();
 
-    var frame_buf: [4]net.OwnedFrame = undefined;
+    var frame_buf: [32]net.OwnedFrame = undefined;
     var outbound = std.Io.Queue(net.OwnedFrame).init(&frame_buf);
+    defer {
+        outbound.close(io);
+        while (outbound.getOne(io)) |f| {
+            gpa.free(f.bytes);
+        } else |_| {}
+    }
     var ev: std.Io.Event = .unset;
     var conn: Connection = .{ .outbound = &outbound, .transport_work = &ev };
 

@@ -11,7 +11,7 @@ const comp_util = @import("component/comp_util.zig");
 const EntityComponentStorage = @import("component/entity/EntityComponentStorage.zig");
 const PlayerSceneComponent = @import("component/player/PlayerSceneComponent.zig");
 const FsmWakeScheduler = @import("schedulers/FsmWakeScheduler.zig");
-const QuestTimerQueue = @import("schedulers/QuestTimerQueue.zig");
+pub const QuestTimerQueue = @import("schedulers/QuestTimerQueue.zig");
 const incr = @import("../fs/incr.zig");
 const gameplay_tags = @import("helpers/gameplay_tags.zig");
 
@@ -42,16 +42,22 @@ last_spatial_check_loc: [3]f32 = .{ 0, 0, 0 },
 last_quest_move_loc: [3]f32 = .{ 0, 0, 0 },
 has_quest_move_loc: bool = false,
 player_movement_mode: i32 = 1,
+has_player_movement_mode: bool = false,
+player_motion_type: pb.MotionType = .Spurt,
+has_player_motion: bool = false,
 current_quest_node: i32 = 19,
 current_quest_id: i32 = 139000025,
 prologue_flow_started: bool = false,
 active_flow_inc_id: i64 = 0,
 active_flow_quest_id: i32 = 0,
 active_flow_node_id: i32 = 0,
+active_flow_bt_type: pb.BtType = .BtTypeQuest,
 active_flow_list_name: []u8 = &.{},
 active_flow_id: i32 = 0,
 active_flow_state_id: i32 = 0,
 active_flow_owner_entity_id: i64 = 0,
+flow_next_state_id: i32 = 0,
+executed_flow_action_ids: std.ArrayListUnmanaged(i32) = .empty,
 pending_transition_instance_id: ?i32 = null,
 next_action_inc_id: i32 = 1,
 client_black_screen_open: bool = false,
@@ -62,7 +68,12 @@ plot_saved_slot_role_id: i32 = 0,
 plot_saved_slot_entity_id: i64 = -1,
 pending_flows: std.ArrayListUnmanaged(PendingFlow) = .empty,
 quest_timers: QuestTimerQueue = .{},
+lp_timers: QuestTimerQueue = .{},
+fail_timers: QuestTimerQueue = .{},
+lp_fail_timers: QuestTimerQueue = .{},
 bt_timers: std.ArrayListUnmanaged(ActiveBtTimer) = .empty,
+bt_occupations: std.ArrayListUnmanaged(BtOccupation) = .empty,
+save_node_keys: std.ArrayListUnmanaged(u64) = .empty,
 trial_role_ids: std.ArrayListUnmanaged(i32) = .empty,
 pending_killed_removals: std.ArrayListUnmanaged(i64) = .empty,
 dynamic_interact_options: std.ArrayListUnmanaged(DynamicInteractOption) = .empty,
@@ -78,6 +89,7 @@ pub const DynamicInteractOption = struct {
     option_guid: []u8,
     entity_net_id: i64,
     entity_config_id: i32,
+    bt_type: pb.BtType = .BtTypeQuest,
     quest_id: i32 = 0,
     node_id: i32 = 0,
     kind: Kind = .none,
@@ -141,6 +153,18 @@ pub const PendingFlow = struct {
 
     pub fn deinit(flow: *PendingFlow, gpa: Allocator) void {
         gpa.free(flow.flow_list_name);
+    }
+};
+
+pub const BtOccupation = struct {
+    bt_type: pb.BtType = .BtTypeQuest,
+    owner_id: i32 = 0,
+    inc_id: i64 = 0,
+    node_id: i32 = 0,
+    resource_name: []u8,
+
+    pub fn deinit(occ: *BtOccupation, gpa: Allocator) void {
+        if (occ.resource_name.len != 0) gpa.free(occ.resource_name);
     }
 };
 
@@ -413,11 +437,18 @@ pub fn deinit(scene: *Scene, gpa: Allocator, fs: *FileSystem) void {
     scene.debug_spawn_route_owners.deinit(gpa);
     scene.fsm_wakes.deinit(gpa);
     scene.clearActiveFlow(gpa);
+    scene.executed_flow_action_ids.deinit(gpa);
     scene.clearPendingFlows(gpa);
     scene.pending_flows.deinit(gpa);
     scene.quest_timers.deinit(gpa);
+    scene.lp_timers.deinit(gpa);
+    scene.fail_timers.deinit(gpa);
+    scene.lp_fail_timers.deinit(gpa);
     scene.clearBtTimers(gpa);
     scene.bt_timers.deinit(gpa);
+    scene.clearBtOccupations(gpa);
+    scene.bt_occupations.deinit(gpa);
+    scene.save_node_keys.deinit(gpa);
     scene.trial_role_ids.deinit(gpa);
     scene.pending_killed_removals.deinit(gpa);
     for (scene.dynamic_interact_options.items) |*opt| opt.deinit(gpa);
@@ -458,9 +489,32 @@ pub fn clearActiveFlow(scene: *Scene, gpa: Allocator) void {
     scene.active_flow_inc_id = 0;
     scene.active_flow_quest_id = 0;
     scene.active_flow_node_id = 0;
+    scene.active_flow_bt_type = .BtTypeQuest;
     scene.active_flow_id = 0;
     scene.active_flow_state_id = 0;
     scene.active_flow_owner_entity_id = 0;
+    scene.flow_next_state_id = 0;
+    scene.executed_flow_action_ids.clearRetainingCapacity();
+}
+
+pub fn markFlowActionExecuted(scene: *Scene, gpa: Allocator, action_id: i32) !void {
+    if (action_id <= 0 or scene.hasFlowActionExecuted(action_id)) return;
+    try scene.executed_flow_action_ids.append(gpa, action_id);
+}
+
+pub fn hasFlowActionExecuted(scene: *const Scene, action_id: i32) bool {
+    if (action_id <= 0) return false;
+    for (scene.executed_flow_action_ids.items) |id| {
+        if (id == action_id) return true;
+    }
+    return false;
+}
+
+pub fn hasPendingFlowForNode(scene: *const Scene, quest_id: i32, node_id: i32) bool {
+    for (scene.pending_flows.items) |queued| {
+        if (queued.quest_id == quest_id and queued.node_id == node_id) return true;
+    }
+    return false;
 }
 
 /// Enqueues a flow to start once `active_flow_inc_id` finishes, skipping exact duplicates.
@@ -1022,6 +1076,125 @@ pub fn clearBtTimers(scene: *Scene, gpa: Allocator) void {
     scene.bt_timers.clearRetainingCapacity();
 }
 
+pub fn nextQuestWakeDelayMs(scene: *const Scene, now_ms: i64) ?i64 {
+    var best: ?i64 = scene.quest_timers.nextWakeDelayMs(now_ms);
+    for ([_]?i64{
+        scene.lp_timers.nextWakeDelayMs(now_ms),
+        scene.fail_timers.nextWakeDelayMs(now_ms),
+        scene.lp_fail_timers.nextWakeDelayMs(now_ms),
+    }) |cand_opt| {
+        if (cand_opt) |cand| {
+            best = if (best) |cur| @min(cur, cand) else cand;
+        }
+    }
+    return best;
+}
+
+pub fn clearBtOccupations(scene: *Scene, gpa: Allocator) void {
+    for (scene.bt_occupations.items) |*o| o.deinit(gpa);
+    scene.bt_occupations.clearRetainingCapacity();
+}
+
+pub fn findOccupationConflict(
+    scene: *const Scene,
+    resource_name: []const u8,
+    owner_id: i32,
+    inc_id: i64,
+) ?BtOccupation {
+    for (scene.bt_occupations.items) |occ| {
+        if (std.mem.eql(u8, occ.resource_name, resource_name) and
+            !(occ.owner_id == owner_id and occ.inc_id == inc_id))
+        {
+            return occ;
+        }
+    }
+    return null;
+}
+
+pub fn upsertOccupation(
+    scene: *Scene,
+    gpa: Allocator,
+    bt_type: pb.BtType,
+    owner_id: i32,
+    inc_id: i64,
+    node_id: i32,
+    resource_name: []const u8,
+) !void {
+    for (scene.bt_occupations.items) |*occ| {
+        if (std.mem.eql(u8, occ.resource_name, resource_name)) {
+            occ.bt_type = bt_type;
+            occ.owner_id = owner_id;
+            occ.inc_id = inc_id;
+            occ.node_id = node_id;
+            return;
+        }
+    }
+    const owned = try gpa.dupe(u8, resource_name);
+    errdefer gpa.free(owned);
+    try scene.bt_occupations.append(gpa, .{
+        .bt_type = bt_type,
+        .owner_id = owner_id,
+        .inc_id = inc_id,
+        .node_id = node_id,
+        .resource_name = owned,
+    });
+}
+
+pub fn releaseOccupationsForTree(scene: *Scene, gpa: Allocator, owner_id: i32, inc_id: i64) void {
+    var i: usize = 0;
+    while (i < scene.bt_occupations.items.len) {
+        if (scene.bt_occupations.items[i].owner_id == owner_id and scene.bt_occupations.items[i].inc_id == inc_id) {
+            var removed = scene.bt_occupations.swapRemove(i);
+            removed.deinit(gpa);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+pub fn releaseOccupationsForNode(scene: *Scene, gpa: Allocator, owner_id: i32, node_id: i32) void {
+    var i: usize = 0;
+    while (i < scene.bt_occupations.items.len) {
+        if (scene.bt_occupations.items[i].owner_id == owner_id and scene.bt_occupations.items[i].node_id == node_id) {
+            var removed = scene.bt_occupations.swapRemove(i);
+            removed.deinit(gpa);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn saveNodeKey(owner_id: i32, node_id: i32) u64 {
+    return (@as(u64, @as(u32, @bitCast(owner_id))) << 32) | @as(u64, @as(u32, @bitCast(node_id)));
+}
+
+pub fn hasSaveNodeEntered(scene: *const Scene, owner_id: i32, node_id: i32) bool {
+    const k = saveNodeKey(owner_id, node_id);
+    for (scene.save_node_keys.items) |item| {
+        if (item == k) return true;
+    }
+    return false;
+}
+
+pub fn markSaveNodeEntered(scene: *Scene, gpa: Allocator, owner_id: i32, node_id: i32) !bool {
+    if (scene.hasSaveNodeEntered(owner_id, node_id)) return false;
+    try scene.save_node_keys.append(gpa, saveNodeKey(owner_id, node_id));
+    return true;
+}
+
+pub fn clearSaveNodesForOwner(scene: *Scene, owner_id: i32) void {
+    const prefix = @as(u64, @as(u32, @bitCast(owner_id))) << 32;
+    const mask: u64 = 0xFFFF_FFFF_0000_0000;
+    var i: usize = 0;
+    while (i < scene.save_node_keys.items.len) {
+        if ((scene.save_node_keys.items[i] & mask) == prefix) {
+            _ = scene.save_node_keys.swapRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
 pub fn setEntityPosition(scene: *Scene, net_id: i64, pos: [3]f32, yaw_opt: ?f32) bool {
     const idx = scene.net_id_map.get(net_id) orelse return false;
     const slot = &scene.entities.items(.position)[idx];
@@ -1037,12 +1210,52 @@ pub fn setEntityPosition(scene: *Scene, net_id: i64, pos: [3]f32, yaw_opt: ?f32)
     return true;
 }
 
+pub fn setCurrentRoleGravity(scene: *Scene, gravity_dir: [3]f32) void {
+    const role_eid = scene.currentRoleEntityId();
+    if (role_eid <= 0) return;
+    const idx = scene.net_id_map.get(role_eid) orelse return;
+    if (idx >= scene.entities.len) return;
+    scene.entities.items(.world_item)[idx].gravity = .{ .location = gravity_dir };
+}
+
 pub fn upsertDynamicInteractOption(
     scene: *Scene,
     gpa: Allocator,
     guid: []const u8,
     entity_net_id: i64,
     entity_config_id: i32,
+    quest_id: i32,
+    node_id: i32,
+    kind: DynamicInteractOption.Kind,
+    flow_list_name: []const u8,
+    flow_id: i32,
+    state_id: i32,
+    actions_json: []const u8,
+) !void {
+    return upsertDynamicInteractOptionWithBt(
+        scene,
+        gpa,
+        guid,
+        entity_net_id,
+        entity_config_id,
+        .BtTypeQuest,
+        quest_id,
+        node_id,
+        kind,
+        flow_list_name,
+        flow_id,
+        state_id,
+        actions_json,
+    );
+}
+
+pub fn upsertDynamicInteractOptionWithBt(
+    scene: *Scene,
+    gpa: Allocator,
+    guid: []const u8,
+    entity_net_id: i64,
+    entity_config_id: i32,
+    bt_type: pb.BtType,
     quest_id: i32,
     node_id: i32,
     kind: DynamicInteractOption.Kind,
@@ -1069,6 +1282,7 @@ pub fn upsertDynamicInteractOption(
         .option_guid = owned_guid,
         .entity_net_id = entity_net_id,
         .entity_config_id = entity_config_id,
+        .bt_type = bt_type,
         .quest_id = quest_id,
         .node_id = node_id,
         .kind = kind,
@@ -1116,12 +1330,22 @@ pub fn takeDynamicInteractOptionsForQuestNode(
     quest_id: i32,
     node_id: i32,
 ) ![]DynamicInteractOption {
+    return takeDynamicInteractOptionsForBtNode(scene, arena, .BtTypeQuest, quest_id, node_id);
+}
+
+pub fn takeDynamicInteractOptionsForBtNode(
+    scene: *Scene,
+    arena: Allocator,
+    bt_type: pb.BtType,
+    owner_id: i32,
+    node_id: i32,
+) ![]DynamicInteractOption {
     var removed: std.ArrayList(DynamicInteractOption) = .empty;
     var i: usize = scene.dynamic_interact_options.items.len;
     while (i > 0) {
         i -= 1;
         const opt = scene.dynamic_interact_options.items[i];
-        if (opt.quest_id != quest_id or opt.node_id != node_id) continue;
+        if (opt.bt_type != bt_type or opt.quest_id != owner_id or opt.node_id != node_id) continue;
         try removed.append(arena, scene.dynamic_interact_options.swapRemove(i));
     }
     return removed.items;

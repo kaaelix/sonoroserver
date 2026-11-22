@@ -134,7 +134,18 @@ pub fn onEntityActiveRequest(
     });
 }
 
-pub fn onPlayerMotionRequest(txn: *Transaction(pb.PlayerMotionRequest)) !void {
+pub fn onPlayerMotionRequest(
+    txn: *Transaction(pb.PlayerMotionRequest),
+    scene_opt: *?Scene,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    if (scene_opt.*) |*scene| {
+        if (txn.message.Motion) |m| {
+            scene.player_motion_type = m;
+            scene.has_player_motion = true;
+            QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onPlayerMotion", err);
+        }
+    }
     txn.respond(.{ .ErrorId = .Success });
 }
 
@@ -291,9 +302,19 @@ fn applyVehicleTransition(
         .ClientPredicted = client_predicted,
     });
 
+    if (qctx.progress_comp) |pc| {
+        const veh_cfg_id: i64 = if (is_entering) (scene.findConfigIdByNetId(entity_id) orelse 0) else 0;
+        pc.info.setKeyInt(qctx.alloc.gpa, "vehicle:cur", veh_cfg_id) catch {};
+        pc.info.setKeyInt(qctx.alloc.gpa, "vehicle:seat", if (is_entering) seat else -1) catch {};
+        pc.save(qctx.fs, qctx.alloc.arena) catch {};
+    }
+
     const loc: [3]f32 = if (scene.instance.players.len > 0) scene.instance.players[0].location else .{ 0, 0, 0 };
     QuestEngine.onMove(qctx, loc) catch |err| {
         std.log.scoped(.level_play).warn("onPlayerMove failed: {t}", .{err});
+    };
+    QuestEngine.onConditionStateChanged(qctx) catch |err| {
+        QuestEngine.logHookErr("onConditionStateChanged", err);
     };
 
     return .Success;
@@ -420,6 +441,7 @@ pub fn onEntityEnterVehicleRequest(
     sender: PlayerID,
 ) !void {
     const req = txn.message;
+    _ = sender;
     const found = ensureVehicleEntity(scene, req.VehicleCreatureId) orelse {
         txn.respond(.{ .ErrorCode = .ErrVehicleEntityNotExist });
         return;
@@ -428,10 +450,11 @@ pub fn onEntityEnterVehicleRequest(
     found.comp.occupied = req.IsEntering;
     try scene.saveComponents(fs, alloc.gpa, found.entity, &.{Scene.Entity.VehicleComponent});
     txn.respond(.{ .ErrorCode = .Success });
-    try txn.conn.push(alloc.gpa, io, pb.VehicleUpdateNotify{
-        .EntityId = if (req.IsEntering) req.VehicleCreatureId else 0,
-        .PlayerId = sender.id,
-        .SeatId = if (req.IsEntering) req.Seat else -1,
+    try txn.conn.push(alloc.gpa, io, pb.VehicleUpdateEntityNotify{
+        .EntityId = req.EntityId,
+        .VehicleCreatureId = req.VehicleCreatureId,
+        .Seat = if (req.IsEntering) req.Seat else -1,
+        .IsEntering = req.IsEntering,
         .ExitType = if (req.IsEntering) null else if (req.Exit) |ex| switch (ex) {
             .ExitType => |et| et,
         } else null,
@@ -455,6 +478,7 @@ pub fn onMovePackagePush(
     qctx: QuestEngine.QuestContext,
     maybe_coop: ?*@import("../../logic/CoopService.zig"),
 ) !void {
+    _ = quest_comp;
     const log = std.log.scoped(.client_movement);
 
     for (txn.message.MovingEntities.items) |data| {
@@ -489,8 +513,11 @@ pub fn onMovePackagePush(
                 if (!std.math.isFinite(rotation.Roll) or !std.math.isFinite(rotation.Pitch) or !std.math.isFinite(rotation.Yaw)) continue;
             }
             var move_quest_pos: ?[3]f32 = null;
+            var mode_changed = false;
             if (controlled_by_player) {
+                mode_changed = scene.player_movement_mode != last_move_replay.MovementMode;
                 scene.player_movement_mode = last_move_replay.MovementMode;
+                scene.has_player_movement_mode = true;
                 for (scene.instance.players) |*player| {
                     if (player.id == sender.id) {
                         player.location = next_location;
@@ -500,13 +527,11 @@ pub fn onMovePackagePush(
                             scene.last_spatial_check_loc = player.location;
                             events.enqueueBestEffort(.spatial_spawns_check, .{ .location = player.location });
                         }
-                        if (quest_comp.info.active_quests.len > 0) {
-                            const mdx = player.location[0] - scene.last_quest_move_loc[0];
-                            const mdy = player.location[1] - scene.last_quest_move_loc[1];
-                            const mdz = player.location[2] - scene.last_quest_move_loc[2];
-                            if (!scene.has_quest_move_loc or mdx * mdx + mdy * mdy + mdz * mdz >= 50.0 * 50.0) {
-                                move_quest_pos = player.location;
-                            }
+                        const mdx = player.location[0] - scene.last_quest_move_loc[0];
+                        const mdy = player.location[1] - scene.last_quest_move_loc[1];
+                        const mdz = player.location[2] - scene.last_quest_move_loc[2];
+                        if (!scene.has_quest_move_loc or mdx * mdx + mdy * mdy + mdz * mdz >= 50.0 * 50.0) {
+                            move_quest_pos = player.location;
                         }
                     }
                 }
@@ -535,6 +560,8 @@ pub fn onMovePackagePush(
                 scene.last_quest_move_loc = pos;
                 scene.has_quest_move_loc = true;
                 try QuestEngine.onMove(qctx, pos);
+            } else if (mode_changed) {
+                QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onMoveMode", err);
             }
         }
     }
@@ -731,23 +758,9 @@ pub fn onEntityInteractRequest(
         try RoleHelper.reviveAndHealFormation(txn.conn, scene, role_comp, events, fs, alloc, io);
     }
     try QuestEngine.onInteract(qctx, txn.message.EntityId, txn.message.OptionIndex);
-    _ = try LevelPlayHelper.onEntityInteractFallback(.{
-        .assets = qctx.assets,
-        .fs = qctx.fs,
-        .conn = qctx.conn,
-        .scene = scene,
-        .scene_comp = qctx.scene_comp,
-        .events = qctx.events,
-        .alloc = qctx.alloc,
-        .io = qctx.io,
-        .basic_comp = qctx.basic_comp,
-        .inventory_comp = qctx.inventory_comp,
-        .weapon_comp = qctx.weapon_comp,
-        .echo_comp = qctx.echo_comp,
-        .map_comp = qctx.map_comp,
-        .quest_comp = qctx.quest_comp,
-        .role_comp = role_comp,
-    }, txn.message.EntityId);
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        _ = try LevelPlayHelper.onEntityInteractFallback(lp_ctx, txn.message.EntityId);
+    }
     txn.respond(.{
         .ErrorCode = .Success,
         .Interacting = false,

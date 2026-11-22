@@ -37,6 +37,7 @@ pub fn onEnterBigWorldInstRequest(
     if (qctx.scene) |scene| {
         if (assets.tables.instance_dungeon.getDataById(scene.instance_id)) |inst| {
             if (inst.InstType != 1) {
+                QuestEngine.onPlayerTransferOrLeaveInst(qctx, true) catch |err| QuestEngine.logHookErr("onEnterBigWorldInst", err);
                 try QuestEngine.leaveInst(qctx, 0);
             }
         }
@@ -48,6 +49,7 @@ pub fn onLeaveInstRequest(
     txn: *Transaction(pb.LeaveInstRequest),
     qctx: QuestEngine.QuestContext,
 ) !void {
+    QuestEngine.onPlayerTransferOrLeaveInst(qctx, true) catch |err| QuestEngine.logHookErr("onLeaveInst", err);
     try QuestEngine.leaveInst(qctx, txn.message.PosEntityId);
     txn.respond(.{ .ErrorCode = .Success });
 }

@@ -466,10 +466,23 @@ pub fn transferMainRoleState(
     if (role_comp.role_map.contains(source_role_id)) {
         _ = try ensureRoleWeapon(alloc, fs, assets, role_comp, weapon_comp, source_role_id);
     }
-    if (!role_comp.role_map.contains(target_role_id)) return error.RoleNotFound;
+    if (!role_comp.role_map.contains(target_role_id)) {
+        var new_role = try RoleInfo.createDefault(alloc.gpa, assets, target_role_id);
+        errdefer new_role.deinit(alloc.gpa);
+        try role_comp.role_map.put(alloc.gpa, target_role_id, new_role);
+        role_changed = true;
+    }
 
     if (source_role_id == target_role_id) {
         result.basic_changed = setSelectedMainRole(basic_comp, target_role_id);
+        if (role_changed) {
+            if (role_comp.role_map.getPtr(target_role_id)) |target_role| {
+                try normalizeTargetRoleInfo(alloc.gpa, assets, target_role, target_role_id);
+            }
+            _ = try ensureRoleWeapon(alloc, fs, assets, role_comp, weapon_comp, target_role_id);
+            _ = try role_comp.rebuildEquipment(alloc.gpa, assets, target_role_id, weapon_comp, echo_comp);
+            try saveRoleInfo(fs, alloc.arena, role_comp, target_role_id);
+        }
         return result;
     }
 
@@ -478,9 +491,10 @@ pub fn transferMainRoleState(
     echo_changed = replaceEchoRoleId(echo_comp, source_role_id, target_role_id);
     if (scene) |scene_ptr| result.formation_changed = replaceFormationRole(scene_ptr, source_role_id, target_role_id);
 
-    const source_role = role_comp.role_map.getPtr(source_role_id) orelse return error.RoleNotFound;
     const target_role = role_comp.role_map.getPtr(target_role_id) orelse return error.RoleNotFound;
-    try copyMainRoleProgression(alloc.gpa, assets, source_role_id, source_role, target_role_id, target_role);
+    if (role_comp.role_map.getPtr(source_role_id)) |source_role| {
+        try copyMainRoleProgression(alloc.gpa, assets, source_role_id, source_role, target_role_id, target_role);
+    }
     try normalizeTargetRoleInfo(alloc.gpa, assets, target_role, target_role_id);
     role_changed = true;
 

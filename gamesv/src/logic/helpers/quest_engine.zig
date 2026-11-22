@@ -19,6 +19,7 @@ const gameplay_tags = @import("gameplay_tags.zig");
 const RewardService = @import("reward.zig");
 const quest_types = @import("quest_types.zig");
 const QuestActions = @import("quest_actions.zig");
+const LevelPlayHelper = @import("level_play.zig");
 const RoleHelper = @import("role.zig");
 const RoleEntityTemplates = @import("../templates/RoleEntityTemplates.zig");
 const entity_proto = @import("entity_proto.zig");
@@ -49,6 +50,7 @@ pub const executeActionList = QuestActions.executeActionList;
 const StepResult = enum {
     running,
     completed,
+    failed,
     quest_ended,
 };
 
@@ -69,7 +71,19 @@ pub fn actionCallbacks() quest_types.ActionCallbacks {
         .on_destroy_quest = destroyQuest,
         .on_finish_condition = finishConditionFromAction,
         .on_trace_current_quest = traceCurrentQuestFromAction,
+        .on_var_changed = onVarChanged,
     };
+}
+
+pub fn onVarChanged(ctx: QuestContext, owner_id: i32, var_name: []const u8) !void {
+    if (refresh_loop_depth == 0) {
+        if (try recheckPendingConditions(ctx)) {
+            try finalizeProgression(ctx);
+        }
+    }
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        try LevelPlayHelper.onVarChanged(lp_ctx, owner_id, var_name);
+    }
 }
 
 fn traceCurrentQuestFromAction(ctx: QuestContext, quest_id: i32) !void {
@@ -102,6 +116,9 @@ pub fn syncOnLogin(ctx: QuestContext) !void {
     syncSceneCurrentNode(ctx);
 
     try pushQuestStateNotifiesWithEnter(ctx, false, true);
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        try LevelPlayHelper.syncOnLogin(lp_ctx);
+    }
     try ctx.quest_comp.save(ctx.fs, ctx.alloc.arena);
 }
 
@@ -120,6 +137,9 @@ pub fn resyncOnReconnect(ctx: QuestContext) !void {
                 try pushDoInteractOptionsForNode(scene, ctx.conn, ctx.alloc, ctx.io, aq.quest_id, node.*, null);
             }
         }
+    }
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        try LevelPlayHelper.syncOnLogin(lp_ctx);
     }
     try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.TraceQuestNotify{ .QuestId = ctx.quest_comp.info.tracked_quest_id });
     if (ctx.quest_comp.info.focus_quest_id > 0) {
@@ -463,24 +483,253 @@ fn matchMoveNode(
 }
 
 pub fn onMove(ctx: QuestContext, pos: [3]f32) !void {
-    if (try advanceMatchingChildNodes(ctx, pos, matchMoveNode)) {
+    var progressed = try advanceMatchingChildNodes(ctx, pos, matchMoveNode);
+    if (try checkActiveQuestFailedMonitors(ctx, pos)) {
+        progressed = true;
+    }
+    if (progressed) {
         try finalizeProgression(ctx);
+    }
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        try LevelPlayHelper.onPlayerMove(lp_ctx, pos[0], pos[1], pos[2]);
     }
 }
 
-pub fn onFlowEnd(ctx: QuestContext, flow_inc_id: i64) !void {
+const FlowEndReplayOutcome = struct {
+    next_state_id: i32 = 0,
+    has_finish_do_interact: bool = false,
+    finish_do_interact_executed: bool = false,
+};
+
+fn isFlowReplayServerAction(name: []const u8) bool {
+    const actions = [_][]const u8{
+        "SetVar",
+        "CalculateVar",
+        "RandomVar",
+        "AccpetCurrentQuest",
+        "OpenSystemFunction",
+        "EnableSystem",
+        "EnableFunction",
+        "UnlockSystemItem",
+        "GetItem",
+        "DestroyQuestItem",
+        "UnlockTeleportTrigger",
+        "EnableLevelPlay",
+        "ChangeEntityState",
+        "ChangeSelfEntityState",
+        "AwakeEntity",
+        "DestroyEntity",
+        "SetEntityVisible",
+        "AddTrialCharacter",
+        "RemoveTrialCharacter",
+        "UpdateTrialCharacter",
+        "RestoreTrialCharacter",
+        "SheriffUnlockClue",
+        "SheriffUnlockProgress",
+        "SheriffChangeCriminalState",
+        "SheriffChangeCriminalIdentity",
+        "SheriffUnlockEnding",
+        "SetTime",
+        "SetTimeLockState",
+        "SetWeather",
+        "SetWeatherLockState",
+        "SwitchDataLayers",
+        "SwitchSubLevels",
+        "CompleteGuide",
+        "GuideTrigger",
+        "SendNpcMail",
+        "PhoneSystemInteract",
+        "TraceCurrentQuest",
+        "DestroyQuest",
+        "FinishCondition",
+        "ChangeState",
+        "ChangeOtherState",
+        "SetAudioState",
+        "VehicleEnter",
+        "VehicleExitPlayer",
+        "VehicleExitNpc",
+        "TeleportToAndEnterVehicle",
+        "AddGuestCharacter",
+        "RemoveGuestCharacter",
+    };
+    for (actions) |n| {
+        if (std.mem.eql(u8, n, name)) return true;
+    }
+    return false;
+}
+
+fn scanFlowActionsForFinishDoInteract(items: []const std.json.Value) bool {
+    for (items) |act| {
+        if (act != .object) continue;
+        const name = jsonStr(act.object.get("Name")) orelse continue;
+        if (std.mem.eql(u8, name, "FinishDoInteract")) return true;
+        if (std.mem.eql(u8, name, "ShowTalk")) {
+            const params = act.object.get("Params") orelse continue;
+            if (params != .object) continue;
+            const tis = params.object.get("TalkItems") orelse continue;
+            if (tis != .array) continue;
+            for (tis.array.items) |ti| {
+                if (ti != .object) continue;
+                const opts = ti.object.get("Options") orelse continue;
+                if (opts != .array) continue;
+                for (opts.array.items) |opt| {
+                    if (opt != .object) continue;
+                    const oacts = opt.object.get("Actions") orelse continue;
+                    if (oacts == .array and scanFlowActionsForFinishDoInteract(oacts.array.items)) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+fn executeSingleFlowReplayAction(
+    ctx: QuestContext,
+    scene: *Scene,
+    qid: i32,
+    nid: i32,
+    act: std.json.Value,
+    outcome: *FlowEndReplayOutcome,
+) !void {
+    if (act != .object) return;
+    const name = jsonStr(act.object.get("Name")) orelse return;
+    const action_id = jsonInt(act.object.get("ActionId")) orelse 0;
+    if (action_id > 0 and scene.hasFlowActionExecuted(action_id)) return;
+    if (std.mem.eql(u8, name, "FinishDoInteract")) {
+        outcome.finish_do_interact_executed = true;
+        if (action_id > 0) scene.markFlowActionExecuted(ctx.alloc.gpa, action_id) catch {};
+        return;
+    }
+    if (!isFlowReplayServerAction(name)) return;
+    var cbs = actionCallbacks();
+    cbs.is_flow_action = true;
+    cbs.defer_flow_transition = true;
+    try QuestActions.executeAction(ctx, cbs, qid, nid, act);
+    if (action_id > 0) scene.markFlowActionExecuted(ctx.alloc.gpa, action_id) catch {};
+}
+
+fn replayFlowStateOnEnd(
+    ctx: QuestContext,
+    scene: *Scene,
+    flow_name: []const u8,
+    flow_id: i32,
+    state_id: i32,
+    qid: i32,
+    nid: i32,
+    option_infos: []const pb.MapEntry(i32, pb.FlowOptionInfoList),
+) !FlowEndReplayOutcome {
+    var outcome: FlowEndReplayOutcome = .{};
+    const state_val = (try ctx.assets.flow_states.getFlowState(
+        ctx.io,
+        ctx.alloc.arena,
+        flow_name,
+        flow_id,
+        state_id,
+    )) orelse return outcome;
+    if (state_val != .object) return outcome;
+    const acts_val = state_val.object.get("Actions") orelse return outcome;
+    if (acts_val != .array) return outcome;
+
+    outcome.has_finish_do_interact = scanFlowActionsForFinishDoInteract(acts_val.array.items);
+    scene.flow_next_state_id = 0;
+
+    for (acts_val.array.items) |act| {
+        if (act != .object) continue;
+        const name = jsonStr(act.object.get("Name")) orelse continue;
+        if (std.mem.eql(u8, name, "ShowTalk")) {
+            const st_aid = jsonInt(act.object.get("ActionId")) orelse 0;
+            const params = act.object.get("Params") orelse continue;
+            if (params != .object) continue;
+            const tis_val = params.object.get("TalkItems") orelse continue;
+            if (tis_val != .array) continue;
+
+            for (option_infos) |entry| {
+                if (st_aid > 0 and entry.key != 0 and entry.key != st_aid) continue;
+                for (entry.value.OptionIndexList.items) |opt_sel| {
+                    for (tis_val.array.items) |ti| {
+                        if (ti != .object) continue;
+                        if ((jsonInt(ti.object.get("Id")) orelse 0) != opt_sel.TalkId) continue;
+                        const opts_val = ti.object.get("Options") orelse break;
+                        if (opts_val != .array) break;
+                        const idx = std.math.cast(usize, opt_sel.OptionIndex) orelse break;
+                        if (idx >= opts_val.array.items.len) break;
+                        const opt_obj = opts_val.array.items[idx];
+                        if (opt_obj != .object) break;
+                        const oacts = opt_obj.object.get("Actions") orelse break;
+                        if (oacts == .array) {
+                            for (oacts.array.items) |oact| {
+                                try executeSingleFlowReplayAction(ctx, scene, qid, nid, oact, &outcome);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        try executeSingleFlowReplayAction(ctx, scene, qid, nid, act, &outcome);
+    }
+
+    outcome.next_state_id = scene.flow_next_state_id;
+    return outcome;
+}
+
+pub fn onFlowEnd(
+    ctx: QuestContext,
+    flow_inc_id: i64,
+    option_infos: []const pb.MapEntry(i32, pb.FlowOptionInfoList),
+    is_skip: bool,
+) !void {
     const scene = ctx.scene orelse return;
     const matched_qid = scene.active_flow_quest_id;
     const matched_nid = scene.active_flow_node_id;
+    const matched_bt_type = scene.active_flow_bt_type;
     const matched_inc = scene.active_flow_inc_id;
     const owner_entity_id = scene.active_flow_owner_entity_id;
 
     if (matched_inc != 0 and (matched_inc == flow_inc_id or flow_inc_id == 0)) {
+        const prev_flow_name = if (scene.active_flow_list_name.len > 0)
+            try ctx.alloc.arena.dupe(u8, scene.active_flow_list_name)
+        else
+            "";
+        const prev_flow_id = scene.active_flow_id;
+        const prev_state_id = scene.active_flow_state_id;
+        var replay: FlowEndReplayOutcome = .{};
+        if (prev_flow_name.len > 0 and prev_flow_id > 0 and prev_state_id > 0) {
+            replay = replayFlowStateOnEnd(
+                ctx,
+                scene,
+                prev_flow_name,
+                prev_flow_id,
+                prev_state_id,
+                matched_qid,
+                matched_nid,
+                option_infos,
+            ) catch .{};
+        }
+
         scene.clearActiveFlow(ctx.alloc.gpa);
         scene.prologue_flow_started = false;
+
+        if (replay.next_state_id > 0 and prev_flow_name.len > 0 and prev_flow_id > 0) {
+            try startFlowParamsBt(
+                ctx,
+                matched_qid,
+                matched_nid,
+                matched_bt_type,
+                prev_flow_name,
+                prev_flow_id,
+                replay.next_state_id,
+                false,
+                false,
+            );
+            return;
+        }
+
         restorePlotMainRole(ctx);
 
-        if (matched_qid != 0) {
+        const interact_blocked_cancel = !is_skip and replay.has_finish_do_interact and !replay.finish_do_interact_executed;
+        if (matched_qid != 0 and !interact_blocked_cancel) {
             if (ctx.quest_comp.info.findActiveQuest(matched_qid)) |aq| {
                 const nodes = try ctx.assets.quest_nodes.getOwnerNodes(ctx.io, matched_qid);
                 if (QuestInfo.isNodeActive(aq, matched_nid)) {
@@ -489,12 +738,14 @@ pub fn onFlowEnd(ctx: QuestContext, flow_inc_id: i64) !void {
                         try finalizeProgression(ctx);
                     }
                 } else if (findNodeById(nodes, matched_nid)) |node| {
-                    if (std.mem.eql(u8, node.node_type, "Action")) {
+                    if (std.mem.eql(u8, node.node_type, "Action") or std.mem.eql(u8, node.node_type, "ActionWithResult")) {
                         try finishNonChildNode(ctx, matched_qid, node.*, true);
                         try advanceQuestTree(ctx, matched_qid, true);
                         try finalizeProgression(ctx);
                     }
                 }
+            } else if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+                try LevelPlayHelper.onFlowEnd(lp_ctx, matched_qid, matched_nid);
             }
         }
         try dispatchPostFlowFollowups(ctx, scene);
@@ -546,6 +797,7 @@ pub fn onFlowAction(ctx: QuestContext, flow_inc_id: i64, action_id: i32) !void {
     )) orelse return;
 
     const action_val = Assets.LazyFlowStore.findActionById(state_val, action_id) orelse return;
+    try scene.markFlowActionExecuted(ctx.alloc.gpa, action_id);
     const actions = [_]std.json.Value{action_val};
     var cbs = actionCallbacks();
     cbs.is_flow_action = true;
@@ -942,6 +1194,13 @@ pub fn onEntityKilled(ctx: QuestContext, target_net_id: i64, config_id_opt: ?i32
         }
     }
 
+    if (try checkActiveQuestFailedMonitors(ctx, null)) {
+        progressed = true;
+    }
+    if (try extendFailTimersOnKill(ctx)) {
+        progressed = true;
+    }
+
     if (progressed) {
         try finalizeProgression(ctx);
     }
@@ -956,6 +1215,10 @@ pub fn onEntityDamaged(ctx: QuestContext, cfg_id: i32, hp_ratio: f32) !void {
         if (try checkCombatStateForQuest(ctx, qid, cfg_id, hp_ratio)) {
             progressed = true;
         }
+    }
+
+    if (try checkActiveQuestFailedMonitors(ctx, null)) {
+        progressed = true;
     }
 
     if (progressed) {
@@ -1210,7 +1473,9 @@ pub fn onLevelPlayCompleted(ctx: QuestContext, level_play_id: i32) !void {
 }
 
 pub fn onLevelPlayEnabled(ctx: QuestContext, level_play_id: i32, enabled: bool) !void {
-    _ = level_play_id;
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        try LevelPlayHelper.onLevelPlayEnabled(lp_ctx, level_play_id, enabled);
+    }
     if (!enabled) return;
     if (try recheckPendingConditions(ctx)) {
         try finalizeProgression(ctx);
@@ -1403,8 +1668,13 @@ pub fn onEntityStateChanged(ctx: QuestContext, entity_config_id: i32, state_name
     var progressed = try advanceMatchingChildNodes(ctx, StateEvt{ .eid = entity_config_id, .state = state_name }, Check.run);
     if (try refreshAvailableQuests(ctx, true)) progressed = true;
     if (try recheckPendingConditions(ctx)) progressed = true;
+    if (try extendFailTimersOnEntityState(ctx, entity_config_id, state_name)) progressed = true;
+    if (try checkActiveQuestFailedMonitors(ctx, null)) progressed = true;
     if (progressed) {
         try finalizeProgression(ctx);
+    }
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        try LevelPlayHelper.onEntityStateChanged(lp_ctx, entity_config_id, state_name);
     }
 }
 
@@ -1501,11 +1771,30 @@ fn finishConditionFromAction(ctx: QuestContext, quest_id: i32, node_id: i32) !vo
     }
 }
 
+fn interruptActiveFlowForQuest(ctx: QuestContext, quest_id: i32) ?i64 {
+    const scene = ctx.scene orelse return null;
+    if (scene.active_flow_inc_id == 0 or scene.active_flow_quest_id != quest_id) return null;
+    const ended_inc = scene.active_flow_inc_id;
+    scene.clearActiveFlow(ctx.alloc.gpa);
+    scene.prologue_flow_started = false;
+    restorePlotMainRole(ctx);
+    ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.FlowEndNotify{
+        .FlowIncId = ended_inc,
+        .Async = false,
+        .IsFinished = false,
+    }) catch {};
+    return ended_inc;
+}
+
 pub fn onBtGiveUp(ctx: QuestContext, owner_id: i32, tree_inc_id: i64, node_id: i32) !void {
+    const quest_id = if (owner_id > 0) owner_id else (std.math.cast(i32, tree_inc_id) orelse return);
+    var flow_ids: std.ArrayList(i64) = .empty;
     if (ctx.scene) |scene| {
         _ = scene.removeBtTimer(ctx.alloc.gpa, owner_id, tree_inc_id, "");
+        if (interruptActiveFlowForQuest(ctx, quest_id)) |ended_inc| {
+            try flow_ids.append(ctx.alloc.arena, ended_inc);
+        }
     }
-    const quest_id = if (owner_id > 0) owner_id else (std.math.cast(i32, tree_inc_id) orelse return);
     if (quest_id > 0 and node_id > 0) {
         if (ctx.quest_comp.info.findActiveQuest(quest_id)) |aq| {
             if (QuestInfo.isNodeActive(aq, node_id)) {
@@ -1518,6 +1807,16 @@ pub fn onBtGiveUp(ctx: QuestContext, owner_id: i32, tree_inc_id: i64, node_id: i
             }
         }
     }
+    if (quest_id > 0 and ctx.quest_comp.info.hasActiveQuest(quest_id)) {
+        const eff_inc_id = if (tree_inc_id != 0) tree_inc_id else @as(i64, quest_id);
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestGiveUpNotify{
+            .FlowIncIds = flow_ids,
+            .QuestId = quest_id,
+            .TreeIncId = eff_inc_id,
+        }) catch {};
+        try rollbackQuestToNode(ctx, quest_id, node_id, .GiveUpFail, false);
+        try finalizeProgression(ctx);
+    }
 }
 
 pub fn onBtRollback(ctx: QuestContext, owner_id: i32, tree_inc_id: i64, _: i32) !void {
@@ -1526,7 +1825,27 @@ pub fn onBtRollback(ctx: QuestContext, owner_id: i32, tree_inc_id: i64, _: i32) 
     }
     const quest_id = if (owner_id > 0) owner_id else (std.math.cast(i32, tree_inc_id) orelse return);
     if (quest_id > 0 and ctx.quest_comp.info.hasActiveQuest(quest_id)) {
-        try advanceQuestTree(ctx, quest_id, true);
+        try rollbackQuestToNode(ctx, quest_id, 0, .DefaultFail, true);
+        try finalizeProgression(ctx);
+    }
+}
+
+pub fn onForcedOccupation(ctx: QuestContext, tree_inc_id: i64) !void {
+    const target_owner = std.math.cast(i32, tree_inc_id) orelse 0;
+    if (ctx.scene) |scene| {
+        var i: usize = 0;
+        while (i < scene.bt_occupations.items.len) {
+            const occ = scene.bt_occupations.items[i];
+            if (occ.inc_id != tree_inc_id and occ.owner_id != target_owner) {
+                var removed = scene.bt_occupations.swapRemove(i);
+                removed.deinit(ctx.alloc.gpa);
+            } else {
+                i += 1;
+            }
+        }
+    }
+    if (target_owner > 0 and ctx.quest_comp.info.hasActiveQuest(target_owner)) {
+        try advanceQuestTree(ctx, target_owner, true);
         try finalizeProgression(ctx);
     }
 }
@@ -1543,6 +1862,10 @@ pub fn executeDynamicInteractOption(ctx: QuestContext, entity_id: i64, option_gu
                 if (scene.active_flow_inc_id != 0 and scene.active_flow_quest_id == opt.quest_id and scene.active_flow_node_id == opt.node_id) {
                     scene.active_flow_owner_entity_id = target_entity_id;
                 }
+            } else if (opt.bt_type == .BtTypeLevelPlay and opt.quest_id > 0 and opt.node_id > 0) {
+                if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+                    _ = try LevelPlayHelper.onDynamicInteract(lp_ctx, opt.quest_id, opt.node_id, target_entity_id);
+                }
             } else {
                 try onInteract(ctx, target_entity_id, 0);
             }
@@ -1558,14 +1881,22 @@ pub fn executeDynamicInteractOption(ctx: QuestContext, entity_id: i64, option_gu
                     }
                 } else |_| {}
             }
-            if (opt.quest_id > 0 and opt.node_id > 0) {
+            if (opt.bt_type == .BtTypeLevelPlay and opt.quest_id > 0 and opt.node_id > 0) {
+                if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+                    _ = try LevelPlayHelper.onDynamicInteract(lp_ctx, opt.quest_id, opt.node_id, target_entity_id);
+                }
+            } else if (opt.quest_id > 0 and opt.node_id > 0) {
                 _ = try onSubmitNode(ctx, opt.quest_id, opt.quest_id, opt.node_id);
             } else {
                 try onInteract(ctx, target_entity_id, 0);
             }
         },
         .none => {
-            if (opt.quest_id > 0 and opt.node_id > 0) {
+            if (opt.bt_type == .BtTypeLevelPlay and opt.quest_id > 0 and opt.node_id > 0) {
+                if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+                    _ = try LevelPlayHelper.onDynamicInteract(lp_ctx, opt.quest_id, opt.node_id, target_entity_id);
+                }
+            } else if (opt.quest_id > 0 and opt.node_id > 0) {
                 _ = try onSubmitNode(ctx, opt.quest_id, opt.quest_id, opt.node_id);
             } else {
                 try onInteract(ctx, target_entity_id, 0);
@@ -1683,6 +2014,10 @@ pub fn onItemUse(ctx: QuestContext, item_id: i32, count: i32) !void {
             }
         }
     }
+    if (try checkActiveQuestFailedMonitors(ctx, null)) {
+        progressed = true;
+    }
+
     if (progressed) {
         try finalizeProgression(ctx);
     }
@@ -1711,6 +2046,10 @@ pub fn onItemGained(ctx: QuestContext, _: i32) !void {
     };
     var progressed = try advanceMatchingChildNodes(ctx, {}, Check.run);
     if (try refreshAvailableQuests(ctx, true)) progressed = true;
+    if (try checkActiveQuestFailedMonitors(ctx, null)) {
+        progressed = true;
+    }
+
     if (progressed) {
         try finalizeProgression(ctx);
     }
@@ -1826,6 +2165,10 @@ pub fn onWeatherChanged(ctx: QuestContext, weather_id: i32) !void {
     };
     var progressed = try advanceMatchingChildNodes(ctx, {}, Check.run);
     if (try recheckPendingConditions(ctx)) progressed = true;
+    if (try checkActiveQuestFailedMonitors(ctx, null)) {
+        progressed = true;
+    }
+
     if (progressed) {
         try finalizeProgression(ctx);
     }
@@ -1973,7 +2316,13 @@ fn finishFlowStateFromAction(ctx: QuestContext) !void {
 
 pub fn destroyQuest(ctx: QuestContext, quest_id: i32) !void {
     if (quest_id <= 0) return;
-    if (ctx.scene) |scene| scene.quest_timers.cancelQuest(quest_id);
+    if (ctx.scene) |scene| {
+        scene.quest_timers.cancelQuest(quest_id);
+        scene.fail_timers.cancelQuest(quest_id);
+        scene.releaseOccupationsForTree(ctx.alloc.gpa, quest_id, quest_id);
+        scene.clearSaveNodesForOwner(quest_id);
+        _ = interruptActiveFlowForQuest(ctx, quest_id);
+    }
     if (!ctx.quest_comp.info.hasActiveQuest(quest_id)) return;
     try ctx.quest_comp.info.removeActiveQuest(ctx.alloc.gpa, quest_id);
 
@@ -2339,12 +2688,70 @@ fn recheckPendingConditions(ctx: QuestContext) !bool {
 /// Re-evaluates server-backed condition-group child quests after a handler
 /// updates a value used by ConditionEvaluator.
 pub fn onConditionStateChanged(ctx: QuestContext) !void {
-    const cond_prog = try recheckPendingConditions(ctx);
+    var cond_prog = try recheckPendingConditions(ctx);
     const quest_added = try refreshAvailableQuests(ctx, true);
+    if (try checkActiveQuestFailedMonitors(ctx, null)) {
+        cond_prog = true;
+    }
     if (cond_prog or quest_added) {
         try finalizeProgression(ctx);
     }
     try reevaluateInRangeTriggers(ctx);
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        try LevelPlayHelper.onConditionStateChanged(lp_ctx);
+    }
+}
+
+pub fn onPlayerTransferOrLeaveInst(ctx: QuestContext, is_leave_dungeon: bool) !void {
+    const aq_snapshot = try ctx.alloc.arena.dupe(QuestInfo.ActiveQuest, ctx.quest_comp.info.active_quests);
+    var changed = false;
+    for (aq_snapshot) |aq| {
+        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, aq.quest_id) catch continue;
+        for (nodes) |node| {
+            if (!std.mem.eql(u8, node.node_type, "QuestFailed")) continue;
+            if (QuestInfo.isNodeFinished(aq, node.id)) continue;
+            if (!isSubtreeActiveForMonitor(nodes, aq.active_nodes, node.parent_id)) continue;
+            if (node.data != .object) continue;
+            const fc_val = node.data.object.get("FailedCondition") orelse continue;
+            if (fc_val != .object) continue;
+            const is_transfer_fail = jsonBool(fc_val.object.get("IsTransferFailure")) orelse false;
+            const is_leave_fail = jsonBool(fc_val.object.get("IsLeaveDungeonFailure")) orelse false;
+            if (is_leave_dungeon and is_leave_fail) {
+                try rollbackQuestToNode(ctx, aq.quest_id, node.id, .LeaveInstFail, false);
+                changed = true;
+                break;
+            }
+            if (is_transfer_fail) {
+                try rollbackQuestToNode(ctx, aq.quest_id, node.id, .TransferFail, false);
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        const entered_snap = try ctx.alloc.arena.dupe(i32, ctx.quest_comp.info.progress.entered_level_plays);
+        for (entered_snap) |lpid| {
+            if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lpid)) continue;
+            const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lpid) catch continue;
+            for (nodes) |node| {
+                if (!std.mem.eql(u8, node.node_type, "QuestFailed")) continue;
+                if (node.data != .object) continue;
+                const fc_val = node.data.object.get("FailedCondition") orelse continue;
+                if (fc_val != .object) continue;
+                const is_transfer_fail = jsonBool(fc_val.object.get("IsTransferFailure")) orelse false;
+                const is_leave_fail = jsonBool(fc_val.object.get("IsLeaveDungeonFailure")) orelse false;
+                if ((is_leave_dungeon and is_leave_fail) or is_transfer_fail) {
+                    if (try LevelPlayHelper.onFailTimerDue(lp_ctx, lpid, node.id)) {
+                        changed = true;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if (changed) {
+        try finalizeProgression(ctx);
+    }
 }
 
 pub fn onProgressionUnlockChanged(ctx: QuestContext) !void {
@@ -2744,25 +3151,52 @@ fn stepNode(
     const aq = ctx.quest_comp.info.findActiveQuest(quest_id) orelse return .quest_ended;
     if (QuestInfo.isNodeFinished(aq, node.id)) return .completed;
 
+    if (try checkNodeOccupationAndSave(ctx, .BtTypeQuest, quest_id, node, push_updates)) |suspend_res| {
+        return suspend_res;
+    }
+
     if (std.mem.eql(u8, node.node_type, "Sequence")) {
         for (nodes) |child| {
             if (child.parent_id != node.id) continue;
             const child_res = try stepNode(ctx, quest_id, nodes, child, push_updates, steps);
             switch (child_res) {
                 .running => return .running,
+                .failed => return .failed,
                 .quest_ended => return .quest_ended,
                 .completed => continue,
             }
         }
         try finishNonChildNode(ctx, quest_id, node, push_updates);
         return .completed;
+    } else if (std.mem.eql(u8, node.node_type, "Select")) {
+        var any_child = false;
+        for (nodes) |child| {
+            if (child.parent_id != node.id) continue;
+            any_child = true;
+            const child_res = try stepNode(ctx, quest_id, nodes, child, push_updates, steps);
+            switch (child_res) {
+                .quest_ended => return .quest_ended,
+                .completed => {
+                    try finishNonChildNode(ctx, quest_id, node, push_updates);
+                    return .completed;
+                },
+                .running => return .running,
+                .failed => continue,
+            }
+        }
+        if (any_child and node.parent_id != 0) return .failed;
+        try finishNonChildNode(ctx, quest_id, node, push_updates);
+        return .completed;
     } else if (std.mem.eql(u8, node.node_type, "ParallelSelect")) {
         const needed: i32 = @max(1, node.count);
         var finished_count: i32 = 0;
+        var failed_count: i32 = 0;
+        var total_children: i32 = 0;
         var any_ended = false;
 
         for (nodes) |child| {
             if (child.parent_id != node.id) continue;
+            total_children += 1;
             const cur_aq = ctx.quest_comp.info.findActiveQuest(quest_id) orelse return .quest_ended;
             if (QuestInfo.isNodeFinished(cur_aq, child.id)) {
                 finished_count += 1;
@@ -2779,6 +3213,9 @@ fn stepNode(
                     finished_count += 1;
                     if (finished_count >= needed) break;
                 },
+                .failed => {
+                    failed_count += 1;
+                },
                 .running => {},
             }
         }
@@ -2789,6 +3226,9 @@ fn stepNode(
             try finishNonChildNode(ctx, quest_id, node, push_updates);
             return .completed;
         }
+        if (node.parent_id != 0 and total_children > 0 and (total_children - failed_count) < needed) {
+            return .failed;
+        }
         return .running;
     } else if (std.mem.eql(u8, node.node_type, "AlwaysFalse")) {
         for (nodes) |child| {
@@ -2798,42 +3238,72 @@ fn stepNode(
         }
         return .running;
     } else if (std.mem.eql(u8, node.node_type, "AlwaysTrue")) {
+        for (nodes) |child| {
+            if (child.parent_id != node.id) continue;
+            const res = try stepNode(ctx, quest_id, nodes, child, push_updates, steps);
+            if (res == .quest_ended) return .quest_ended;
+            if (res == .running) return .running;
+        }
         try finishNonChildNode(ctx, quest_id, node, push_updates);
         return .completed;
     } else if (std.mem.eql(u8, node.node_type, "QuestSucceed")) {
+        if (push_updates) {
+            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateNodeStatusNotify{
+                .TreeOwnerId = quest_id,
+                .TreeIncId = quest_id,
+                .NodeId = node.id,
+                .Status = .CompletedSuccess,
+            }) catch {};
+            if (node.data == .object) {
+                if (node.data.object.get("FinishActions")) |acts_val| {
+                    if (acts_val == .array and acts_val.array.items.len > 0) {
+                        pushBtLevelEvents(ctx, quest_id, node.id, .SuccessNodeAction, acts_val.array.items) catch {};
+                    }
+                }
+            }
+        }
         try runNodeFinishEffects(ctx, quest_id, node);
         try succeedQuest(ctx, quest_id);
         return .quest_ended;
     } else if (std.mem.eql(u8, node.node_type, "QuestFailed")) {
-        // Non-blocking fail monitor unless explicitly failed
-        return .running;
-    } else if (std.mem.eql(u8, node.node_type, "Action")) {
+        return try stepQuestFailedNode(ctx, quest_id, nodes, node, push_updates);
+    } else if (std.mem.eql(u8, node.node_type, "Action") or std.mem.eql(u8, node.node_type, "ActionWithResult")) {
         if (node.data == .object) {
-            if (node.data.object.get("Actions")) |acts_val| {
-                if (acts_val == .array) {
-                    try executeActions(ctx, quest_id, node.id, acts_val.array.items);
-                    if (push_updates and acts_val.array.items.len > 0) {
-                        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateNodeStatusNotify{
-                            .TreeOwnerId = quest_id,
-                            .TreeIncId = quest_id,
-                            .NodeId = node.id,
-                            .Status = .Activate,
-                        });
-                        try pushBtLevelEvents(
-                            ctx,
-                            quest_id,
-                            node.id,
-                            .ActionGroupNodeAction,
-                            acts_val.array.items,
-                        );
-                    }
-                    if (ctx.scene) |scene| {
-                        if (scene.active_flow_inc_id != 0 and
-                            scene.active_flow_quest_id == quest_id and
-                            scene.active_flow_node_id == node.id)
-                        {
-                            return .running;
-                        }
+            var single_buf: [1]std.json.Value = undefined;
+            const action_items: ?[]const std.json.Value = if (node.data.object.get("Actions")) |acts_val|
+                (if (acts_val == .array) acts_val.array.items else null)
+            else if (node.data.object.get("Action")) |single_act| blk: {
+                if (single_act != .object) break :blk null;
+                single_buf[0] = single_act;
+                break :blk single_buf[0..1];
+            } else null;
+            if (action_items) |items| {
+                if (push_updates and items.len > 0) {
+                    try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateNodeStatusNotify{
+                        .TreeOwnerId = quest_id,
+                        .TreeIncId = quest_id,
+                        .NodeId = node.id,
+                        .Status = .Activate,
+                    });
+                }
+                try executeActions(ctx, quest_id, node.id, items);
+                if (push_updates and items.len > 0) {
+                    try pushBtLevelEvents(
+                        ctx,
+                        quest_id,
+                        node.id,
+                        .ActionGroupNodeAction,
+                        items,
+                    );
+                }
+                if (ctx.scene) |scene| {
+                    if (!hasAsyncPlayFlowAction(items) and
+                        ((scene.active_flow_inc_id != 0 and
+                        scene.active_flow_quest_id == quest_id and
+                        scene.active_flow_node_id == node.id) or
+                        scene.hasPendingFlowForNode(quest_id, node.id)))
+                    {
+                        return .running;
                     }
                 }
             }
@@ -2852,11 +3322,11 @@ fn stepNode(
                 true
         else
             true;
-        if (ok or !wait_true) {
+        if (ok) {
             try finishNonChildNode(ctx, quest_id, node, push_updates);
             return .completed;
         }
-        return .running;
+        return if (wait_true) .running else .failed;
     } else if (std.mem.eql(u8, node.node_type, "ConditionSelector")) {
         var selected_child_id: ?i32 = null;
         if (node.data == .object) {
@@ -2910,6 +3380,7 @@ fn stepNode(
                     child_completed = true;
                     break;
                 }
+                if (res == .failed) return .running;
                 return .running;
             }
             if (!any_child or !child_completed) break;
@@ -2956,6 +3427,14 @@ fn stepChildQuest(
     }
 
     return .running;
+}
+
+pub fn nowMsPub(io: std.Io) i64 {
+    return nowMs(io);
+}
+
+pub fn parseTimerDelayMsPub(cond: std.json.ObjectMap) ?i64 {
+    return parseTimerDelayMs(cond);
 }
 
 fn nowMs(io: std.Io) i64 {
@@ -3011,9 +3490,12 @@ fn ensureActiveQuestTimersScheduled(ctx: QuestContext) !void {
             }
         }
     }
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        try LevelPlayHelper.ensureActiveTimersScheduled(lp_ctx);
+    }
 }
 
-/// Fires due `Timer`/`WaitTime` child quest nodes and advances their quest trees.
+/// Fires due `Timer`/`WaitTime` child quest, LevelPlay timer, and `QuestFailed` deadline nodes.
 pub fn onTimersDue(ctx: QuestContext, now_ms: i64) !void {
     const scene = ctx.scene orelse return;
     var progressed = false;
@@ -3025,6 +3507,29 @@ pub fn onTimersDue(ctx: QuestContext, now_ms: i64) !void {
         const node = findNodeById(nodes, due.node_id) orelse continue;
         try completeChildQuest(ctx, due.quest_id, nodes, node.*);
         progressed = true;
+    }
+
+    while (scene.lp_timers.popDue(now_ms)) |due| {
+        if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+            if (try LevelPlayHelper.onTimerDue(lp_ctx, due.quest_id, due.node_id)) {
+                progressed = true;
+            }
+        }
+    }
+
+    while (scene.fail_timers.popDue(now_ms)) |due| {
+        if (ctx.quest_comp.info.hasActiveQuest(due.quest_id)) {
+            try rollbackQuestToNode(ctx, due.quest_id, due.node_id, .TimeoutFail, false);
+            progressed = true;
+        }
+    }
+
+    while (scene.lp_fail_timers.popDue(now_ms)) |due| {
+        if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+            if (try LevelPlayHelper.onFailTimerDue(lp_ctx, due.quest_id, due.node_id)) {
+                progressed = true;
+            }
+        }
     }
 
     if (progressed) {
@@ -3346,6 +3851,9 @@ fn finishNonChildNode(
     node: LazyNodeStore.NodeEntry,
     push_updates: bool,
 ) !void {
+    if (ctx.scene) |scene| {
+        scene.releaseOccupationsForNode(ctx.alloc.gpa, quest_id, node.id);
+    }
     if (node.reward_id > 0) {
         _ = try RewardService.grantDropPackage(makeRewardContext(ctx), node.reward_id, 6003);
     }
@@ -3362,6 +3870,18 @@ fn finishNonChildNode(
         }) catch {};
     }
 
+    if (node.data == .object) {
+        if (node.data.object.get("OccupationConfig")) |occ_val| {
+            if (occ_val == .object) {
+                if (occ_val.object.get("ExitActions")) |exit_acts| {
+                    if (exit_acts == .array and exit_acts.array.items.len > 0) {
+                        try executeActions(ctx, quest_id, node.id, exit_acts.array.items);
+                    }
+                }
+            }
+        }
+    }
+
     try runNodeFinishEffects(ctx, quest_id, node);
 }
 
@@ -3375,10 +3895,599 @@ fn runNodeFinishEffects(ctx: QuestContext, quest_id: i32, node: LazyNodeStore.No
     }
 }
 
+pub fn checkNodeOccupationAndSavePub(
+    ctx: QuestContext,
+    bt_type: pb.BtType,
+    owner_id: i32,
+    node: LazyNodeStore.NodeEntry,
+    push_updates: bool,
+) !bool {
+    return (try checkNodeOccupationAndSave(ctx, bt_type, owner_id, node, push_updates)) != null;
+}
+
+pub fn evalQuestFailedConditionPub(
+    ctx: QuestContext,
+    owner_id: i32,
+    node: LazyNodeStore.NodeEntry,
+    player_pos_opt: ?[3]f32,
+    fail_queue: *Scene.QuestTimerQueue,
+) !?pb.FailReason {
+    return evalQuestFailedCondition(ctx, owner_id, node, player_pos_opt, fail_queue);
+}
+
+fn checkNodeOccupationAndSave(
+    ctx: QuestContext,
+    bt_type: pb.BtType,
+    quest_id: i32,
+    node: LazyNodeStore.NodeEntry,
+    push_updates: bool,
+) !?StepResult {
+    const scene = ctx.scene orelse return null;
+    if (node.data != .object) return null;
+
+    if (node.data.object.get("OccupationConfig")) |occ_val| {
+        if (occ_val == .object) {
+            const reclaim = jsonBool(occ_val.object.get("ReclaimOccupationWhenEnter")) orelse false;
+            if (occ_val.object.get("Occupations")) |occ_list_val| {
+                if (occ_list_val == .array and occ_list_val.array.items.len > 0) {
+                    var conflicts: std.ArrayList(pb.OccupationPbInfo) = .empty;
+                    for (occ_list_val.array.items) |item| {
+                        const res_name = jsonStr(item) orelse continue;
+                        if (!reclaim) {
+                            if (scene.findOccupationConflict(res_name, quest_id, quest_id)) |conf| {
+                                try conflicts.append(ctx.alloc.arena, .{
+                                    .ResourceName = conf.resource_name,
+                                    .NodeId = conf.node_id,
+                                    .IncId = conf.inc_id,
+                                });
+                            }
+                        }
+                    }
+                    if (conflicts.items.len > 0) {
+                        if (push_updates) {
+                            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BtSuspendNotify{
+                                .NodeId = node.id,
+                                .SuspendType = @intFromEnum(pb.SuspendType.Occupation),
+                                .OccupationInfo = conflicts,
+                                .TreeOwnerId = quest_id,
+                                .TreeIncId = quest_id,
+                                .IsScreenOccupy = false,
+                            }) catch {};
+                        }
+                        return .running;
+                    }
+                    for (occ_list_val.array.items) |item| {
+                        const res_name = jsonStr(item) orelse continue;
+                        try scene.upsertOccupation(ctx.alloc.gpa, bt_type, quest_id, quest_id, node.id, res_name);
+                    }
+                }
+            }
+        }
+    }
+
+    if (node.data.object.get("SaveConfig")) |save_val| {
+        if (save_val == .object) {
+            if (try scene.markSaveNodeEntered(ctx.alloc.gpa, quest_id, node.id)) {
+                var cbs = actionCallbacks();
+                cbs.bt_type = bt_type;
+                if (save_val.object.get("InitConditionActions")) |init_acts| {
+                    if (init_acts == .array and init_acts.array.items.len > 0) {
+                        try QuestActions.executeActionList(ctx, cbs, quest_id, node.id, init_acts.array.items);
+                    }
+                }
+                if (save_val.object.get("EnterActions")) |enter_acts| {
+                    if (enter_acts == .array and enter_acts.array.items.len > 0) {
+                        try QuestActions.executeActionList(ctx, cbs, quest_id, node.id, enter_acts.array.items);
+                    }
+                }
+            }
+        }
+    }
+
+    return null;
+}
+
+fn evalQuestFailedCondition(
+    ctx: QuestContext,
+    quest_id: i32,
+    node: LazyNodeStore.NodeEntry,
+    player_pos_opt: ?[3]f32,
+    fail_queue: *Scene.QuestTimerQueue,
+) !?pb.FailReason {
+    if (node.data != .object) return null;
+    const fc_val = node.data.object.get("FailedCondition") orelse return null;
+    if (fc_val != .object) return null;
+    const fc = fc_val.object;
+
+    if (fc.get("Timer")) |tval| {
+        if (tval == .object) {
+            const secs = jsonFloat(tval.object.get("Time")) orelse 0;
+            if (std.math.isFinite(secs) and secs > 0) {
+                if (!fail_queue.contains(quest_id, node.id)) {
+                    const delay_ms: i64 = @intFromFloat(@round(@as(f64, secs) * 1000.0));
+                    try fail_queue.upsert(ctx.alloc.gpa, .{
+                        .quest_id = quest_id,
+                        .node_id = node.id,
+                        .due_ms = nowMs(ctx.io) + delay_ms,
+                    });
+                }
+            }
+        }
+    }
+
+    if (fc.get("RangeLimiting")) |rl_val| {
+        if (rl_val == .object) {
+            const pt_obj = if (rl_val.object.get("Point")) |p| (if (p == .object) p.object else null) else null;
+            const range = jsonFloat(rl_val.object.get("Range")) orelse 0;
+            if (pt_obj != null and range > 0) {
+                const px = jsonFloat(pt_obj.?.get("X")) orelse 0;
+                const py = jsonFloat(pt_obj.?.get("Y")) orelse 0;
+                const pz = jsonFloat(pt_obj.?.get("Z")) orelse 0;
+                // Skip placeholder (0,0,0) anchors that are only populated when bound to an entity
+                if (px != 0 or py != 0 or pz != 0) {
+                    const ppos_opt = player_pos_opt orelse ConditionEvaluator.currentPlayerPos3D(makeEvalContextForQuest(ctx, quest_id));
+                    if (ppos_opt) |ppos| {
+                        const dx = ppos[0] - px;
+                        const dy = ppos[1] - py;
+                        const dz = ppos[2] - pz;
+                        const inside = (dx * dx + dy * dy + dz * dz) <= (range * range);
+                        if (ctx.scene) |scene| {
+                            const entered_marker_id = node.id + 1_000_000_000;
+                            if (inside) {
+                                _ = try scene.markSaveNodeEntered(ctx.alloc.gpa, quest_id, entered_marker_id);
+                                if (rl_val.object.get("OverRangeCountdown") != null) {
+                                    fail_queue.cancel(quest_id, node.id);
+                                }
+                            } else if (scene.hasSaveNodeEntered(quest_id, entered_marker_id)) {
+                                const countdown = jsonFloat(rl_val.object.get("OverRangeCountdown")) orelse 0;
+                                if (countdown > 0) {
+                                    if (!fail_queue.contains(quest_id, node.id)) {
+                                        const delay_ms: i64 = @intFromFloat(@round(@as(f64, countdown) * 1000.0));
+                                        try fail_queue.upsert(ctx.alloc.gpa, .{
+                                            .quest_id = quest_id,
+                                            .node_id = node.id,
+                                            .due_ms = nowMs(ctx.io) + delay_ms,
+                                        });
+                                    }
+                                } else {
+                                    return .OutRangeFail;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (fc.get("CompareVar")) |cv_val| {
+        if (cv_val == .object and evalCompareVarList(ctx, cv_val.object)) {
+            return .CompareVarFail;
+        }
+    }
+
+    if (fc.get("EntityDistanceLimiting")) |edl_val| {
+        if (edl_val == .object) {
+            const target_eid = jsonInt(edl_val.object.get("EntityId")) orelse 0;
+            const max_dist = jsonFloat(edl_val.object.get("MaxDistance")) orelse 0;
+            if (target_eid > 0 and max_dist > 0) {
+                const ppos_opt = player_pos_opt orelse ConditionEvaluator.currentPlayerPos3D(makeEvalContextForQuest(ctx, quest_id));
+                const epos_opt = resolveSceneOrAssetEntityPos3D(ctx, target_eid);
+                if (ppos_opt != null and epos_opt != null) {
+                    const ppos = ppos_opt.?;
+                    const epos = epos_opt.?;
+                    const dx = ppos[0] - epos[0];
+                    const dy = ppos[1] - epos[1];
+                    const dz = ppos[2] - epos[2];
+                    const inside = (dx * dx + dy * dy + dz * dz) <= (max_dist * max_dist);
+                    if (ctx.scene) |scene| {
+                        const entered_marker_id = node.id + 1_500_000_000;
+                        if (inside) {
+                            _ = try scene.markSaveNodeEntered(ctx.alloc.gpa, quest_id, entered_marker_id);
+                            if (edl_val.object.get("OverMaxCountdown") != null) {
+                                fail_queue.cancel(quest_id, node.id);
+                            }
+                        } else if (scene.hasSaveNodeEntered(quest_id, entered_marker_id)) {
+                            const countdown = jsonFloat(edl_val.object.get("OverMaxCountdown")) orelse 0;
+                            if (countdown > 0) {
+                                if (!fail_queue.contains(quest_id, node.id)) {
+                                    const delay_ms: i64 = @intFromFloat(@round(@as(f64, countdown) * 1000.0));
+                                    try fail_queue.upsert(ctx.alloc.gpa, .{
+                                        .quest_id = quest_id,
+                                        .node_id = node.id,
+                                        .due_ms = nowMs(ctx.io) + delay_ms,
+                                    });
+                                }
+                            } else {
+                                return .OutRangeFail;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (fc.get("EntityDeathCondition")) |edc_val| {
+        if (edc_val == .object) {
+            if (edc_val.object.get("EntityIds")) |eids_val| {
+                if (eids_val == .array) {
+                    const aq_opt = ctx.quest_comp.info.findActiveQuest(quest_id);
+                    for (eids_val.array.items) |v| {
+                        const eid = jsonInt(v) orelse continue;
+                        if (eid <= 0) continue;
+                        if (aq_opt) |aq| {
+                            if (QuestInfo.hasKilledEntity(aq, eid)) return .EntityDieFail;
+                        }
+                        if (entityHpPercent(ctx, eid)) |hp_pct| {
+                            if (hp_pct <= 0.0) return .EntityDieFail;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (fc.get("EntityStateCondition")) |esc_val| {
+        if (esc_val == .object) {
+            if (esc_val.object.get("Conditions")) |conds_val| {
+                if (conds_val == .array) {
+                    for (conds_val.array.items) |item| {
+                        if (item != .object) continue;
+                        const eid = jsonInt(item.object.get("EntityId")) orelse continue;
+                        const want_state = jsonStr(item.object.get("State")) orelse continue;
+                        if (eid > 0 and entityHasStateTag(ctx, eid, want_state)) {
+                            return .EntityStateFail;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (fc.get("CheckDataLayer")) |dl_val| {
+        if (dl_val == .object) {
+            const dl_id = jsonInt(dl_val.object.get("DataLayerId")) orelse 0;
+            if (dl_id > 0) {
+                const want_load = jsonBool(dl_val.object.get("IsLoad")) orelse true;
+                const is_loaded = QuestInfo.containsInt(ctx.quest_comp.info.world.loaded_datalayers, dl_id) and
+                    !QuestInfo.containsInt(ctx.quest_comp.info.world.unloaded_datalayers, dl_id);
+                if (is_loaded == want_load) return .DataLayerFail;
+            }
+        }
+    }
+
+    if (fc.get("TimeRange")) |tr_val| {
+        if (tr_val == .object) {
+            const st_obj = if (tr_val.object.get("StartTime")) |v| (if (v == .object) v.object else null) else null;
+            const et_obj = if (tr_val.object.get("EndTime")) |v| (if (v == .object) v.object else null) else null;
+            if (st_obj != null and et_obj != null) {
+                const sh = jsonInt(st_obj.?.get("Hours")) orelse 0;
+                const sm = jsonInt(st_obj.?.get("Minutes")) orelse 0;
+                const eh = jsonInt(et_obj.?.get("Hours")) orelse 0;
+                const em = jsonInt(et_obj.?.get("Minutes")) orelse 0;
+                const start_m = sh * 60 + sm;
+                const end_m = eh * 60 + em;
+                if (start_m != end_m) {
+                    const ch: i32 = if (ctx.quest_comp.info.env.time_locked)
+                        ctx.quest_comp.info.env.time_lock_hour
+                    else if (ctx.scene) |s|
+                        s.instance.map_time.hour
+                    else
+                        ctx.quest_comp.info.env.time_lock_hour;
+                    const cm: i32 = if (ctx.quest_comp.info.env.time_locked)
+                        ctx.quest_comp.info.env.time_lock_minute
+                    else if (ctx.scene) |s|
+                        s.instance.map_time.minute
+                    else
+                        ctx.quest_comp.info.env.time_lock_minute;
+                    const cur_m = ch * 60 + cm;
+                    const in_window = if (start_m < end_m)
+                        (cur_m >= start_m and cur_m <= end_m)
+                    else
+                        (cur_m >= start_m or cur_m <= end_m);
+                    if (!in_window) return .TimeRange;
+                }
+            }
+        }
+    }
+
+    if (fc.get("PlayerMotionStateCondition")) |pm_val| {
+        if (pm_val == .object) {
+            if (ctx.scene) |scene| {
+                if (scene.has_player_motion) {
+                    const motion = jsonStr(pm_val.object.get("MotionState")) orelse "";
+                    const cmp = jsonStr(pm_val.object.get("Compare")) orelse "Eq";
+                    if (ConditionEvaluator.evalPlayerMotionState(makeEvalContextForQuest(ctx, quest_id), motion)) |matched| {
+                        const fail = if (std.mem.eql(u8, cmp, "Ne") or std.mem.eql(u8, cmp, "NotEq")) !matched else matched;
+                        if (fail) return .PlayerMotionState;
+                    }
+                }
+            }
+        }
+    }
+
+    if (fc.get("PlayerMovementModeCondition")) |pmm_val| {
+        if (pmm_val == .object) {
+            if (ctx.scene) |scene| {
+                if (scene.has_player_movement_mode) {
+                    const mode = jsonStr(pmm_val.object.get("Mode")) orelse "";
+                    const cmp = jsonStr(pmm_val.object.get("Compare")) orelse "Eq";
+                    // Special modes (Rail, Ski, WingSuitFly) use UE custom movement modes (>= 5)
+                    const in_mode = if (std.mem.eql(u8, mode, "WingSuitFly"))
+                        (scene.player_movement_mode == 5 or scene.player_movement_mode >= 6)
+                    else if (std.mem.eql(u8, mode, "Rail") or std.mem.eql(u8, mode, "Ski"))
+                        (scene.player_movement_mode >= 6)
+                    else
+                        false;
+                    const fail = if (std.mem.eql(u8, cmp, "Ne") or std.mem.eql(u8, cmp, "NotEq")) !in_mode else in_mode;
+                    if (fail) return .PlayerLevelPlayMoveStateFail;
+                }
+            }
+        }
+    }
+
+    if (jsonBool(fc.get("IsTeamDeathFailure")) orelse false) {
+        if (ctx.scene) |scene| {
+            const form_idx = std.math.cast(usize, scene.formation_info.cur_formation);
+            if (form_idx) |fi| {
+                if (fi < scene.formation_info.formations.len) {
+                    const form = scene.formation_info.formations[fi];
+                    const cur_eid = scene.currentRoleEntityId();
+                    if (cur_eid > 0 and RoleHelper.formationLivingStatus(scene, form) == .Dead) {
+                        return .CharacterDieFail;
+                    }
+                }
+            }
+        }
+    }
+
+    return null;
+}
+
+fn resolveSceneOrAssetEntityPos3D(ctx: QuestContext, cfg_id: i32) ?[3]f32 {
+    if (cfg_id <= 0) return null;
+    if (ctx.scene) |scene| {
+        const slice = scene.entities.slice();
+        for (slice.items(.config), slice.items(.position)) |cfg, pos_opt| {
+            if (cfg.config_id == cfg_id) {
+                if (pos_opt) |p| return p.location;
+            }
+        }
+        if (ctx.assets.findLevelEntity(scene.instance_id, cfg_id)) |lcfg| {
+            if (Assets.AssetIndexes.entityWorldPos(lcfg)) |wp| return wp;
+        }
+    }
+    return null;
+}
+
+fn extendFailTimersOnKill(ctx: QuestContext) !bool {
+    const scene = ctx.scene orelse return false;
+    var extended = false;
+    const items = try ctx.alloc.arena.dupe(@TypeOf(scene.fail_timers.heap.items[0]), scene.fail_timers.heap.items);
+    for (items) |entry| {
+        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, entry.quest_id) catch continue;
+        const node = findNodeById(nodes, entry.node_id) orelse continue;
+        if (node.data != .object) continue;
+        const fc_val = node.data.object.get("FailedCondition") orelse continue;
+        if (fc_val != .object) continue;
+        const atc = fc_val.object.get("AddTimeConfig") orelse continue;
+        if (atc != .object) continue;
+        const mc = atc.object.get("MonsterConfig") orelse continue;
+        if (mc != .object) continue;
+        const add_secs = jsonFloat(mc.object.get("NormalAddTime")) orelse 0;
+        if (add_secs <= 0) continue;
+        const new_due = entry.due_ms + @as(i64, @intFromFloat(@round(@as(f64, add_secs) * 1000.0)));
+        try scene.fail_timers.upsert(ctx.alloc.gpa, .{
+            .quest_id = entry.quest_id,
+            .node_id = entry.node_id,
+            .due_ms = new_due,
+        });
+        extended = true;
+    }
+    return extended;
+}
+
+fn extendFailTimersOnEntityState(ctx: QuestContext, entity_config_id: i32, state_name: []const u8) !bool {
+    const scene = ctx.scene orelse return false;
+    var extended = false;
+    const items = try ctx.alloc.arena.dupe(@TypeOf(scene.fail_timers.heap.items[0]), scene.fail_timers.heap.items);
+    for (items) |entry| {
+        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, entry.quest_id) catch continue;
+        const node = findNodeById(nodes, entry.node_id) orelse continue;
+        if (node.data != .object) continue;
+        const fc_val = node.data.object.get("FailedCondition") orelse continue;
+        if (fc_val != .object) continue;
+        const atc = fc_val.object.get("AddTimeConfig") orelse continue;
+        if (atc != .object) continue;
+        const sc_list = atc.object.get("StateConfig") orelse continue;
+        if (sc_list != .array) continue;
+        var add_secs: f32 = 0;
+        for (sc_list.array.items) |sc_item| {
+            if (sc_item != .object) continue;
+            const cond = sc_item.object.get("Condition") orelse continue;
+            if (cond != .object) continue;
+            const eid = jsonInt(cond.object.get("EntityId")) orelse 0;
+            const want_st = jsonStr(cond.object.get("State")) orelse "";
+            if ((eid == 0 or eid == entity_config_id) and (want_st.len == 0 or std.mem.eql(u8, want_st, state_name))) {
+                add_secs += jsonFloat(sc_item.object.get("AddTime")) orelse 0;
+            }
+        }
+        if (add_secs <= 0) continue;
+        const new_due = entry.due_ms + @as(i64, @intFromFloat(@round(@as(f64, add_secs) * 1000.0)));
+        try scene.fail_timers.upsert(ctx.alloc.gpa, .{
+            .quest_id = entry.quest_id,
+            .node_id = entry.node_id,
+            .due_ms = new_due,
+        });
+        extended = true;
+    }
+    return extended;
+}
+
+fn stepQuestFailedNode(
+    ctx: QuestContext,
+    quest_id: i32,
+    nodes: []const LazyNodeStore.NodeEntry,
+    node: LazyNodeStore.NodeEntry,
+    push_updates: bool,
+) !StepResult {
+    _ = nodes;
+    const scene = ctx.scene orelse return .running;
+    if (try evalQuestFailedCondition(ctx, quest_id, node, null, &scene.fail_timers)) |reason| {
+        try rollbackQuestToNode(ctx, quest_id, node.id, reason, !push_updates);
+        return if (ctx.quest_comp.info.hasActiveQuest(quest_id)) .running else .quest_ended;
+    }
+    return .running;
+}
+
+fn isSubtreeActiveForMonitor(
+    nodes: []const LazyNodeStore.NodeEntry,
+    active_nodes: []const i32,
+    parent_id: i32,
+) bool {
+    if (parent_id <= 0) return true;
+    for (active_nodes) |nid| {
+        var cur = nid;
+        var hops: usize = 0;
+        while (cur > 0 and hops < 32) : (hops += 1) {
+            if (cur == parent_id) return true;
+            const n = findNodeById(nodes, cur) orelse break;
+            cur = n.parent_id;
+        }
+    }
+    return false;
+}
+
+fn checkActiveQuestFailedMonitors(ctx: QuestContext, pos_opt: ?[3]f32) !bool {
+    const aq_snapshot = try ctx.alloc.arena.dupe(QuestInfo.ActiveQuest, ctx.quest_comp.info.active_quests);
+    var changed = false;
+    for (aq_snapshot) |aq| {
+        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, aq.quest_id) catch continue;
+        for (nodes) |node| {
+            if (!std.mem.eql(u8, node.node_type, "QuestFailed")) continue;
+            if (QuestInfo.isNodeFinished(aq, node.id)) continue;
+            if (!isSubtreeActiveForMonitor(nodes, aq.active_nodes, node.parent_id)) continue;
+            if (try evalQuestFailedCondition(ctx, aq.quest_id, node, pos_opt, if (ctx.scene) |s| &s.fail_timers else return false)) |reason| {
+                try rollbackQuestToNode(ctx, aq.quest_id, node.id, reason, false);
+                changed = true;
+                break;
+            }
+        }
+    }
+    return changed;
+}
+
+fn rollbackQuestToNode(
+    ctx: QuestContext,
+    quest_id: i32,
+    fail_node_id: i32,
+    reason: pb.FailReason,
+    client_initiated: bool,
+) anyerror!void {
+    const aq_ptr = ctx.quest_comp.info.findActiveQuestPtr(quest_id) orelse return;
+    const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, quest_id) catch return;
+
+    if (ctx.scene) |scene| {
+        scene.quest_timers.cancelQuest(quest_id);
+        scene.fail_timers.cancelQuest(quest_id);
+        scene.releaseOccupationsForTree(ctx.alloc.gpa, quest_id, quest_id);
+        scene.clearSaveNodesForOwner(quest_id);
+        _ = interruptActiveFlowForQuest(ctx, quest_id);
+    }
+
+    var has_pos_rollback = false;
+    var fail_node_opt: ?*const LazyNodeStore.NodeEntry = null;
+    if (fail_node_id > 0) {
+        fail_node_opt = findNodeById(nodes, fail_node_id);
+        if (fail_node_opt) |fn_entry| {
+            if (fn_entry.data == .object) {
+                if (fn_entry.data.object.get("FailedCondition")) |fc_val| {
+                    if (fc_val == .object and fc_val.object.get("FailedTeleport") != null) {
+                        has_pos_rollback = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!client_initiated) {
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BtRollbackStartNotify{
+            .TreeOwnerId = quest_id,
+            .TreeIncId = quest_id,
+            .IsRollbackSubLevel = false,
+            .IsRollbackPos = has_pos_rollback,
+        }) catch {};
+
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BtRollbackNotify{
+            .TreeOwnerId = quest_id,
+            .TreeIncId = quest_id,
+            .FailNodeId = fail_node_id,
+            .FailReason = reason,
+            .BtRollbackInfo = .{
+                .FailRollbackData = .{
+                    .FailNodeId = fail_node_id,
+                    .FailReason = reason,
+                },
+            },
+        }) catch {};
+    }
+
+    if (fail_node_opt) |fn_entry| {
+        try runNodeFinishEffects(ctx, quest_id, fn_entry.*);
+    }
+
+    // Find latest finished SaveConfig node to preserve prior progress; clear post-checkpoint state
+    var latest_ckpt_id: i32 = 0;
+    for (aq_ptr.finished_nodes) |fid| {
+        const fnode = findNodeById(nodes, fid) orelse continue;
+        if (fnode.data == .object and fnode.data.object.get("SaveConfig") != null) {
+            if (fid > latest_ckpt_id) latest_ckpt_id = fid;
+        }
+    }
+
+    const active_copy = try ctx.alloc.arena.dupe(i32, aq_ptr.active_nodes);
+    for (active_copy) |aid| {
+        removeDoInteractOptionsForNode(ctx, quest_id, aid);
+        _ = try QuestInfo.markNodeInactive(aq_ptr, ctx.alloc.gpa, aid);
+    }
+    if (latest_ckpt_id > 0) {
+        const fin_copy = try ctx.alloc.arena.dupe(i32, aq_ptr.finished_nodes);
+        for (fin_copy) |fid| {
+            if (fid >= latest_ckpt_id) {
+                _ = try QuestInfo.removeIntValue(&aq_ptr.finished_nodes, ctx.alloc.gpa, fid);
+            }
+        }
+    } else {
+        while (aq_ptr.finished_nodes.len > 0) {
+            _ = try QuestInfo.removeIntValue(&aq_ptr.finished_nodes, ctx.alloc.gpa, aq_ptr.finished_nodes[aq_ptr.finished_nodes.len - 1]);
+        }
+    }
+
+    const tree_info = try buildTreeInfo(ctx, aq_ptr.*);
+    ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BtRollbackInfoNotify{
+        .TreeOwnerId = quest_id,
+        .TreeIncId = quest_id,
+        .TreeInfo = tree_info,
+    }) catch {};
+
+    ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestRollBackEndNotify{
+        .TreeIncId = quest_id,
+        .QuestId = quest_id,
+    }) catch {};
+
+    try advanceQuestTree(ctx, quest_id, true);
+}
+
 fn succeedQuest(ctx: QuestContext, quest_id: i32) anyerror!void {
     if (quest_transition_depth >= max_transition_depth) return;
     if (!ctx.quest_comp.info.hasActiveQuest(quest_id)) return;
-    if (ctx.scene) |scene| scene.quest_timers.cancelQuest(quest_id);
+    if (ctx.scene) |scene| {
+        scene.quest_timers.cancelQuest(quest_id);
+        scene.fail_timers.cancelQuest(quest_id);
+        scene.releaseOccupationsForTree(ctx.alloc.gpa, quest_id, quest_id);
+        scene.clearSaveNodesForOwner(quest_id);
+    }
 
     quest_transition_depth += 1;
     defer quest_transition_depth -= 1;
@@ -3426,7 +4535,11 @@ fn deactivateSubtree(
     const aq_ptr = ctx.quest_comp.info.findActiveQuestPtr(quest_id) orelse return;
     for (nodes) |n| {
         if (n.parent_id != parent_id) continue;
-        if (ctx.scene) |scene| scene.quest_timers.cancel(quest_id, n.id);
+        if (ctx.scene) |scene| {
+            scene.quest_timers.cancel(quest_id, n.id);
+            scene.fail_timers.cancel(quest_id, n.id);
+            scene.releaseOccupationsForNode(ctx.alloc.gpa, quest_id, n.id);
+        }
         removeDoInteractOptionsForNode(ctx, quest_id, n.id);
         const was_active = try QuestInfo.markNodeInactive(aq_ptr, ctx.alloc.gpa, n.id);
         const is_child_quest = std.mem.eql(u8, n.node_type, "ChildQuest");
@@ -3613,6 +4726,21 @@ fn completeGuideById(ctx: QuestContext, guide_id: i32) anyerror!void {
     _ = try completeMatchingChildQuests(ctx, "Guide", "GuideGroupId", guide_id);
 }
 
+pub fn hasAsyncPlayFlowAction(items: []const std.json.Value) bool {
+    var saw_play_flow = false;
+    for (items) |act| {
+        if (act != .object) continue;
+        const name = jsonStr(act.object.get("Name")) orelse continue;
+        if (!std.mem.eql(u8, name, "PlayFlow")) continue;
+        saw_play_flow = true;
+        const pv = act.object.get("Params") orelse continue;
+        if (pv == .object) {
+            if (!(jsonBool(pv.object.get("Async")) orelse false)) return false;
+        } else return false;
+    }
+    return saw_play_flow;
+}
+
 fn startFlowFromObj(
     ctx: QuestContext,
     quest_id: i32,
@@ -3633,7 +4761,14 @@ fn startFlowWithMode(
     if (flow_name.len == 0) return;
     const flow_id = jsonInt(obj.get("FlowId")) orelse 1;
     const state_id = jsonInt(obj.get("StateId")) orelse 1;
-    try startFlowParams(ctx, quest_id, node_id, flow_name, flow_id, state_id, enqueue_if_busy);
+    const is_async = jsonBool(obj.get("Async")) orelse false;
+    const bt_type: pb.BtType = if (quest_id > 0 and
+        ctx.quest_comp.info.findActiveQuest(quest_id) == null and
+        ctx.assets.tables.level_play_data.getDataById(quest_id) != null)
+        .BtTypeLevelPlay
+    else
+        .BtTypeQuest;
+    try startFlowParamsBt(ctx, quest_id, node_id, bt_type, flow_name, flow_id, state_id, enqueue_if_busy, is_async);
 }
 
 fn startFlowParams(
@@ -3645,8 +4780,28 @@ fn startFlowParams(
     state_id: i32,
     enqueue_if_busy: bool,
 ) !void {
+    const bt_type: pb.BtType = if (quest_id > 0 and
+        ctx.quest_comp.info.findActiveQuest(quest_id) == null and
+        ctx.assets.tables.level_play_data.getDataById(quest_id) != null)
+        .BtTypeLevelPlay
+    else
+        .BtTypeQuest;
+    try startFlowParamsBt(ctx, quest_id, node_id, bt_type, flow_name, flow_id, state_id, enqueue_if_busy, false);
+}
+
+fn startFlowParamsBt(
+    ctx: QuestContext,
+    quest_id: i32,
+    node_id: i32,
+    bt_type: pb.BtType,
+    flow_name: []const u8,
+    flow_id: i32,
+    state_id: i32,
+    enqueue_if_busy: bool,
+    is_async: bool,
+) !void {
     if (ctx.scene) |scene| {
-        if (scene.active_flow_inc_id != 0) {
+        if (!is_async and scene.active_flow_inc_id != 0) {
             if (enqueue_if_busy) {
                 try scene.enqueuePendingFlow(ctx.alloc.gpa, quest_id, node_id, flow_name, flow_id, state_id);
             }
@@ -3655,8 +4810,13 @@ fn startFlowParams(
     }
 
     const inc_id = ctx.quest_comp.info.allocFlowIncId();
-    if (ctx.scene) |scene| {
-        try scene.setActiveFlow(ctx.alloc.gpa, inc_id, quest_id, node_id, flow_name, flow_id, state_id);
+    if (!is_async) {
+        if (ctx.scene) |scene| {
+            try scene.setActiveFlow(ctx.alloc.gpa, inc_id, quest_id, node_id, flow_name, flow_id, state_id);
+            scene.active_flow_bt_type = bt_type;
+            prepareFlowStateEntities(ctx, flow_name, flow_id, state_id);
+        }
+    } else if (ctx.scene != null) {
         prepareFlowStateEntities(ctx, flow_name, flow_id, state_id);
     }
 
@@ -3666,11 +4826,12 @@ fn startFlowParams(
         .FlowListName = flow_name,
         .FlowId = flow_id,
         .StateId = state_id,
+        .aAsync = is_async,
         .GameCtx = .{
             .CtxType = .BehaviorTree,
             .CtxInfo = .{ .BehaviorTree = .{
                 .IncId = bt_inc_id,
-                .BtType = .BtTypeQuest,
+                .BtType = bt_type,
                 .BtId = quest_id,
                 .NodeId = node_id,
             } },
@@ -4300,6 +5461,8 @@ fn isPlayFlowClientFlow(ctx: QuestContext, act: std.json.Value) bool {
 const client_executable_bt_actions = std.StaticStringMap(void).initComptime(.{
     .{ "AddTrialCharacter", {} },
     .{ "AdjustPlayerCamera", {} },
+    .{ "BvbPlayDialog", {} },
+    .{ "BvbPlayerOperationConstraint", {} },
     .{ "CameraLookAt", {} },
     .{ "ChangeEntityState", {} },
     .{ "ChangeNpcPerformState", {} },
@@ -4307,11 +5470,14 @@ const client_executable_bt_actions = std.StaticStringMap(void).initComptime(.{
     .{ "CharacterMoveToPoint", {} },
     .{ "ClientChangeTeamPosition", {} },
     .{ "ClientModifyTargetTag", {} },
+    .{ "ClientPreEnableSubLevels", {} },
     .{ "ClientSetPlayerPos", {} },
+    .{ "ClientSetSeasonState", {} },
     .{ "ClientUnlockAchievementSystemItem", {} },
     .{ "CommonTip", {} },
     .{ "CommonTip2", {} },
     .{ "CompleteGuide", {} },
+    .{ "DisableEntityLookAt", {} },
     .{ "DrinksRollRoleRequirement", {} },
     .{ "DriveMotorInSpecConfig", {} },
     .{ "EnableAI", {} },
@@ -4319,16 +5485,20 @@ const client_executable_bt_actions = std.StaticStringMap(void).initComptime(.{
     .{ "EnableClientFunction", {} },
     .{ "EnableEntityLookAt", {} },
     .{ "EnableHostility", {} },
+    .{ "EnableKey4Func", {} },
     .{ "EnableNearbyTracking", {} },
     .{ "EnableSplineMoveModel", {} },
+    .{ "EndCommonTip", {} },
     .{ "EnterMovieCamera", {} },
     .{ "EnterMovieMode", {} },
+    .{ "EnterOrbitalCamera", {} },
     .{ "EntityLookAt", {} },
     .{ "EntityTurnTo", {} },
     .{ "ExecClientBattleAction", {} },
     .{ "ExitDungeon", {} },
     .{ "ExitMovieCamera", {} },
     .{ "ExitMovieMode", {} },
+    .{ "ExitOrbitalCamera", {} },
     .{ "FadeInScreen", {} },
     .{ "FadeOutScreen", {} },
     .{ "FocusOnMapMark", {} },
@@ -4342,6 +5512,8 @@ const client_executable_bt_actions = std.StaticStringMap(void).initComptime(.{
     .{ "MoveWithSpline", {} },
     .{ "NewMoveWithSpline", {} },
     .{ "NpcLeisureInteract", {} },
+    .{ "OpenQte", {} },
+    .{ "OpenQuickHackSystem", {} },
     .{ "OpenSimpleGameplay", {} },
     .{ "OpenSystemBoard", {} },
     .{ "OpenSystemBoardWithReturn", {} },
@@ -4353,8 +5525,10 @@ const client_executable_bt_actions = std.StaticStringMap(void).initComptime(.{
     .{ "PlayEffect2", {} },
     .{ "PlayMontage", {} },
     .{ "PlayRegisteredMontage", {} },
+    .{ "PlayerInput", {} },
     .{ "PlayerLookAt", {} },
     .{ "PostAkEvent", {} },
+    .{ "Preload", {} },
     .{ "Prompt", {} },
     .{ "PromptQuestChapterUI", {} },
     .{ "RemoveNpcGroupPerform", {} },
@@ -4366,6 +5540,7 @@ const client_executable_bt_actions = std.StaticStringMap(void).initComptime(.{
     .{ "SetEntityClientVisibleSave", {} },
     .{ "SetNpcGroupPerform", {} },
     .{ "SetRegionConfig", {} },
+    .{ "SetSportsState", {} },
     .{ "SetSubScreenMode", {} },
     .{ "SetTimeScale", {} },
     .{ "SetWuYinQuState", {} },
@@ -4384,11 +5559,16 @@ const client_executable_bt_actions = std.StaticStringMap(void).initComptime(.{
     .{ "ToggleHighlightExploreUi", {} },
     .{ "ToggleMapMarkState", {} },
     .{ "ToggleScanSplineEffect", {} },
+    .{ "TrapDefenseChangeMiniMap", {} },
+    .{ "TrapDefensePlayerOperationConstraint", {} },
     .{ "TriggerCameraShake", {} },
     .{ "TriggerGamepadShake", {} },
+    .{ "TriggerSpecificScanEffect", {} },
     .{ "UnlockEntity", {} },
+    .{ "UsePhantomSkill", {} },
     .{ "VehicleMoveWithPathLine", {} },
     .{ "Wait", {} },
+    .{ "WaitBattleCondition", {} },
     .{ "WaitUntilLevelSequenceReachMark", {} },
 });
 
@@ -4437,18 +5617,35 @@ fn isSafeBtLeisureInteract(act: std.json.Value) bool {
     return false;
 }
 
-fn pushBtLevelEvents(
+pub fn evalInlineCondition(ctx: QuestContext, owner_id: i32, cb: std.json.Value) bool {
+    return ConditionEvaluator.evalInlineConditionBlock(makeEvalContextForQuest(ctx, owner_id), cb);
+}
+
+pub fn evalChildConditionAuto(ctx: QuestContext, owner_id: i32, node: LazyNodeStore.NodeEntry) bool {
+    return shouldAutoCompleteChildQuest(ctx, owner_id, node);
+}
+
+pub fn getChildConditionPub(data: std.json.Value) ?std.json.ObjectMap {
+    return getChildCondition(data);
+}
+
+pub fn nodeActionItemsPub(node_opt: ?*const LazyNodeStore.NodeEntry, field: []const u8) []const std.json.Value {
+    return nodeActionItems(node_opt, field);
+}
+
+pub fn pushBtLevelEventsForType(
     ctx: QuestContext,
-    quest_id: i32,
+    bt_type: pb.BtType,
+    owner_id: i32,
     node_id: i32,
     comptime ctx_type: pb.GameCtxType,
     actions: []const std.json.Value,
 ) !void {
     if (actions.len == 0) return;
     const bt_ctx: pb.BehaviorTreeCtxPb = .{
-        .IncId = quest_id,
-        .BtType = .BtTypeQuest,
-        .BtId = quest_id,
+        .IncId = owner_id,
+        .BtType = bt_type,
+        .BtId = owner_id,
         .NodeId = node_id,
     };
     const game_ctx: pb.GameCtxPb = switch (ctx_type) {
@@ -4464,6 +5661,10 @@ fn pushBtLevelEvents(
             .CtxType = .ActionGroupNodeAction,
             .CtxInfo = .{ .ActionGroupNodeAction = .{ .BehaviorTreeCtx = bt_ctx } },
         },
+        .SuccessNodeAction => .{
+            .CtxType = .SuccessNodeAction,
+            .CtxInfo = .{ .SuccessNodeAction = .{ .BehaviorTreeCtx = bt_ctx } },
+        },
         else => @compileError("unsupported BehaviorTree LevelEvent context"),
     };
     const total_count: i32 = @intCast(actions.len);
@@ -4478,13 +5679,23 @@ fn pushBtLevelEvents(
         const end_idx = i - 1;
         try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LevelEventNotify{
             .PlayerId = ctx.basic_comp.player_id,
-            .IncId = quest_id,
+            .IncId = owner_id,
             .GameCtx = game_ctx,
             .TotalCount = total_count,
             .StartIndex = @intCast(start_idx),
             .EndIndex = @intCast(end_idx),
         });
     }
+}
+
+fn pushBtLevelEvents(
+    ctx: QuestContext,
+    quest_id: i32,
+    node_id: i32,
+    comptime ctx_type: pb.GameCtxType,
+    actions: []const std.json.Value,
+) !void {
+    try pushBtLevelEventsForType(ctx, .BtTypeQuest, quest_id, node_id, ctx_type, actions);
 }
 
 fn resyncActiveNode(
@@ -4538,6 +5749,7 @@ pub fn syncDynamicInteractOptionsForEntity(
             try pushDoInteractOptionsForNode(scene, conn, alloc, io, aq.quest_id, node.*, cfg_id);
         }
     }
+    try LevelPlayHelper.syncDynamicInteractOptionsForEntity(scene, assets, conn, quest_info, null, alloc, io, cfg_id);
 }
 
 fn pushDoInteractOptionsForNode(
@@ -4549,6 +5761,19 @@ fn pushDoInteractOptionsForNode(
     node: LazyNodeStore.NodeEntry,
     filter_cfg_id: ?i64,
 ) !void {
+    try pushDoInteractOptionsForBtNode(scene, conn, alloc, io, .BtTypeQuest, quest_id, node, filter_cfg_id);
+}
+
+pub fn pushDoInteractOptionsForBtNode(
+    scene: *Scene,
+    conn: *Connection,
+    alloc: mem.Alloc,
+    io: std.Io,
+    bt_type: pb.BtType,
+    owner_id: i32,
+    node: LazyNodeStore.NodeEntry,
+    filter_cfg_id: ?i64,
+) !void {
     if (!std.mem.eql(u8, node.node_type, "ChildQuest")) return;
     const cond = getChildCondition(node.data) orelse return;
     const ctype = jsonStr(cond.get("Type")) orelse return;
@@ -4556,15 +5781,15 @@ fn pushDoInteractOptionsForNode(
         const add_opts = cond.get("AddOptions") orelse return;
         if (add_opts != .array) return;
         for (add_opts.array.items) |entry| {
-            try pushDynamicInteractEntry(scene, conn, alloc, io, quest_id, node.id, entry, filter_cfg_id);
+            try pushDynamicInteractEntry(scene, conn, alloc, io, bt_type, owner_id, node.id, entry, filter_cfg_id);
         }
     } else if (std.mem.eql(u8, ctype, "HandInItems")) {
         if (cond.get("AddOption")) |ao| {
-            try pushDynamicInteractEntry(scene, conn, alloc, io, quest_id, node.id, ao, filter_cfg_id);
+            try pushDynamicInteractEntry(scene, conn, alloc, io, bt_type, owner_id, node.id, ao, filter_cfg_id);
         } else if (cond.get("HandInItems")) |hi| {
             if (hi == .object) {
                 if (hi.object.get("AddOption")) |ao| {
-                    try pushDynamicInteractEntry(scene, conn, alloc, io, quest_id, node.id, ao, filter_cfg_id);
+                    try pushDynamicInteractEntry(scene, conn, alloc, io, bt_type, owner_id, node.id, ao, filter_cfg_id);
                 }
             }
         }
@@ -4576,6 +5801,7 @@ fn pushDynamicInteractEntry(
     conn: *Connection,
     alloc: mem.Alloc,
     io: std.Io,
+    bt_type: pb.BtType,
     quest_id: i32,
     node_id: i32,
     entry: std.json.Value,
@@ -4632,11 +5858,12 @@ fn pushDynamicInteractEntry(
         actions_json = "[]";
     }
 
-    try scene.upsertDynamicInteractOption(
+    try scene.upsertDynamicInteractOptionWithBt(
         alloc.gpa,
         guid,
         net_id,
         @intCast(cfg_id),
+        bt_type,
         quest_id,
         node_id,
         kind,
@@ -4651,7 +5878,7 @@ fn pushDynamicInteractEntry(
             .CtxType = .BehaviorTree,
             .CtxInfo = .{ .BehaviorTree = .{
                 .IncId = quest_id,
-                .BtType = .BtTypeQuest,
+                .BtType = bt_type,
                 .BtId = quest_id,
                 .NodeId = node_id,
             } },
@@ -4664,14 +5891,83 @@ fn pushDynamicInteractEntry(
 }
 
 fn removeDoInteractOptionsForNode(ctx: QuestContext, quest_id: i32, node_id: i32) void {
+    removeDoInteractOptionsForBtNode(ctx, .BtTypeQuest, quest_id, node_id);
+}
+
+pub fn removeDoInteractOptionsForBtNode(ctx: QuestContext, bt_type: pb.BtType, owner_id: i32, node_id: i32) void {
     const scene = ctx.scene orelse return;
-    const removed = scene.takeDynamicInteractOptionsForQuestNode(ctx.alloc.arena, quest_id, node_id) catch return;
+    const removed = scene.takeDynamicInteractOptionsForBtNode(ctx.alloc.arena, bt_type, owner_id, node_id) catch return;
     for (removed) |*opt| {
         defer opt.deinit(ctx.alloc.gpa);
         ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.EntityRemoveDynamicInteractNotify{
             .OptionGuid = opt.option_guid,
             .EntityId = opt.entity_net_id,
         }) catch {};
+    }
+}
+
+pub fn pushBtChildNodeStatus(
+    ctx: QuestContext,
+    bt_type: pb.BtType,
+    owner_id: i32,
+    node: *const LazyNodeStore.NodeEntry,
+    node_status: pb.NodeStatus,
+    child_status: pb.ChildQuestNodeStatus,
+) !void {
+    if (node_status == .Activate and child_status == .Progress) {
+        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateNodeStatusNotify{
+            .TreeOwnerId = owner_id,
+            .TreeIncId = owner_id,
+            .NodeId = node.id,
+            .Status = node_status,
+        });
+        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateChildQuestNodeStatusNotify{
+            .TreeOwnerId = owner_id,
+            .TreeIncId = owner_id,
+            .NodeId = node.id,
+            .Status = .Enter,
+        });
+        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateChildQuestNodeStatusNotify{
+            .TreeOwnerId = owner_id,
+            .TreeIncId = owner_id,
+            .NodeId = node.id,
+            .Status = .EnterAction,
+        });
+        try pushBtLevelEventsForType(ctx, bt_type, owner_id, node.id, .ChildQuestNodeEnterAction, nodeActionItems(node, "EnterActions"));
+        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateChildQuestNodeStatusNotify{
+            .TreeOwnerId = owner_id,
+            .TreeIncId = owner_id,
+            .NodeId = node.id,
+            .Status = child_status,
+        });
+    } else if (child_status == .Finished) {
+        // Client ServerNotifyAssistant crashes with KeyNotFoundException if UpdateChildQuestNodeStatusNotify sends CqnsFinishAction.
+        try pushBtLevelEventsForType(ctx, bt_type, owner_id, node.id, .ChildQuestNodeFinishAction, nodeActionItems(node, "FinishActions"));
+        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateChildQuestNodeStatusNotify{
+            .TreeOwnerId = owner_id,
+            .TreeIncId = owner_id,
+            .NodeId = node.id,
+            .Status = child_status,
+        });
+        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateNodeStatusNotify{
+            .TreeOwnerId = owner_id,
+            .TreeIncId = owner_id,
+            .NodeId = node.id,
+            .Status = node_status,
+        });
+    } else {
+        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateNodeStatusNotify{
+            .TreeOwnerId = owner_id,
+            .TreeIncId = owner_id,
+            .NodeId = node.id,
+            .Status = node_status,
+        });
+        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateChildQuestNodeStatusNotify{
+            .TreeOwnerId = owner_id,
+            .TreeIncId = owner_id,
+            .NodeId = node.id,
+            .Status = child_status,
+        });
     }
 }
 
@@ -5056,54 +6352,45 @@ fn matchesReachRoleOption(ctx: QuestContext, cond: std.json.ObjectMap) bool {
 
 fn checkReachEntityRange(ctx: QuestContext, eid: i32, check_pos: [3]f32, default_range: f32) bool {
     var ent_pos: ?[3]f32 = null;
+    var ent_rot: [3]f32 = .{ 0, 0, 0 };
     if (ctx.scene) |scene| {
         const slice = scene.entities.slice();
         for (slice.items(.config), slice.items(.position)) |cfg, pos_opt| {
             if (cfg.config_id == eid) {
                 if (pos_opt) |p| {
                     ent_pos = p.location;
+                    ent_rot = p.rotation;
                     break;
                 }
             }
         }
     }
-    var radius = default_range;
-    var box_size: ?[3]f32 = null;
-    var center_off: [3]f32 = .{ 0, 0, 0 };
+    var shape: @import("../../data/tables/entity_components/Range.zig").ShapeConfig = .{};
     if (ctx.scene) |scene| {
         if (ctx.assets.findLevelEntity(scene.instance_id, eid)) |lcfg| {
             if (ent_pos == null) {
                 ent_pos = Assets.AssetIndexes.entityWorldPos(lcfg);
+                ent_rot = Assets.AssetIndexes.entityWorldRot(lcfg);
             }
             const maybe_rc = lcfg.ComponentsData.RangeComponent orelse
                 if (ctx.assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| tpl.ComponentsData.RangeComponent else null;
             if (maybe_rc) |rc| {
-                if (rc.Shape) |shape| {
-                    if (shape.Center) |c| {
-                        center_off = .{ c.X orelse 0, c.Y orelse 0, c.Z orelse 0 };
-                    }
-                    if (shape.Size) |sz| {
-                        const sx = sz.X orelse 0;
-                        const sy = sz.Y orelse 0;
-                        const sz_v = sz.Z orelse 0;
-                        if (sx > 0 or sy > 0 or sz_v > 0) {
-                            box_size = .{ @max(sx, 100.0), @max(sy, 100.0), @max(sz_v, 100.0) };
-                        }
-                    } else if (shape.Radius) |r| {
-                        if (r > 0) radius = @max(r, 600.0);
-                    }
-                }
+                if (rc.Shape) |sh| shape = sh;
             }
         }
     }
     const base = ent_pos orelse return false;
-    const dx = check_pos[0] - (base[0] + center_off[0]);
-    const dy = check_pos[1] - (base[1] + center_off[1]);
-    const dz = @abs(check_pos[2] - (base[2] + center_off[2]));
-    if (box_size) |sz| {
-        return @abs(dx) <= sz[0] and @abs(dy) <= sz[1] and dz <= @max(sz[2], 3000.0);
-    }
-    return (dx * dx + dy * dy <= radius * radius) and (dz <= @max(radius, 3000.0));
+    return ConditionEvaluator.isPosInsideRangeShape(check_pos, base, ent_rot, shape, default_range, 600.0);
+}
+
+pub fn matchesReachAreaPub(
+    ctx: QuestContext,
+    quest_id: i32,
+    node_data: std.json.Value,
+    cond: std.json.ObjectMap,
+    pos: [3]f32,
+) bool {
+    return matchesReachArea(ctx, quest_id, node_data, cond, pos);
 }
 
 fn matchesReachArea(

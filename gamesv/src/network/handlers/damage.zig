@@ -313,6 +313,7 @@ fn killEntityDirect(
 
     if (cfg.entity_type == .player and cfg.config_type == .character) {
         persistRoleHp(scene, eid, role_comp, events, fs, alloc, true);
+        QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("killEntityDirectPlayer", err);
     } else if (cfg.entity_type != .player) {
         QuestEngine.onEntityKilled(qctx, eid, null) catch |err| QuestEngine.logHookErr("onEntityKilled", err);
         if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
@@ -442,7 +443,9 @@ pub fn RoleGoDownPush(
     conn: *Connection,
     io: std.Io,
     alloc: mem.Alloc,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const eid = activePlayerRoleEntityId(scene, common) orelse return;
     try conn.push(alloc.gpa, io, pb.RoleGoDownNotify{ .EntityId = eid });
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("RoleGoDown", err);
 }

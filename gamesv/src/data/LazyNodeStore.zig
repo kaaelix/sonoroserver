@@ -385,6 +385,112 @@ fn hasTeleportDungeonFinishAction(data: std.json.Value) bool {
     return false;
 }
 
+fn collectAwakeEntitiesFromActions(arena: Allocator, out: *std.ArrayListUnmanaged(i32), acts_opt: ?std.json.Value) !void {
+    const acts = acts_opt orelse return;
+    if (acts != .array) return;
+    for (acts.array.items) |act_val| {
+        if (act_val != .object) continue;
+        const nv = act_val.object.get("Name") orelse continue;
+        if (nv != .string or !std.mem.eql(u8, nv.string, "AwakeEntity")) continue;
+        const pv = act_val.object.get("Params") orelse continue;
+        if (pv != .object) continue;
+        if (pv.object.get("EntityId")) |ev| {
+            if (ev == .integer) {
+                if (std.math.cast(i32, ev.integer)) |eid| {
+                    if (eid > 0) try out.append(arena, eid);
+                }
+            }
+        }
+        if (pv.object.get("EntityIds")) |eids| {
+            if (eids == .array) {
+                for (eids.array.items) |ev| {
+                    if (ev == .integer) {
+                        if (std.math.cast(i32, ev.integer)) |eid| {
+                            if (eid > 0) try out.append(arena, eid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn jsonContainsEntityId(val: std.json.Value, target: i32) bool {
+    switch (val) {
+        .integer => |v| return v == target,
+        .object => |obj| {
+            var it = obj.iterator();
+            while (it.next()) |entry| {
+                if (std.mem.eql(u8, entry.key_ptr.*, "EntityId") or
+                    std.mem.eql(u8, entry.key_ptr.*, "EntityIds") or
+                    std.mem.eql(u8, entry.key_ptr.*, "TargetsToAwake") or
+                    std.mem.eql(u8, entry.key_ptr.*, "ExistTargets") or
+                    std.mem.eql(u8, entry.key_ptr.*, "RangeEntities"))
+                {
+                    if (jsonContainsEntityId(entry.value_ptr.*, target)) return true;
+                } else if (entry.value_ptr.* == .object or entry.value_ptr.* == .array) {
+                    if (jsonContainsEntityId(entry.value_ptr.*, target)) return true;
+                }
+            }
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                if (jsonContainsEntityId(item, target)) return true;
+            }
+        },
+        else => {},
+    }
+    return false;
+}
+
+fn collectSubtreeAwakenedEntities(
+    arena: Allocator,
+    nodes: []const NodeEntry,
+    root_id: i32,
+    out: *std.ArrayListUnmanaged(i32),
+) !void {
+    for (nodes) |n| {
+        if (n.id != root_id) continue;
+        if (std.mem.eql(u8, n.node_type, "AlwaysFalse")) return;
+        if (n.data == .object) {
+            try collectAwakeEntitiesFromActions(arena, out, n.data.object.get("EnterActions"));
+            try collectAwakeEntitiesFromActions(arena, out, n.data.object.get("Actions"));
+        }
+        break;
+    }
+    for (nodes) |child| {
+        if (child.parent_id == root_id and !std.mem.eql(u8, child.node_type, "AlwaysFalse")) {
+            try collectSubtreeAwakenedEntities(arena, nodes, child.id, out);
+        }
+    }
+}
+
+fn subtreeConditionReferencesAny(
+    nodes: []const NodeEntry,
+    root_id: i32,
+    targets: []const i32,
+) bool {
+    if (targets.len == 0) return false;
+    for (nodes) |n| {
+        if (n.id != root_id) continue;
+        if (std.mem.eql(u8, n.node_type, "AlwaysFalse")) return false;
+        if (n.data == .object) {
+            if (n.data.object.get("Condition")) |cond_val| {
+                for (targets) |tid| {
+                    if (jsonContainsEntityId(cond_val, tid)) return true;
+                }
+            }
+        }
+        break;
+    }
+    for (nodes) |child| {
+        if (child.parent_id == root_id and !std.mem.eql(u8, child.node_type, "AlwaysFalse")) {
+            if (subtreeConditionReferencesAny(nodes, child.id, targets)) return true;
+        }
+    }
+    return false;
+}
+
 fn isTerminalQuestNode(node_type: []const u8) bool {
     return std.mem.eql(u8, node_type, "QuestSucceed") or std.mem.eql(u8, node_type, "QuestFailed");
 }
@@ -595,6 +701,45 @@ fn normalizeSequenceChildOrder(arena: Allocator, owner_id: i32, nodes: []NodeEnt
                         try non_term.insert(arena, insert_idx, target);
                         k = insert_idx;
                     }
+                }
+
+                // 4) Within Sequence, if a later branch awakens an entity consumed by an earlier
+                //    branch's Condition (e.g. patched HideUi AwakeEntity/ReachArea before DoInteract),
+                //    move the producer branch before the consumer branch.
+                var pass_dep: usize = 0;
+                while (pass_dep < non_term.items.len) : (pass_dep += 1) {
+                    var moved_any = false;
+                    var j: usize = 1;
+                    while (j < non_term.items.len) : (j += 1) {
+                        var producer_eids: std.ArrayListUnmanaged(i32) = .empty;
+                        try collectSubtreeAwakenedEntities(arena, nodes, non_term.items[j].entry.id, &producer_eids);
+                        if (producer_eids.items.len == 0) continue;
+
+                        var earliest_consumer: ?usize = null;
+                        for (0..j) |i| {
+                            if (subtreeConditionReferencesAny(nodes, non_term.items[i].entry.id, producer_eids.items)) {
+                                var consumer_awakens: std.ArrayListUnmanaged(i32) = .empty;
+                                try collectSubtreeAwakenedEntities(arena, nodes, non_term.items[i].entry.id, &consumer_awakens);
+                                var self_awakened = false;
+                                for (producer_eids.items) |pe| {
+                                    if (std.mem.indexOfScalar(i32, consumer_awakens.items, pe) != null) {
+                                        self_awakened = true;
+                                        break;
+                                    }
+                                }
+                                if (!self_awakened) {
+                                    earliest_consumer = i;
+                                    break;
+                                }
+                            }
+                        }
+                        if (earliest_consumer) |dest_i| {
+                            const item = non_term.orderedRemove(j);
+                            try non_term.insert(arena, dest_i, item);
+                            moved_any = true;
+                        }
+                    }
+                    if (!moved_any) break;
                 }
             }
         }

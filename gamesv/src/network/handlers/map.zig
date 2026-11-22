@@ -657,10 +657,15 @@ fn trackRangeArea(
     out_results: *std.ArrayList(pb.MapEntry(i32, pb.ErrorCode)),
     progress_dirty: *bool,
 ) !void {
-    // AccessRangeResultType: Trigger=0, EffectArea=3, Range=5
+    // AccessRangeResultType: Trigger=0, Trample=1, DynamicPortal=2, EffectArea=3, AirPassage=4, Range=5, GravityFlip=6, RollBlock=7
     try out_results.append(alloc.arena, .{ .key = 5, .value = .Success });
     var area_id: i32 = 0;
     var has_range_comp = false;
+    var has_trample = false;
+    var has_portal = false;
+    var has_air_passage = false;
+    var has_gravity_flip = false;
+    var has_roll_block = false;
     var cfg_id: i32 = std.math.cast(i32, range_entity_id) orelse 0;
     var trigger_comp: ?@import("../../data/tables/entity_components/Trigger.zig") = null;
     if (scene_opt.*) |*scene| {
@@ -673,11 +678,47 @@ fn trackRangeArea(
                 tpl.ComponentsData.mergeInto(&components);
             }
             has_range_comp = components.RangeComponent != null;
+            has_portal = components.PortalComponent != null or components.NoRenderPortalComponent != null;
+            if (components.GravityFlipComponent) |gf| {
+                has_gravity_flip = !(gf.Disabled orelse false);
+            }
             trigger_comp = components.TriggerComponent;
+            has_air_passage = std.mem.indexOf(u8, lcfg.BlueprintType, "AirPassage") != null;
+            has_roll_block = std.mem.indexOf(u8, lcfg.BlueprintType, "RollBlock") != null;
+            for (components.extra) |entry| {
+                switch (entry) {
+                    .TrampleComponent => |tc| if (!(tc.Disabled orelse false)) {
+                        has_trample = true;
+                    },
+                    .AirPassageComponent => has_air_passage = true,
+                    .RollBlockComponent, .RollBlockFloorComponent, .RollBlockItemComponent => has_roll_block = true,
+                    .ClientTriggerComponent => |ct| {
+                        if (!(ct.Disabled orelse false) and components.SplineComponent != null) {
+                            has_air_passage = true;
+                        }
+                    },
+                    else => {},
+                }
+            }
         }
+    }
+    if (has_trample) {
+        try out_results.append(alloc.arena, .{ .key = 1, .value = .Success });
+    }
+    if (has_portal) {
+        try out_results.append(alloc.arena, .{ .key = 2, .value = .Success });
     }
     if (has_range_comp) {
         try out_results.append(alloc.arena, .{ .key = 3, .value = .Success });
+    }
+    if (has_air_passage) {
+        try out_results.append(alloc.arena, .{ .key = 4, .value = .Success });
+    }
+    if (has_gravity_flip) {
+        try out_results.append(alloc.arena, .{ .key = 6, .value = .Success });
+    }
+    if (has_roll_block) {
+        try out_results.append(alloc.arena, .{ .key = 7, .value = .Success });
     }
 
     if (trigger_comp) |trig| {

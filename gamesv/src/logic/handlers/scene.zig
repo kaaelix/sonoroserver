@@ -1179,7 +1179,8 @@ pub fn handleSpatialSpawnsCheck(
         .map_comp = map_comp,
         .quest_comp = quest_comp,
         .role_comp = role_comp,
-    }, loc[0], loc[1]);
+        .progress_comp = progress_comp,
+    }, loc[0], loc[1], loc[2]);
 
     try spawnNearbyWorldEntities(
         events,

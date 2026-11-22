@@ -220,11 +220,13 @@ pub fn onActionFinishRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     var kbuf: [64]u8 = undefined;
     const k = try std.fmt.bufPrint(&kbuf, "quest:act_fin:{d}:{d}", .{ txn.message.IncId, txn.message.StartIndex });
     _ = try progress_comp.info.markClaim(alloc.gpa, k);
     try progress_comp.save(fs, alloc.arena);
+    try QuestEngine.onConditionStateChanged(qctx);
     txn.respond(.{ .Code = .Success });
 }
 
@@ -324,7 +326,20 @@ pub fn onSubmitAwakeAndLoadEntityNodeRequest(
         dirty = true;
     }
     if (dirty) try pc.save(fs, alloc.arena);
-    _ = try QuestEngine.onSubmitNode(qctx, txn.message.TreeOwnerId, txn.message.TreeIncId, txn.message.NodeId);
+    const owner = if (txn.message.TreeOwnerId > 0) txn.message.TreeOwnerId else std.math.cast(i32, txn.message.TreeIncId) orelse 0;
+    if (owner > 0 and qctx.quest_comp.info.findActiveQuest(owner) == null) {
+        if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+            _ = try LevelPlayHelper.onSubmitLevelPlayNode(
+                lp_ctx,
+                pc,
+                txn.message.TreeOwnerId,
+                txn.message.TreeIncId,
+                txn.message.NodeId,
+            );
+        }
+    } else {
+        _ = try QuestEngine.onSubmitNode(qctx, txn.message.TreeOwnerId, txn.message.TreeIncId, txn.message.NodeId);
+    }
     txn.respond(.{ .ErrorCode = .Success });
 }
 

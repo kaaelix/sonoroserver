@@ -70,9 +70,13 @@ pub fn onTeleportTransferRequest(
     }
 
     const cur_map_id = assets.resolveMapConfigId(scene_comp.last_scene_info.instance_id);
+    QuestEngine.onPlayerTransferOrLeaveInst(qctx, cur_map_id != 8 and teleporter.MapId == 8) catch |err| QuestEngine.logHookErr("onTeleportTransfer", err);
 
     if (cur_map_id == teleporter.MapId) {
         const target_pos = [3]f32{ x, y, z };
+        if (spawn.has_gravity_config) {
+            scene.setCurrentRoleGravity(spawn.gravity);
+        }
         try QuestEngine.updatePlayerSceneState(qctx, target_pos, .{ 0, 0, spawn.yaw });
         try txn.conn.push(alloc.gpa, io, pb.TeleportNotify{
             .MapId = teleporter.MapId,
@@ -173,6 +177,7 @@ pub fn onTeleportToTargetRequest(
     const yaw = if (txn.message.Rot) |r| r.Yaw else tp.rot_yaw;
     const cur_map_id = assets.resolveMapConfigId(scene_comp.last_scene_info.instance_id);
     const tp_map_id = assets.resolveMapConfigId(tp.map_id);
+    QuestEngine.onPlayerTransferOrLeaveInst(qctx, cur_map_id != 8 and tp_map_id == 8) catch |err| QuestEngine.logHookErr("onTeleportToTarget", err);
     if (cur_map_id == tp_map_id) {
         const target_pos = [3]f32{ tp.pos_x, tp.pos_y, tp.pos_z };
         try QuestEngine.updatePlayerSceneState(qctx, target_pos, .{ 0, 0, yaw });

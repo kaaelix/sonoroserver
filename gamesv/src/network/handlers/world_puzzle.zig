@@ -543,13 +543,97 @@ pub fn onNpcTraceFailedRequest(
     txn.respond(.{ .ErrorId = .Success });
 }
 
+fn readJsonF32(val: std.json.Value) ?f32 {
+    return switch (val) {
+        .float => |f| @floatCast(f),
+        .integer => |i| @floatFromInt(i),
+        .number_string => |s| std.fmt.parseFloat(f32, s) catch null,
+        else => null,
+    };
+}
+
+fn readJsonPos3Offsets(obj: std.json.ObjectMap) [3]f32 {
+    return .{
+        if (obj.get("X")) |v| (readJsonF32(v) orelse 0) else 0,
+        if (obj.get("Y")) |v| (readJsonF32(v) orelse 0) else 0,
+        if (obj.get("Z")) |v| (readJsonF32(v) orelse 0) else 0,
+    };
+}
+
+fn resolveElevatorStayPos(assets: *const Assets, instance_id: i32, config_id: i32, tag_state: i32) ?[3]f32 {
+    const lcfg = assets.findLevelEntity(instance_id, config_id) orelse return null;
+    const base = Assets.AssetIndexes.entityWorldPos(lcfg) orelse return null;
+    var components = lcfg.ComponentsData;
+    if (assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+        tpl.ComponentsData.mergeInto(&components);
+    }
+    const lift = components.LiftComponent orelse return null;
+    if (lift.StayPositions != .array or lift.StayPositions.array.items.len == 0) return null;
+    const floors = lift.StayPositions.array.items;
+    const idx: usize = if (tag_state >= 1 and @as(usize, @intCast(tag_state)) <= floors.len)
+        @intCast(tag_state - 1)
+    else if (tag_state >= 0 and @as(usize, @intCast(tag_state)) < floors.len)
+        @intCast(tag_state)
+    else
+        return null;
+    if (floors[idx] != .object) return base;
+    const off = readJsonPos3Offsets(floors[idx].object);
+    return .{ base[0] + off[0], base[1] + off[1], base[2] + off[2] };
+}
+
+fn resolveSplineEndpointPos(assets: *const Assets, instance_id: i32, spline_cfg_id: i64) ?[3]f32 {
+    const lcfg = assets.findLevelEntity(instance_id, spline_cfg_id) orelse return null;
+    const base = Assets.AssetIndexes.entityWorldPos(lcfg) orelse .{ 0, 0, 0 };
+    var components = lcfg.ComponentsData;
+    if (assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+        tpl.ComponentsData.mergeInto(&components);
+    }
+    const spline = components.SplineComponent orelse return null;
+    const opt = spline.Option orelse return null;
+    if (opt != .object) return null;
+    const pts_val = opt.object.get("Points") orelse return null;
+    if (pts_val != .array or pts_val.array.items.len == 0) return null;
+    const last = pts_val.array.items[pts_val.array.items.len - 1];
+    if (last != .object) return null;
+    const pos_val = last.object.get("Position") orelse return null;
+    if (pos_val != .object) return null;
+    const off = readJsonPos3Offsets(pos_val.object);
+    return .{ base[0] + off[0], base[1] + off[1], base[2] + off[2] };
+}
+
 pub fn onQuestNpcMoveOverRequest(
     txn: *Transaction(pb.QuestNpcMoveOverRequest),
+    assets: *const Assets,
+    scene_opt: *?Scene,
     alloc: mem.Alloc,
     fs: *FileSystem,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
+    if (scene_opt.*) |*scene| {
+        if (scene.net_id_map.get(txn.message.EntityId)) |index| {
+            const config_id = scene.entities.items(.config)[index].config_id;
+            if (scene.entities.items(.world_item)[index].move_to_point) |mtp| {
+                _ = try persistWorldEntityTransform(scene, fs, alloc, pc, txn.message.EntityId, mtp.target_pos, null);
+                scene.entities.items(.world_item)[index].move_to_point = null;
+            } else if (scene.entities.items(.world_item)[index].move_spline) |ms| {
+                if (resolveSplineEndpointPos(assets, scene.instance_id, ms.spline_entity_id)) |end_pos| {
+                    _ = try persistWorldEntityTransform(scene, fs, alloc, pc, txn.message.EntityId, end_pos, null);
+                }
+                scene.entities.items(.world_item)[index].move_spline = null;
+            } else if (config_id > 0) {
+                const spline_key = try std.fmt.allocPrint(alloc.arena, "quest_spline:{d}", .{config_id});
+                const spline_cfg_id = pc.info.getKeyInt(spline_key);
+                if (spline_cfg_id > 0) {
+                    if (resolveSplineEndpointPos(assets, scene.instance_id, spline_cfg_id)) |end_pos| {
+                        _ = try persistWorldEntityTransform(scene, fs, alloc, pc, txn.message.EntityId, end_pos, null);
+                    }
+                }
+            }
+        }
+    }
     try persistClaimKey(alloc, fs, pc, "quest_npc:over", txn.message.EntityId);
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onQuestNpcMoveOver", err);
     txn.respond(.{ .ErrorId = .Success });
 }
 
@@ -626,10 +710,12 @@ pub fn onElevatorStateChangeRequest(
     alloc: mem.Alloc,
     io: std.Io,
     fs: *FileSystem,
+    assets: *const Assets,
     scene_opt: *?Scene,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
-    const scene = scene_opt.* orelse {
+    const scene = if (scene_opt.*) |*s| s else {
         txn.respond(.{ .ErrorCode = .ErrElevatorEntityNotExit });
         return;
     };
@@ -641,9 +727,13 @@ pub fn onElevatorStateChangeRequest(
         txn.respond(.{ .ErrorCode = .ErrElevatorConfigNotExit });
         return;
     }
+    if (resolveElevatorStayPos(assets, scene.instance_id, config_id, txn.message.TagState)) |new_pos| {
+        _ = try persistWorldEntityTransform(scene, fs, alloc, progress_comp, txn.message.EntityId, new_pos, null);
+    }
     const key = try std.fmt.allocPrint(alloc.arena, "elevator:{d}", .{config_id});
     try progress_comp.info.setKeyInt(alloc.gpa, key, txn.message.TagState);
     try progress_comp.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onElevatorStateChange", err);
     txn.conn.pushBestEffort(alloc.gpa, io, pb.ElevatorMoveNotify{
         .EntityId = txn.message.EntityId,
         .Location = txn.message.TagState,
@@ -678,6 +768,7 @@ pub fn onSceneItemMoveSplineRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const scene = if (scene_opt.*) |*s| s else {
         txn.respond(.{ .ErrorCode = .ErrSceneEntityNotExist });
@@ -775,6 +866,7 @@ pub fn onSceneItemMoveSplineRequest(
     try progress_comp.info.setKeyInt(alloc.gpa, vehicle_active_key, 0);
     try progress_comp.info.setKeyInt(alloc.gpa, target_active_key, 0);
     try progress_comp.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onSceneItemMoveSpline", err);
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -1006,15 +1098,21 @@ pub fn onSplinePositionUpdateRequest(
 
 pub fn onStopMoveSplineRequest(
     txn: *Transaction(pb.StopMoveSplineRequest),
+    assets: *const Assets,
     scene_opt: *?Scene,
     alloc: mem.Alloc,
     fs: *FileSystem,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const stop_key = try std.fmt.allocPrint(alloc.arena, "spline:stop:{d}", .{txn.message.EntityId});
     try pc.info.setKeyInt(alloc.gpa, stop_key, txn.message.SplineEntityId);
 
     if (scene_opt.*) |*scene| {
+        const spline_cfg_id = scene.findConfigIdByNetId(txn.message.SplineEntityId) orelse txn.message.SplineEntityId;
+        if (resolveSplineEndpointPos(assets, scene.instance_id, spline_cfg_id)) |end_pos| {
+            _ = try persistWorldEntityTransform(scene, fs, alloc, pc, txn.message.EntityId, end_pos, null);
+        }
         if (scene.net_id_map.get(txn.message.EntityId)) |index| {
             const config_id = scene.entities.items(.config)[index].config_id;
             if (config_id > 0) {
@@ -1042,6 +1140,7 @@ pub fn onStopMoveSplineRequest(
         }
     }
     try pc.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onStopMoveSpline", err);
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -1052,6 +1151,7 @@ pub fn onGravityFlipInteractRequest(
     progress_comp: *PlayerProgressComponent,
     scene_opt: *?Scene,
     io: std.Io,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const target = txn.message.TargetGravityFlipType orelse {
         txn.respond(.{ .ErrorCode = .GravityFlipTypeNotExist });
@@ -1078,9 +1178,17 @@ pub fn onGravityFlipInteractRequest(
     if (scene.net_id_map.get(net_id)) |idx| {
         scene.entities.items(.world_item)[idx].gravity_flip = @intCast(cur_val);
     }
+    const grav_vec: [3]f32 = switch (target) {
+        .GravityUp => .{ 0, 0, 1 },
+        .GravityDown => .{ 0, 0, -1 },
+        .GravityLeft => .{ -1, 0, 0 },
+        .GravityRight => .{ 1, 0, 0 },
+    };
+    scene.setCurrentRoleGravity(grav_vec);
     const key = try std.fmt.allocPrint(alloc.arena, "gravity:{d}", .{config_id});
     try progress_comp.info.setKeyInt(alloc.gpa, key, cur_val);
     try progress_comp.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onGravityFlipInteract", err);
     txn.conn.pushBestEffort(alloc.gpa, io, pb.GravityFlipUpdateTypeNotify{
         .NewGravityFlipType = target,
         .EntityId = config_id,
@@ -1489,8 +1597,10 @@ pub fn onSneakRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistIntKey(alloc, fs, pc, "sneak:node", txn.message.NodeId, if (txn.message.IsStart) 1 else 0);
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onSneak", err);
     txn.respond(.{ .ErrorId = .Success });
 }
 
@@ -2130,8 +2240,10 @@ pub fn onBtForcedOccupationRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistClaimKey(alloc, fs, pc, "bt:forced_occ", txn.message.TreeIncId);
+    QuestEngine.onForcedOccupation(qctx, txn.message.TreeIncId) catch |err| QuestEngine.logHookErr("onBtForcedOccupation", err);
     txn.respond(.{ .ErrorId = .Success });
 }
 

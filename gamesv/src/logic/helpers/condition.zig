@@ -17,6 +17,7 @@ const PlayerGuideComponent = @import("../component/player/PlayerGuideComponent.z
 const PlayerProgressComponent = @import("../component/player/PlayerProgressComponent.zig");
 const ProgressInfo = @import("../../fs/ProgressInfo.zig");
 const CalabashHelper = @import("calabash.zig");
+const Range = @import("../../data/tables/entity_components/Range.zig");
 const Scene = @import("../Scene.zig");
 
 pub const EvalContext = struct {
@@ -1118,7 +1119,7 @@ fn evalEntityStateCompare(ctx: EvalContext, eid: i32, obj: std.json.ObjectMap) b
     return if (std.mem.eql(u8, cmp, "Ne") or std.mem.eql(u8, cmp, "NotEq")) !eq else eq;
 }
 
-fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
+pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
     if (c_val != .object) return true;
     const obj = c_val.object;
     const t_val = obj.get("Type") orelse return true;
@@ -1891,6 +1892,128 @@ fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
         // completed BvB challenges only after successful completion.
         if (state != 2) return false;
         return containsInt(ctx.quest_comp.info.progress.completed_bvb, challenge_id);
+    } else if (std.mem.eql(u8, ct, "RangeSphere")) {
+        const center_val = obj.get("Center") orelse return false;
+        if (center_val != .object) return false;
+        const radius = jsonFloatVal(obj.get("Radius")) orelse return false;
+        if (radius <= 0) return false;
+        const cx = jsonFloatVal(center_val.object.get("X")) orelse return false;
+        const cy = jsonFloatVal(center_val.object.get("Y")) orelse return false;
+        const cz = jsonFloatVal(center_val.object.get("Z")) orelse 0;
+        const p = currentPlayerPos3D(ctx) orelse return false;
+        const dx = p[0] - cx;
+        const dy = p[1] - cy;
+        const dz = p[2] - cz;
+        return dx * dx + dy * dy + dz * dz <= radius * radius;
+    } else if (std.mem.eql(u8, ct, "CheckDirection")) {
+        const scene = ctx.scene orelse return false;
+        const dir_val = obj.get("Direction") orelse return true;
+        if (dir_val != .object) return true;
+        const target_yaw = jsonFloatVal(dir_val.object.get("Z")) orelse return true;
+        const interval = jsonFloatVal(obj.get("AngleInterval")) orelse 60.0;
+        if (interval >= 180.0) return true;
+        const cur_yaw: f32 = if (scene.instance.players.len > 0) scene.instance.players[0].rotation[2] else return false;
+        var diff = @mod(cur_yaw - target_yaw + 180.0, 360.0);
+        if (diff < 0) diff += 360.0;
+        diff = @abs(diff - 180.0);
+        return diff <= interval;
+    } else if (std.mem.eql(u8, ct, "CompareCalabashLevel")) {
+        const a = ctx.assets orelse return false;
+        const req = jsonInt(obj.get("CalabashLevel")) orelse jsonInt(obj.get("Level")) orelse 1;
+        const cmp = getParamStr(obj, "Compare") orelse "Ge";
+        return compareInts(currentCalabashLevel(a, ctx.basic_comp, ctx.echo_comp), req, cmp);
+    } else if (std.mem.eql(u8, ct, "CheckLordGymFinish")) {
+        const gym_id = jsonInt(obj.get("LordGymId")) orelse return false;
+        const pc = ctx.progress_comp orelse return false;
+        return pc.info.hasPassedLordGym(gym_id);
+    } else if (std.mem.eql(u8, ct, "CheckCalabashDevelopReward")) {
+        const monster_id = jsonInt(obj.get("MonsterId")) orelse return false;
+        const need_dev = jsonInt(obj.get("Develop")) orelse 1;
+        if (ctx.echo_comp.calabash_info.highestQualityForMonster(monster_id) >= need_dev) return true;
+        const pc = ctx.progress_comp orelse return false;
+        var kbuf: [48]u8 = undefined;
+        const key = std.fmt.bufPrint(&kbuf, "calabash:dev:{d}", .{monster_id}) catch return false;
+        return pc.info.getKeyInt(key) >= need_dev;
+    } else if (std.mem.eql(u8, ct, "CheckSubLevelState")) {
+        const check_list = obj.get("CheckList") orelse return false;
+        if (check_list != .array or check_list.array.items.len == 0) return true;
+        const req_count = jsonInt(obj.get("ConditionCount")) orelse 0;
+        var matched: i32 = 0;
+        for (check_list.array.items) |entry| {
+            if (entry != .object) continue;
+            const sname = getParamStr(entry.object, "SubLevelName") orelse continue;
+            const want_state = getParamStr(entry.object, "SubLevelState") orelse "Enable";
+            var is_loaded = false;
+            for (ctx.quest_comp.info.world.loaded_sublevels) |lv| {
+                if (std.mem.eql(u8, lv, sname)) {
+                    is_loaded = true;
+                    break;
+                }
+            }
+            const want_loaded = std.mem.eql(u8, want_state, "Enable");
+            if (is_loaded == want_loaded) matched += 1;
+        }
+        return if (req_count <= 0) matched == @as(i32, @intCast(check_list.array.items.len)) else matched >= req_count;
+    } else if (std.mem.eql(u8, ct, "CheckPlayerIsInMotorcycleCruise")) {
+        const want = if (obj.get("IsInMotorcycleCruise")) |v| (if (v == .bool) v.bool else true) else true;
+        const pc = ctx.progress_comp orelse return !want;
+        const cruising = pc.info.getKeyInt("motor:cruise") > 0;
+        return cruising == want;
+    } else if (std.mem.eql(u8, ct, "CheckSyncLevelPlayCompleteNumber")) {
+        const sync_id = jsonInt(obj.get("SyncId")) orelse return false;
+        const num = jsonInt(obj.get("Number")) orelse 0;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
+        const pc = ctx.progress_comp orelse return compareInts(0, num, cmp);
+        var kbuf: [48]u8 = undefined;
+        const key = std.fmt.bufPrint(&kbuf, "sync_lp:{d}", .{sync_id}) catch return false;
+        const cur: i32 = @intCast(std.math.clamp(pc.info.getKeyInt(key), 0, std.math.maxInt(i32)));
+        return compareInts(cur, num, cmp);
+    } else if (std.mem.eql(u8, ct, "CheckCrossSceneSyncKillMonsterFinished")) {
+        const sync_id = jsonInt(obj.get("SyncId")) orelse return false;
+        const bundle_id = jsonInt(obj.get("EntityBundleId")) orelse 0;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
+        var cur: i32 = 0;
+        if (ctx.progress_comp) |pc| {
+            var kbuf: [64]u8 = undefined;
+            const key = std.fmt.bufPrint(&kbuf, "cross_kill:{d}:{d}", .{ sync_id, bundle_id }) catch "";
+            if (key.len > 0 and (pc.info.hasClaim(key) or pc.info.getKeyInt(key) > 0)) cur = 1;
+        }
+        return compareInts(cur, 1, cmp);
+    } else if (std.mem.eql(u8, ct, "CheckGiantRegionCultivationTriggeredUpgradeLevel")) {
+        const eco_type = getParamStr(obj, "EcoType") orelse return false;
+        const eco_id: i32 = if (std.mem.eql(u8, eco_type, "Fire")) 0 else if (std.mem.eql(u8, eco_type, "Water")) 1 else if (std.mem.eql(u8, eco_type, "Wood")) 2 else return false;
+        const pc = ctx.progress_comp orelse return false;
+        var kbuf: [48]u8 = undefined;
+        const key = std.fmt.bufPrint(&kbuf, "giant:upgrade:{d}", .{eco_id}) catch return false;
+        const cur: i32 = @intCast(std.math.clamp(pc.info.getKeyInt(key), 0, std.math.maxInt(i32)));
+        const levels = obj.get("Levels") orelse return cur > 0;
+        if (levels != .array) return cur > 0;
+        for (levels.array.items) |lv| {
+            if ((jsonInt(lv) orelse -1) == cur) return true;
+        }
+        return false;
+    } else if (std.mem.eql(u8, ct, "CheckTetrisEndlessScore")) {
+        const did = jsonInt(obj.get("DungeonId")) orelse 0;
+        const target = jsonInt(obj.get("TargetScore")) orelse 0;
+        const cmp = getParamStr(obj, "Compare") orelse "Ge";
+        var score: i32 = 0;
+        if (ctx.progress_comp) |pc| {
+            var kbuf: [48]u8 = undefined;
+            const key = std.fmt.bufPrint(&kbuf, "tetris:score:{d}", .{did}) catch "";
+            if (key.len > 0) score = @intCast(std.math.clamp(pc.info.getKeyInt(key), 0, std.math.maxInt(i32)));
+        }
+        return compareInts(score, target, cmp);
+    } else if (std.mem.eql(u8, ct, "CheckDollGrabShowcaseItemComboAchieved")) {
+        const eid = jsonInt(obj.get("ShowcaseEntityId")) orelse 0;
+        const count = jsonInt(obj.get("Count")) orelse 1;
+        const cmp = getParamStr(obj, "Compare") orelse "Ge";
+        var cur: i32 = 0;
+        if (ctx.progress_comp) |pc| {
+            var kbuf: [48]u8 = undefined;
+            const key = std.fmt.bufPrint(&kbuf, "doll:combo:{d}", .{eid}) catch "";
+            if (key.len > 0) cur = @intCast(std.math.clamp(pc.info.getKeyInt(key), 0, std.math.maxInt(i32)));
+        }
+        return compareInts(cur, count, cmp);
     }
     return false;
 }
@@ -1972,7 +2095,7 @@ fn evalCheckEntitiesExist(ctx: EvalContext, obj: std.json.ObjectMap) bool {
     return true;
 }
 
-fn evalPlayerMotionState(ctx: EvalContext, motion: []const u8) ?bool {
+pub fn evalPlayerMotionState(ctx: EvalContext, motion: []const u8) ?bool {
     const scene = ctx.scene orelse return null;
     const role_entity_id = scene.currentRoleEntityId();
     if (role_entity_id <= 0) return null;
@@ -2010,16 +2133,149 @@ fn evalPlayerMotionState(ctx: EvalContext, motion: []const u8) ?bool {
     return tag_component.hasTag(&assets.tables.gameplay_tag_parent, tag_id);
 }
 
+fn jsonFloatVal(v_opt: ?std.json.Value) ?f32 {
+    const v = v_opt orelse return null;
+    return switch (v) {
+        .float => |f| @floatCast(f),
+        .integer => |i| @floatFromInt(i),
+        else => null,
+    };
+}
+
+pub fn currentPlayerPos3D(ctx: EvalContext) ?[3]f32 {
+    const scene = ctx.scene orelse return null;
+    if (scene.instance.players.len > 0) {
+        return scene.instance.players[0].location;
+    }
+    return scene.last_spatial_check_loc;
+}
+
+fn rotateInverseEuler(v: [3]f32, rot_deg: [3]f32) [3]f32 {
+    if (rot_deg[0] == 0 and rot_deg[1] == 0 and rot_deg[2] == 0) return v;
+    const deg2rad: f32 = std.math.pi / 180.0;
+    const roll = rot_deg[0] * deg2rad;
+    const pitch = rot_deg[1] * deg2rad;
+    const yaw = rot_deg[2] * deg2rad;
+
+    // Inverse of UE Z-Y-X rotation: R_x(-roll) * R_y(-pitch) * R_z(-yaw)
+    const cy = @cos(yaw);
+    const sy = @sin(yaw);
+    const x1 = v[0] * cy + v[1] * sy;
+    const y1 = -v[0] * sy + v[1] * cy;
+    const z1 = v[2];
+
+    const cp = @cos(pitch);
+    const sp = @sin(pitch);
+    const x2 = x1 * cp + z1 * sp;
+    const y2 = y1;
+    const z2 = -x1 * sp + z1 * cp;
+
+    const cr = @cos(roll);
+    const sr = @sin(roll);
+    return .{
+        x2,
+        y2 * cr - z2 * sr,
+        y2 * sr + z2 * cr,
+    };
+}
+
+/// Evaluates oriented 3D containment for RangeComponent shapes (`Sphere`, `HollowSphere`,
+/// `Cylinder`, `HollowCylinder`, `Box`, `Combination`, and fallback spherical/box shapes).
+pub fn isPosInsideRangeShape(
+    pos: [3]f32,
+    base_pos: [3]f32,
+    entity_rot: [3]f32,
+    shape: Range.ShapeConfig,
+    default_radius: f32,
+    min_sphere_radius: f32,
+) bool {
+    return isPosInsideRangeShapeDepth(pos, base_pos, entity_rot, shape, default_radius, min_sphere_radius, 0);
+}
+
+fn isPosInsideRangeShapeDepth(
+    pos: [3]f32,
+    base_pos: [3]f32,
+    entity_rot: [3]f32,
+    shape: Range.ShapeConfig,
+    default_radius: f32,
+    min_sphere_radius: f32,
+    depth: u8,
+) bool {
+    const stype = shape.Type orelse "";
+    if (std.mem.eql(u8, stype, "Combination") or (shape.CombinationShapes != null and stype.len == 0)) {
+        if (depth >= 4) return false;
+        const subs = shape.CombinationShapes orelse return false;
+        for (subs) |sub| {
+            if (isPosInsideRangeShapeDepth(pos, base_pos, entity_rot, sub, default_radius, min_sphere_radius, depth + 1)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    const center_off: [3]f32 = if (shape.Center) |c|
+        .{ c.X orelse 0, c.Y orelse 0, c.Z orelse 0 }
+    else
+        .{ 0, 0, 0 };
+
+    const rel: [3]f32 = .{
+        pos[0] - base_pos[0],
+        pos[1] - base_pos[1],
+        pos[2] - base_pos[2],
+    };
+
+    const shape_rot: [3]f32 = if (shape.Rotator) |sr|
+        .{ sr.X orelse 0, sr.Y orelse 0, sr.Z orelse 0 }
+    else
+        .{ 0, 0, 0 };
+
+    // Transform world offset into entity-local frame, subtract shape center, then apply inverse shape 3D Euler rotation.
+    const ent_local = rotateInverseEuler(rel, entity_rot);
+    const shifted: [3]f32 = .{
+        ent_local[0] - center_off[0],
+        ent_local[1] - center_off[1],
+        ent_local[2] - center_off[2],
+    };
+    const local = rotateInverseEuler(shifted, shape_rot);
+    const dx = local[0];
+    const dy = local[1];
+    const dz = local[2];
+    const has_box_size = shape.Size != null and ((shape.Size.?.X orelse 0) > 0 or (shape.Size.?.Y orelse 0) > 0 or (shape.Size.?.Z orelse 0) > 0);
+    if (std.mem.eql(u8, stype, "Box") or (stype.len == 0 and has_box_size)) {
+        const sz = shape.Size orelse return false;
+        const sx = @max(sz.X orelse 0, 100.0);
+        const sy = @max(sz.Y orelse 0, 100.0);
+        const sz_v = @max(sz.Z orelse 0, 100.0);
+        return @abs(dx) <= sx and @abs(dy) <= sy and @abs(dz) <= sz_v;
+    }
+
+    const r = @max(shape.Radius orelse default_radius, min_sphere_radius);
+    if (std.mem.eql(u8, stype, "Cylinder") or std.mem.eql(u8, stype, "HollowCylinder")) {
+        const xy_sq = dx * dx + dy * dy;
+        const half_h: f32 = if (shape.Height) |h| (if (h > 0) h * 0.5 else @max(r, 1500.0)) else @max(r, 1500.0);
+        if (xy_sq > r * r or @abs(dz) > half_h) return false;
+        if (std.mem.eql(u8, stype, "HollowCylinder")) {
+            const inner_r = shape.InnerRadius orelse 0;
+            if (inner_r > 0 and xy_sq < inner_r * inner_r) return false;
+        }
+        return true;
+    }
+
+    const dist_sq = dx * dx + dy * dy + dz * dz;
+    if (dist_sq > r * r) return false;
+    if (std.mem.eql(u8, stype, "HollowSphere")) {
+        const inner_r = shape.InnerRadius orelse 0;
+        if (inner_r > 0 and dist_sq < inner_r * inner_r) return false;
+    }
+    return true;
+}
+
 fn evalCheckInRange(ctx: EvalContext, obj: std.json.ObjectMap) bool {
     const scene = ctx.scene orelse return false;
     const range_entities = obj.get("RangeEntities") orelse return false;
     if (range_entities != .array or range_entities.array.items.len == 0) return false;
 
-    const player_pos: [3]f32 = if (scene.instance.players.len > 0)
-        scene.instance.players[0].location
-    else
-        scene.last_spatial_check_loc;
-
+    const player_pos = currentPlayerPos3D(ctx) orelse return false;
     const slice = scene.entities.slice();
     const configs = slice.items(.config);
     const positions = slice.items(.position);
@@ -2027,52 +2283,32 @@ fn evalCheckInRange(ctx: EvalContext, obj: std.json.ObjectMap) bool {
     for (range_entities.array.items) |ent_val| {
         const eid = jsonInt(ent_val) orelse continue;
         var ent_pos: ?[3]f32 = null;
+        var ent_rot: [3]f32 = .{ 0, 0, 0 };
         for (configs, positions) |cfg, pos_opt| {
             if (cfg.config_id == eid) {
                 if (pos_opt) |p| {
                     ent_pos = p.location;
+                    ent_rot = p.rotation;
                     break;
                 }
             }
         }
-        var radius: f32 = 1500.0;
-        var box_size: ?[3]f32 = null;
-        var center_off: [3]f32 = .{ 0, 0, 0 };
+        var shape: Range.ShapeConfig = .{};
         if (ctx.assets) |a| {
             if (a.findLevelEntity(scene.instance_id, eid)) |lcfg| {
                 if (ent_pos == null) {
                     ent_pos = Assets.AssetIndexes.entityWorldPos(lcfg);
+                    ent_rot = Assets.AssetIndexes.entityWorldRot(lcfg);
                 }
                 const maybe_rc = lcfg.ComponentsData.RangeComponent orelse
                     if (a.findTemplateConfig(lcfg.BlueprintType)) |tpl| tpl.ComponentsData.RangeComponent else null;
                 if (maybe_rc) |rc| {
-                    if (rc.Shape) |shape| {
-                        if (shape.Center) |c| {
-                            center_off = .{ c.X orelse 0, c.Y orelse 0, c.Z orelse 0 };
-                        }
-                        if (shape.Size) |sz| {
-                            const sx = sz.X orelse 0;
-                            const sy = sz.Y orelse 0;
-                            const sz_v = sz.Z orelse 0;
-                            if (sx > 0 or sy > 0 or sz_v > 0) {
-                                box_size = .{ @max(sx, 100.0), @max(sy, 100.0), @max(sz_v, 100.0) };
-                            }
-                        } else if (shape.Radius) |r| {
-                            if (r > 0) radius = r;
-                        }
-                    }
+                    if (rc.Shape) |sh| shape = sh;
                 }
             }
         }
         const pos = ent_pos orelse continue;
-        const dx = player_pos[0] - (pos[0] + center_off[0]);
-        const dy = player_pos[1] - (pos[1] + center_off[1]);
-        const dz = player_pos[2] - (pos[2] + center_off[2]);
-        if (box_size) |sz| {
-            if (@abs(dx) <= sz[0] and @abs(dy) <= sz[1] and @abs(dz) <= sz[2]) {
-                return true;
-            }
-        } else if (dx * dx + dy * dy + dz * dz <= radius * radius) {
+        if (isPosInsideRangeShape(player_pos, pos, ent_rot, shape, 1500.0, 0.0)) {
             return true;
         }
     }

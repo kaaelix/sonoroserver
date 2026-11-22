@@ -109,7 +109,7 @@ pub fn onFlowEndRequest(
         progress_comp,
         alloc,
         io,
-    ), txn.message.FlowIncId);
+    ), txn.message.FlowIncId, txn.message.OptionInfos.items, txn.message.IsSkip);
 
     const same_instance = scene_comp.last_scene_info.instance_id == prev_instance_id;
 

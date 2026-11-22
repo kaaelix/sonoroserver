@@ -47,26 +47,6 @@ pub fn onEnterAreaRequest(
             if (scene.instance.players.len > 0) {
                 const loc = scene.instance.players[0].location;
                 QuestEngine.onMove(qctx, loc) catch |err| QuestEngine.logHookErr("onMove", err);
-                if (qctx.role_comp) |role_comp| {
-                    LevelPlayHelper.onPlayerMove(.{
-                        .assets = qctx.assets,
-                        .fs = qctx.fs,
-                        .conn = qctx.conn,
-                        .scene = scene,
-                        .events = qctx.events,
-                        .alloc = qctx.alloc,
-                        .io = qctx.io,
-                        .basic_comp = qctx.basic_comp,
-                        .inventory_comp = qctx.inventory_comp,
-                        .weapon_comp = qctx.weapon_comp,
-                        .echo_comp = qctx.echo_comp,
-                        .map_comp = qctx.map_comp,
-                        .quest_comp = qctx.quest_comp,
-                        .role_comp = role_comp,
-                    }, loc[0], loc[1]) catch |err| {
-                        std.log.scoped(.level_play).warn("onPlayerMove failed: {t}", .{err});
-                    };
-                }
             }
         }
     }

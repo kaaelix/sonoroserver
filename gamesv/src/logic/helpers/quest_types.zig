@@ -1,4 +1,5 @@
 const std = @import("std");
+const pb = @import("proto").pb;
 const mem = @import("../../mem.zig");
 const common = @import("common");
 const FileSystem = common.FileSystem;
@@ -73,7 +74,10 @@ pub const ActionCallbacks = struct {
     on_destroy_quest: ?*const fn (ctx: QuestContext, quest_id: i32) anyerror!void = null,
     on_finish_condition: ?*const fn (ctx: QuestContext, quest_id: i32, node_id: i32) anyerror!void = null,
     on_trace_current_quest: ?*const fn (ctx: QuestContext, quest_id: i32) anyerror!void = null,
+    on_var_changed: ?*const fn (ctx: QuestContext, owner_id: i32, var_name: []const u8) anyerror!void = null,
+    bt_type: pb.BtType = .BtTypeQuest,
     is_flow_action: bool = false,
+    defer_flow_transition: bool = false,
 };
 
 pub fn makeEvalContext(ctx: QuestContext) ConditionEvaluator.EvalContext {
@@ -175,6 +179,30 @@ pub fn jsonBool(v_opt: ?std.json.Value) ?bool {
     };
 }
 
+pub fn resolveVarName(obj: std.json.ObjectMap) ?[]const u8 {
+    if (jsonStr(obj.get("Name"))) |n| {
+        if (n.len > 0) return n;
+    }
+    if (jsonStr(obj.get("Keyword"))) |k| {
+        if (k.len > 0) return k;
+    }
+    return null;
+}
+
+pub fn scopedVarKeyAlloc(arena: std.mem.Allocator, obj: std.json.ObjectMap, base_name: []const u8) ?[]const u8 {
+    const src = jsonStr(obj.get("Source")) orelse "";
+    if (std.mem.eql(u8, src, "Global")) {
+        return std.fmt.allocPrint(arena, "var:{s}", .{base_name}) catch null;
+    }
+    if (jsonInt(obj.get("RefId"))) |ref_id| {
+        if (ref_id > 0) {
+            const ref_type = jsonStr(obj.get("RefType")) orelse "Entity";
+            return std.fmt.allocPrint(arena, "{s}:{d}:{s}", .{ ref_type, ref_id, base_name }) catch null;
+        }
+    }
+    return null;
+}
+
 pub fn resolveVarInt(ctx: QuestContext, v_opt: ?std.json.Value) i32 {
     const v = v_opt orelse return 0;
     if (v != .object) return 0;
@@ -182,11 +210,31 @@ pub fn resolveVarInt(ctx: QuestContext, v_opt: ?std.json.Value) i32 {
     if (std.mem.eql(u8, src, "Constant")) {
         return jsonInt(v.object.get("Value")) orelse 0;
     }
-    if (jsonStr(v.object.get("Name"))) |name| {
-        if (jsonStr(v.object.get("Type"))) |var_ty| {
-            if (std.mem.eql(u8, var_ty, "Bool")) {
-                return if (ctx.quest_comp.info.getVarBool(name)) 1 else 0;
+    if (resolveVarName(v.object)) |name| {
+        const is_bool = if (jsonStr(v.object.get("Type"))) |var_ty|
+            std.mem.eql(u8, var_ty, "Bool") or std.mem.eql(u8, var_ty, "Boolean")
+        else
+            false;
+        if (std.mem.eql(u8, src, "Global")) {
+            if (ctx.progress_comp) |pc| {
+                if (scopedVarKeyAlloc(ctx.alloc.arena, v.object, name)) |gkey| {
+                    for (pc.info.dynamic.ints) |entry| {
+                        if (std.mem.eql(u8, entry.key, gkey)) {
+                            return @intCast(std.math.clamp(entry.val, std.math.minInt(i32), std.math.maxInt(i32)));
+                        }
+                    }
+                }
             }
+        }
+        if (scopedVarKeyAlloc(ctx.alloc.arena, v.object, name)) |skey| {
+            if (is_bool) {
+                if (ctx.quest_comp.info.getVarBool(skey)) return 1;
+            }
+            const sv = ctx.quest_comp.info.getVarInt(skey);
+            if (sv != 0) return sv;
+        }
+        if (is_bool) {
+            return if (ctx.quest_comp.info.getVarBool(name)) 1 else 0;
         }
         return ctx.quest_comp.info.getVarInt(name);
     }
