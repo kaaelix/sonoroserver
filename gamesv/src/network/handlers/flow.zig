@@ -85,6 +85,10 @@ pub fn onFlowEndRequest(
     io: std.Io,
 ) !void {
     const had_active_flow = scene.active_flow_inc_id != 0;
+    const prev_flow_list = if (had_active_flow) try alloc.arena.dupe(u8, scene.active_flow_list_name) else "";
+    const prev_flow_id = scene.active_flow_id;
+    const prev_state_id = scene.active_flow_state_id;
+    const prev_instance_id = scene_comp.last_scene_info.instance_id;
 
     try QuestEngine.onFlowEnd(buildQuestContext(
         assets,
@@ -107,6 +111,8 @@ pub fn onFlowEndRequest(
         io,
     ), txn.message.FlowIncId);
 
+    const same_instance = scene_comp.last_scene_info.instance_id == prev_instance_id;
+
     // Only close the subtitle view if no follow-up/queued flow immediately started.
     if (scene.active_flow_inc_id == 0 and had_active_flow) {
         if (Io.Dir.readFileAlloc(Io.Dir.cwd(), fs.io, "assets/scripts/misc_patches/flow_ender.js", alloc.gpa, Io.Limit.unlimited)) |js| {
@@ -117,7 +123,33 @@ pub fn onFlowEndRequest(
         } else |_| {}
     }
 
+    if (shouldSendFlowSkipBlackScreen(
+        had_active_flow,
+        scene.active_flow_inc_id,
+        same_instance,
+        scene.client_black_screen_open,
+        txn.message.IsSkip,
+    )) {
+        scene.client_black_screen_open = false;
+        conn.pushBestEffort(alloc.gpa, io, pb.FlowServerSkipNotify{
+            .FlowListName = prev_flow_list,
+            .FlowId = prev_flow_id,
+            .StateId = prev_state_id,
+            .FadeOutScreen = true,
+        });
+    }
+
     txn.respond(.{ .ErrorCode = .Success });
+}
+
+fn shouldSendFlowSkipBlackScreen(
+    had_active_flow: bool,
+    active_flow_inc_id: i64,
+    same_instance: bool,
+    client_black_screen_open: bool,
+    is_skip: bool,
+) bool {
+    return active_flow_inc_id == 0 and same_instance and (client_black_screen_open or (is_skip and had_active_flow));
 }
 
 pub fn onFlowActionRequest(
@@ -162,4 +194,14 @@ pub fn onFlowActionRequest(
         io,
     ), txn.message.FlowIncId, txn.message.ActionId);
     txn.respond(.{ .ErrorCode = .Success });
+}
+
+test "shouldSendFlowSkipBlackScreen notifies only when flow ends without follow-up flow or map switch" {
+    const testing = std.testing;
+    try testing.expect(shouldSendFlowSkipBlackScreen(true, 0, true, true, false));
+    try testing.expect(shouldSendFlowSkipBlackScreen(true, 0, true, false, true));
+    try testing.expect(shouldSendFlowSkipBlackScreen(false, 0, true, true, false));
+    try testing.expect(!shouldSendFlowSkipBlackScreen(true, 42, true, true, true));
+    try testing.expect(!shouldSendFlowSkipBlackScreen(true, 0, false, true, true));
+    try testing.expect(!shouldSendFlowSkipBlackScreen(true, 0, true, false, false));
 }

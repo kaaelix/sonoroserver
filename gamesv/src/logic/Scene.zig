@@ -50,6 +50,8 @@ active_flow_list_name: []u8 = &.{},
 active_flow_id: i32 = 0,
 active_flow_state_id: i32 = 0,
 active_flow_owner_entity_id: i64 = 0,
+client_black_screen_open: bool = false,
+next_entity_id: i64 = 1,
 plot_added_rover_slot: ?usize = null,
 plot_saved_cur_role: i32 = 0,
 plot_saved_slot_role_id: i32 = 0,
@@ -412,10 +414,7 @@ pub fn deinit(scene: *Scene, gpa: Allocator, fs: *FileSystem) void {
     scene.dynamic_interact_options.deinit(gpa);
     for (scene.play_bubbles.items) |*rec| rec.deinit(gpa);
     scene.play_bubbles.deinit(gpa);
-
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    scene.clear_entities(&arena, fs) catch return;
+    _ = fs;
 }
 
 /// Records the currently playing flow and owns a copy of its `flow_list_name`.
@@ -1292,11 +1291,6 @@ fn spawnWithOptionalNetId(scene: *Scene, gpa: Allocator, fs: *FileSystem, compon
     _ = try scene.refreshFsmHateAtIndex(gpa, scene.entities.len - 1, false);
     try scene.refreshSummonedFsmHate(gpa, id);
 
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-
-    try storage.save(arena.allocator(), fs, scene.player_id, scene.instance_id);
-
     if (storage.fsm != null) try scene.fsm_wakes.markDirty(gpa, id);
 
     return .{ .index = scene.entities.len - 1, .net_id = id };
@@ -1308,40 +1302,22 @@ pub fn delete(
     scene_id: i32,
     net_id: i64,
 ) !void {
-    var path_buf: [512]u8 = undefined;
-    const path = try std.fmt.bufPrint(
-        path_buf[0..],
-        "player/{d}/scene/{d}/entity/{d}",
-        .{ player_id, scene_id, net_id },
-    );
-    try fs.root_dir.deleteTree(fs.io, path);
-
-    try fs.map_lock.lock(fs.io);
-    defer fs.map_lock.unlock(fs.io);
-
-    if (fs.map.fetchSwapRemove(path)) |entry| {
-        fs.gpa.free(entry.key);
-        if (entry.value.content) |content| {
-            fs.gpa.free(content);
-        }
-    }
+    _ = fs;
+    _ = player_id;
+    _ = scene_id;
+    _ = net_id;
 }
 
 pub fn remove(scene: *Scene, gpa: Allocator, fs: *FileSystem, net_id: i64) !void {
+    _ = fs;
     const index = scene.net_id_map.get(net_id) orelse return;
-    try delete(fs, scene.player_id, scene.instance_id, net_id);
     try scene.removeEntityState(gpa, index, net_id);
 }
 
 pub fn rollbackSpawn(scene: *Scene, gpa: Allocator, fs: *FileSystem, net_id: i64) !void {
+    _ = fs;
     const index = scene.net_id_map.get(net_id) orelse return;
-    const delete_error: ?anyerror = blk: {
-        delete(fs, scene.player_id, scene.instance_id, net_id) catch |err| break :blk err;
-        break :blk null;
-    };
-
     try scene.removeEntityState(gpa, index, net_id);
-    if (delete_error) |err| return err;
 }
 
 fn removeEntityState(scene: *Scene, gpa: Allocator, index: usize, net_id: i64) !void {
@@ -1430,12 +1406,11 @@ pub fn saveComponents(
     entity: Entity,
     comptime components: []const type,
 ) !void {
-    const storage = scene.entities.get(entity.index);
-
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-
-    try storage.savePartial(arena.allocator(), fs, scene.player_id, scene.instance_id, components);
+    _ = scene;
+    _ = fs;
+    _ = gpa;
+    _ = entity;
+    _ = components;
 }
 
 pub fn saveInstance(scene: *Scene, fs: *FileSystem, gpa: Allocator) !void {
@@ -1451,39 +1426,19 @@ pub fn saveInstance(scene: *Scene, fs: *FileSystem, gpa: Allocator) !void {
 }
 
 pub fn nextEntityId(scene: *Scene, fs: *FileSystem, gpa: Allocator) !i64 {
-    const incr_path = try scene.entityCounterPath(gpa);
-    defer gpa.free(incr_path);
-
-    return try incr.next(i64, fs, incr_path);
+    _ = fs;
+    _ = gpa;
+    const id = scene.next_entity_id;
+    scene.next_entity_id += 1;
+    return id;
 }
 
 pub fn ensureNextEntityIdAtLeast(scene: *Scene, fs: *FileSystem, gpa: Allocator, next_id: i64) !void {
-    if (next_id <= 1) return;
-
-    const incr_path = try scene.entityCounterPath(gpa);
-    defer gpa.free(incr_path);
-
-    var buf: [32]u8 = undefined;
-    if (try fs.lockFile(incr_path)) |lock_value| {
-        var lock = lock_value;
-        var tokens = std.mem.tokenizeAny(u8, lock.content, " \r\n");
-        const current_id = std.fmt.parseInt(i64, tokens.next() orelse {
-            try lock.unlock(null);
-            return error.InvalidCounterFile;
-        }, 10) catch {
-            try lock.unlock(null);
-            return error.InvalidCounterFile;
-        };
-
-        if (current_id < next_id) {
-            try lock.unlock(try std.fmt.bufPrint(&buf, "{d}\n", .{next_id}));
-        } else {
-            try lock.unlock(null);
-        }
-        return;
+    _ = fs;
+    _ = gpa;
+    if (next_id > scene.next_entity_id) {
+        scene.next_entity_id = next_id;
     }
-
-    try fs.writeFile(incr_path, try std.fmt.bufPrint(&buf, "{d}\n", .{next_id}));
 }
 
 fn entityCounterPath(scene: *Scene, gpa: Allocator) ![]u8 {

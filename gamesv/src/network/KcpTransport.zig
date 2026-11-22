@@ -13,8 +13,9 @@ pub const pre_auth_idle_timeout_ms: i64 = 30_000;
 pub const authenticated_idle_timeout_ms: i64 = 5 * 60_000;
 pub const overhead = kcp_module.overhead;
 const send_failure_limit = 3;
-const action_limit = 64;
-const time_limit_ns = 2 * std.time.ns_per_ms;
+const action_limit = 256;
+const time_limit_ns = 4 * std.time.ns_per_ms;
+const outbound_batch_limit = 16;
 
 const StreamAssembler = struct {
     gpa: Allocator,
@@ -169,7 +170,7 @@ const Session = struct {
         session.kcp.setOutput(kcpOutput);
         session.kcp.dead_link = 40;
         _ = session.kcp.noDelay(1, 10, 2, 1);
-        _ = session.kcp.wndSize(128, 256);
+        _ = session.kcp.wndSize(256, 256);
     }
 
     fn deinit(session: *Session, gpa: Allocator) void {
@@ -625,8 +626,13 @@ pub const Registry = struct {
     }
 
     fn sendOne(registry: *Registry, io: Io, session: *Session, now_ms: i64) bool {
-        var frames: [1]OwnedFrame = undefined;
-        const count = session.handle.outbound.get(io, &frames, 0) catch |err| switch (err) {
+        var frames: [outbound_batch_limit]OwnedFrame = undefined;
+        const max_batch: usize = blk: {
+            const wait_snd = session.kcp.waitSnd();
+            if (wait_snd >= session.kcp.snd_wnd) break :blk 1;
+            break :blk @min(outbound_batch_limit, session.kcp.snd_wnd - wait_snd);
+        };
+        const count = session.handle.outbound.get(io, frames[0..max_batch], 0) catch |err| switch (err) {
             error.Closed => return false,
             else => {
                 registry.markClosing(io, session, .transport_error);
@@ -635,12 +641,19 @@ pub const Registry = struct {
         };
         if (count == 0) return false;
 
-        const frame = frames[0];
-        defer registry.gpa.free(frame.bytes);
-        _ = session.kcp.send(frame.bytes) catch {
+        var send_err = false;
+        for (frames[0..count]) |frame| {
+            defer registry.gpa.free(frame.bytes);
+            if (!send_err) {
+                _ = session.kcp.send(frame.bytes) catch {
+                    send_err = true;
+                };
+            }
+        }
+        if (send_err) {
             registry.markClosing(io, session, .transport_error);
             return true;
-        };
+        }
         session.kcp.flush() catch {
             registry.markClosing(io, session, .send_failed);
             return true;

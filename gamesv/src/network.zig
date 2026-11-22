@@ -10,7 +10,7 @@ const KcpTransport = @import("network/KcpTransport.zig");
 const gm_bridge = @import("network/gm_bridge.zig");
 
 const udp_receive_capacity: usize = 1500;
-const udp_packet_queue_capacity: usize = 256;
+const udp_packet_queue_capacity: usize = 1024;
 const krkcp_syn: u8 = 0xED;
 const krkcp_ack: u8 = 0xEE;
 const kcp_overhead = KcpTransport.overhead;
@@ -449,6 +449,88 @@ fn startSession(
     return handle;
 }
 
+fn handleIncomingPacket(
+    io: Io,
+    gpa: Allocator,
+    fs: *FileSystem,
+    assets: *const Assets,
+    socket: *const Io.net.Socket,
+    transport_work: *Io.Event,
+    gameplay_completions: *Io.Queue(*ConnectionHandle),
+    session_manager: *SessionManager,
+    registry: *KcpTransport.Registry,
+    packet: *const IncomingPacket,
+    now_ms: i64,
+) void {
+    const log = std.log.scoped(.net_recv);
+    const data = packet.data();
+    if (data.len == 35 and data[0] == krkcp_syn) {
+        if (startSession(
+            io,
+            gpa,
+            fs,
+            assets,
+            socket,
+            packet.from,
+            transport_work,
+            gameplay_completions,
+            session_manager,
+            registry,
+            now_ms,
+        )) |handle| {
+            var ack: [5]u8 = undefined;
+            ack[0] = krkcp_ack;
+            std.mem.writeInt(u32, ack[1..5], handle.conv_id, .little);
+            socket.send(io, &packet.from, ack[0..]) catch {};
+        } else |err| {
+            log.err("failed to initialize session: {t}", .{err});
+        }
+    } else if (data.len >= kcp_overhead) {
+        const conv_id = std.mem.readInt(u32, data[0..4], .little);
+        _ = registry.input(io, conv_id, &packet.from, data, now_ms);
+    }
+}
+
+fn drainIncomingPackets(
+    io: Io,
+    gpa: Allocator,
+    fs: *FileSystem,
+    assets: *const Assets,
+    socket: *const Io.net.Socket,
+    transport_work: *Io.Event,
+    gameplay_completions: *Io.Queue(*ConnectionHandle),
+    session_manager: *SessionManager,
+    registry: *KcpTransport.Registry,
+    incoming_packets: *Io.Queue(IncomingPacket),
+    now_ms: i64,
+) bool {
+    var batch: [32]IncomingPacket = undefined;
+    var drained: usize = 0;
+    while (drained < 128) {
+        const count = incoming_packets.get(io, &batch, 0) catch |err| switch (err) {
+            error.Closed, error.Canceled => return true,
+        };
+        if (count == 0) break;
+        for (batch[0..count]) |*packet| {
+            handleIncomingPacket(
+                io,
+                gpa,
+                fs,
+                assets,
+                socket,
+                transport_work,
+                gameplay_completions,
+                session_manager,
+                registry,
+                packet,
+                now_ms,
+            );
+        }
+        drained += count;
+    }
+    return false;
+}
+
 fn receiveLoop(io: Io, gpa: Allocator, fs: *FileSystem, assets: *const Assets, session_manager: *SessionManager, socket: Io.net.Socket) void {
     const log = std.log.scoped(.net_recv);
     defer socket.close(io);
@@ -475,6 +557,19 @@ fn receiveLoop(io: Io, gpa: Allocator, fs: *FileSystem, assets: *const Assets, s
     while (true) {
         transport_work.reset();
         const before_wait_ms = Io.Clock.awake.now(io).toMilliseconds();
+        if (drainIncomingPackets(
+            io,
+            gpa,
+            fs,
+            assets,
+            &socket,
+            &transport_work,
+            &gameplay_completions,
+            session_manager,
+            &registry,
+            &incoming_packets,
+            before_wait_ms,
+        )) break;
         if (registry.drainReady(io, before_wait_ms)) continue;
 
         const wake = waitForWake(
@@ -491,32 +586,32 @@ fn receiveLoop(io: Io, gpa: Allocator, fs: *FileSystem, assets: *const Assets, s
         const now_ms = Io.Clock.awake.now(io).toMilliseconds();
         if (wake.receiver_closed) break;
         if (wake.packet) |packet| {
-            const data = packet.data();
-            if (data.len == 35 and data[0] == krkcp_syn) {
-                if (startSession(
-                    io,
-                    gpa,
-                    fs,
-                    assets,
-                    &socket,
-                    packet.from,
-                    &transport_work,
-                    &gameplay_completions,
-                    session_manager,
-                    &registry,
-                    now_ms,
-                )) |handle| {
-                    var ack: [5]u8 = undefined;
-                    ack[0] = krkcp_ack;
-                    std.mem.writeInt(u32, ack[1..5], handle.conv_id, .little);
-                    socket.send(io, &packet.from, ack[0..]) catch {};
-                } else |err| {
-                    log.err("failed to initialize session: {t}", .{err});
-                }
-            } else if (data.len >= kcp_overhead) {
-                const conv_id = std.mem.readInt(u32, data[0..4], .little);
-                _ = registry.input(io, conv_id, &packet.from, data, now_ms);
-            }
+            handleIncomingPacket(
+                io,
+                gpa,
+                fs,
+                assets,
+                &socket,
+                &transport_work,
+                &gameplay_completions,
+                session_manager,
+                &registry,
+                &packet,
+                now_ms,
+            );
+            if (drainIncomingPackets(
+                io,
+                gpa,
+                fs,
+                assets,
+                &socket,
+                &transport_work,
+                &gameplay_completions,
+                session_manager,
+                &registry,
+                &incoming_packets,
+                now_ms,
+            )) break;
         }
 
         if (wake.gameplay_done) |handle| {

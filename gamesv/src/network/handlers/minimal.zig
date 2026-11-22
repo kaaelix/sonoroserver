@@ -17,6 +17,7 @@ const RewardService = @import("../../logic/helpers/reward.zig");
 const EventQueue = @import("../../logic/EventQueue.zig");
 const Scene = @import("../../logic/Scene.zig");
 const PlayerRoleComponent = @import("../../logic/component/player/PlayerRoleComponent.zig");
+const Connection = @import("../../network/Connection.zig");
 const Transaction = @import("../handlers.zig").Transaction;
 const pb_kv = @import("pb_kv.zig");
 
@@ -744,7 +745,24 @@ pub fn onSceneBlockSplitPlayerNeedBlockPush(_: *Transaction(pb.SceneBlockSplitPl
 
 pub fn onVersionInfoPush(_: *Transaction(pb.VersionInfoPush)) !void {}
 
-pub fn onBlackScreenStatePush(_: *Transaction(pb.BlackScreenStatePush)) !void {}
+pub fn onBlackScreenStatePush(
+    txn: *Transaction(pb.BlackScreenStatePush),
+    scene: *Scene,
+    conn: *Connection,
+    alloc: mem.Alloc,
+    io: std.Io,
+) !void {
+    scene.client_black_screen_open = txn.message.IsOpen;
+    if (txn.message.IsOpen and
+        scene.active_flow_inc_id == 0 and
+        std.mem.startsWith(u8, txn.message.BlackScreenReason, "SkipPlot_"))
+    {
+        scene.client_black_screen_open = false;
+        conn.pushBestEffort(alloc.gpa, io, pb.FlowServerSkipNotify{
+            .FadeOutScreen = true,
+        });
+    }
+}
 
 pub fn onAdviceSetRequest(
     txn: *Transaction(pb.AdviceSetRequest),
