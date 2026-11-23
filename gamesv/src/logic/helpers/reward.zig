@@ -16,6 +16,8 @@ const EchoInfo = @import("../../fs/EchoInfo.zig");
 const special_item_incr = @import("../../fs/special_item_incr.zig");
 const CalabashHelper = @import("calabash.zig");
 const EnergyHelper = @import("energy.zig");
+const MoraleHelper = @import("morale.zig");
+const PlayerProgressComponent = @import("../component/player/PlayerProgressComponent.zig");
 
 pub const RewardItem = struct {
     item_id: i32,
@@ -32,6 +34,7 @@ pub const RewardContext = struct {
     inventory_comp: *PlayerInventoryComponent,
     weapon_comp: *PlayerWeaponComponent,
     echo_comp: *PlayerEchoComponent,
+    progress_comp: ?*PlayerProgressComponent = null,
 };
 
 pub const GrantResult = struct {
@@ -197,6 +200,7 @@ pub fn grantItems(
     var inv_dirty = false;
     var calabash_dirty = false;
     var energy_dirty = false;
+    var morale_dirty = false;
     var bonus_union_exp: i32 = 0;
 
     var add_normal_list: std.ArrayList(pb.NormalItem) = .empty;
@@ -321,12 +325,18 @@ pub fn grantItems(
                     bonus_union_exp += discovery.union_exp;
                 }
             }
-        } else if (ctx.assets.tables.item_info.getDataById(entry.item_id) != null) {
+        } else if (entry.item_id == MoraleHelper.default_keep_item_id or
+            entry.item_id == MoraleHelper.default_temp_item_id or
+            ctx.assets.tables.item_info.getDataById(entry.item_id) != null)
+        {
             result.granted_count += 1;
-            // Normal inventory item (consumables, upgrade materials, quest items, etc.)
+            // Normal inventory item (consumables, upgrade materials, quest items, morale EXP items, etc.)
             const old_count = ctx.inventory_comp.info.normalItemCount(entry.item_id);
             try InventoryInfo.addNormalItem(&ctx.inventory_comp.info, ctx.alloc.gpa, entry.item_id, entry.count);
             inv_dirty = true;
+            if (entry.item_id == MoraleHelper.default_keep_item_id or entry.item_id == MoraleHelper.default_temp_item_id) {
+                morale_dirty = true;
+            }
             const new_total = ctx.inventory_comp.info.normalItemCount(entry.item_id);
             const pb_item: pb.NormalItem = .{ .Id = entry.item_id, .Count = new_total, .ExpireTime = 0 };
             if (old_count == 0) {
@@ -393,6 +403,22 @@ pub fn grantItems(
     if (calabash_dirty) {
         try PlayerEchoComponent.saveCalabash(ctx.alloc.gpa, ctx.fs, ctx.echo_comp.player_id, ctx.echo_comp.calabash_info);
         try ctx.conn.push(ctx.alloc.gpa, ctx.io, try CalabashHelper.buildMsgNotify(ctx.alloc.arena, ctx.assets, ctx.basic_comp, ctx.echo_comp));
+    }
+
+    if (morale_dirty) {
+        _ = try MoraleHelper.syncFromInventory(
+            ctx.alloc,
+            ctx.fs,
+            ctx.io,
+            ctx.conn,
+            ctx.assets,
+            ctx.basic_comp,
+            ctx.inventory_comp,
+            ctx.progress_comp,
+            null,
+            null,
+            true,
+        );
     }
 
     if (show_popup and reward_infos.items.len > 0) {

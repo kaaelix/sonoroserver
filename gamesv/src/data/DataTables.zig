@@ -69,6 +69,28 @@ pub const DragonPool = struct {
     DropIds: []const i32 = &.{},
     DarkCoastDeliveryList: []const i32 = &.{},
 };
+pub const MoraleKeepLevel = struct {
+    Level: i32,
+    Experience: i32 = 0,
+    LvAddDesc: []const u8 = "",
+};
+pub const MoralePlay = struct {
+    Id: i32,
+    BattleScoreId: i32 = 0,
+    ExpItemId: []const i32 = &.{},
+};
+pub const BattleScoreConf = struct {
+    Id: i32,
+    Type: i32 = 0,
+    LevelGroupId: i32 = 0,
+};
+pub const BattleScoreLevelConf = struct {
+    Id: i32,
+    GroupId: i32 = 0,
+    Level: i32 = 0,
+    LowerUpperLimits: []const i32 = &.{},
+    BuffTime: i32 = 0,
+};
 pub const LoadingLevelArea = struct {
     Id: i32,
     BeginTime: i64 = 0,
@@ -494,6 +516,10 @@ motor_linkage_quest: Table(MotorLinkageQuest, "TaskId"),
     quest_ref_video_config: Table(QuestRefVideoConfig, "Id"),
     quest_ref_map_block_config: Table(QuestRefMapBlockConfig, "QuestId"),
     quest_resource_white: Table(QuestResourceWhite, "QuestId"),
+    morale_keep_level: Table(MoraleKeepLevel, "Level"),
+    morale_play: Table(MoralePlay, "Id"),
+    battle_score_conf: Table(BattleScoreConf, "Id"),
+    battle_score_level_conf: Table(BattleScoreLevelConf, "Id"),
 
     fn loadTableItems(
     comptime T: type,

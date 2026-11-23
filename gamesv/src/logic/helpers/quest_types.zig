@@ -117,6 +117,7 @@ pub fn makeRewardContext(ctx: QuestContext) RewardService.RewardContext {
         .inventory_comp = ctx.inventory_comp,
         .weapon_comp = ctx.weapon_comp,
         .echo_comp = ctx.echo_comp,
+        .progress_comp = ctx.progress_comp,
     };
 }
 

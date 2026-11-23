@@ -1,8 +1,11 @@
 const std = @import("std");
+const BaseInfo = @import("BaseInfo.zig");
 
 pub const EmptyObj = struct {};
 
 pub const HookInteractConfig = struct {
+    Type: ?[]const u8 = null,
+    GravityDirection: ?BaseInfo.GravityDirection = null,
     HookActions: ?[]const std.json.Value = null,
     FinishActions: ?[]const std.json.Value = null,
     ExitHookActions: ?[]const std.json.Value = null,
@@ -407,7 +410,7 @@ pub const HookLockPoint = struct {
     DisableAtCreateStage: ?bool = null,
     Disabled: ?bool = null,
     GazeNextPointAfterInteract: ?EmptyObj = null,
-    GravityConfig: ?EmptyObj = null,
+    GravityConfig: ?BaseInfo.GravityConfigData = null,
     HookEnableCondition: ?EmptyObj = null,
     HookInteractConfig: ?HookInteractConfig = null,
     HookLockCd: ?i64 = null,

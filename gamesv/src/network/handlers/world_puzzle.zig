@@ -31,6 +31,7 @@ const entity_proto = @import("../../logic/helpers/entity_proto.zig");
 const EnergyHelper = @import("../../logic/helpers/energy.zig");
 const pb_kv = @import("pb_kv.zig");
 const spline_state = @import("../../logic/helpers/spline_state.zig");
+const GravityHelper = @import("../../logic/helpers/gravity.zig");
 
 const log = std.log.scoped(.world_puzzle);
 
@@ -1204,8 +1205,34 @@ pub fn onGravityHookLockPointChangeGravityRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistClaimKey(alloc, fs, pc, "gravity_hook:chg", txn.message.EntityId);
+    if (qctx.scene) |scene| {
+        const idx_opt: ?usize = scene.net_id_map.get(txn.message.EntityId) orelse blk: {
+            if (std.math.cast(i32, txn.message.EntityId)) |cfg32| {
+                if (scene.findEntityNetIdByConfigId(cfg32)) |nid| {
+                    break :blk scene.net_id_map.get(nid);
+                }
+            }
+            break :blk null;
+        };
+        if (idx_opt) |idx| {
+            const cfg_id = scene.entities.items(.config)[idx].config_id;
+            const rot: [3]f32 = if (scene.entities.items(.position)[idx]) |pos| pos.rotation else .{ 0, 0, 0 };
+            const grav = GravityHelper.resolveHookGravity(qctx.assets, scene.instance_id, cfg_id, rot);
+            if (grav.configured) {
+                scene.setCurrentRoleGravity(grav.dir);
+                QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onGravityHookChangeGravity", err);
+            }
+        } else if (txn.message.EntityId > 0) {
+            const grav = GravityHelper.resolveHookGravity(qctx.assets, scene.instance_id, txn.message.EntityId, .{ 0, 0, 0 });
+            if (grav.configured) {
+                scene.setCurrentRoleGravity(grav.dir);
+                QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onGravityHookChangeGravity", err);
+            }
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
 }
 

@@ -17,6 +17,7 @@ const PlayerGuideComponent = @import("../component/player/PlayerGuideComponent.z
 const PlayerProgressComponent = @import("../component/player/PlayerProgressComponent.zig");
 const ProgressInfo = @import("../../fs/ProgressInfo.zig");
 const CalabashHelper = @import("calabash.zig");
+const MoraleHelper = @import("morale.zig");
 const Range = @import("../../data/tables/entity_components/Range.zig");
 const Scene = @import("../Scene.zig");
 
@@ -1198,18 +1199,7 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
         const min_level = jsonInt(obj.get("MinMoraleLevel")) orelse return false;
         const max_level = jsonInt(obj.get("MaxMoraleLevel")) orelse return false;
         if (min_level > max_level) return false;
-        // Decompiled MoraleBattleModel initializes MoraleLevel to 1 and the
-        // condition reads GetMoraleLevel() (not the temporary level). A
-        // persisted server value can override this baseline once the morale
-        // gameplay state is available to the server.
-        const saved_level: i64 = if (ctx.progress_comp) |progress|
-            progress.info.getKeyInt("morale:level")
-        else
-            0;
-        const current_level: i32 = if (saved_level > 0)
-            @intCast(@min(saved_level, std.math.maxInt(i32)))
-        else
-            1;
+        const current_level = MoraleHelper.resolveCurrentKeepLevel(ctx.assets, ctx.inventory_comp, ctx.progress_comp);
         return current_level >= min_level and current_level <= max_level;
     } else if (std.mem.eql(u8, ct, "CheckCurrentRole")) {
         const role_id = jsonInt(obj.get("RoleId")) orelse return false;
@@ -2673,8 +2663,18 @@ fn evalFormationRoleInfo(ctx: EvalContext, obj: std.json.ObjectMap) bool {
         }
         return false;
     }
-    // FeatureCollection is a separate client feature system. The server has no
-    // authoritative progress source for its collection level yet.
+    if (std.mem.eql(u8, option_type, "FeatureCollection")) {
+        const pool_id = jsonInt(option.object.get("Id")) orelse return false;
+        const required = jsonInt(option.object.get("Level")) orelse return false;
+        const compare = getParamStr(option.object, "Compare") orelse "Ge";
+        const progress = ctx.progress_comp orelse return false;
+        const assets = ctx.assets orelse return false;
+        const pool = assets.tables.dragon_pool.getDataById(pool_id) orelse return false;
+        var key_buf: [48]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "mingsu:lvl:{d}", .{pool.Id}) catch return false;
+        const level: i32 = @intCast(std.math.clamp(progress.info.getKeyInt(key), 0, std.math.maxInt(i32)));
+        return compareInts(level, required, compare);
+    }
     return false;
 }
 

@@ -12,6 +12,7 @@ const FileSystem = @import("common").FileSystem;
 const Transaction = @import("../handlers.zig").Transaction;
 const Assets = @import("../../data/Assets.zig");
 const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
+const GravityHelper = @import("../../logic/helpers/gravity.zig");
 
 const log = std.log.scoped(.teleport);
 
@@ -217,44 +218,6 @@ const SpawnTransform = struct {
     has_gravity_config: bool = false,
 };
 
-fn resolveEntityGravity(entity_cfg: *const LevelEntityConfig, base_rot: [3]f32) struct { dir: [3]f32, configured: bool } {
-    const base_info = entity_cfg.ComponentsData.BaseInfoComponent orelse return .{ .dir = .{ 0, 0, -1 }, .configured = false };
-    const gravity_config = base_info.GravityConfig orelse return .{ .dir = .{ 0, 0, -1 }, .configured = false };
-    const direction = gravity_config.GravityDirection orelse return .{ .dir = .{ 0, 0, -1 }, .configured = false };
-
-    if (direction.Direction) |v| {
-        return .{ .dir = .{ v.X, v.Y, v.Z }, .configured = true };
-    }
-    if (direction.WorldAxis) |axis| {
-        if (std.mem.eql(u8, axis, "PositiveX")) return .{ .dir = .{ 1, 0, 0 }, .configured = true };
-        if (std.mem.eql(u8, axis, "NegativeX")) return .{ .dir = .{ -1, 0, 0 }, .configured = true };
-        if (std.mem.eql(u8, axis, "PositiveY")) return .{ .dir = .{ 0, 1, 0 }, .configured = true };
-        if (std.mem.eql(u8, axis, "NegativeY")) return .{ .dir = .{ 0, -1, 0 }, .configured = true };
-        if (std.mem.eql(u8, axis, "PositiveZ")) return .{ .dir = .{ 0, 0, 1 }, .configured = true };
-        if (std.mem.eql(u8, axis, "NegativeZ")) return .{ .dir = .{ 0, 0, -1 }, .configured = true };
-    }
-    if (direction.Type) |kind| {
-        if (std.mem.eql(u8, kind, "SelfRotation")) {
-            const to_rad = std.math.pi / 180.0;
-            const sr = @sin(base_rot[0] * to_rad);
-            const cr = @cos(base_rot[0] * to_rad);
-            const sp = @sin(base_rot[1] * to_rad);
-            const cp = @cos(base_rot[1] * to_rad);
-            const sy = @sin(base_rot[2] * to_rad);
-            const cy = @cos(base_rot[2] * to_rad);
-            return .{
-                .dir = .{
-                    cr * sp * cy + sr * sy,
-                    cr * sp * sy - cy * sr,
-                    -(cr * cp),
-                },
-                .configured = true,
-            };
-        }
-    }
-    return .{ .dir = .{ 0, 0, -1 }, .configured = false };
-}
-
 fn rotateLocalOffsetUe(local: [3]f32, rot_deg: [3]f32) [3]f32 {
     const to_rad = std.math.pi / 180.0;
     const sr = @sin(rot_deg[0] * to_rad);
@@ -278,7 +241,7 @@ fn resolveTeleporterSpawn(
 ) ?SpawnTransform {
     const base_pos = Assets.AssetIndexes.entityWorldPos(entity_cfg) orelse return null;
     const base_rot = Assets.AssetIndexes.entityWorldRot(entity_cfg);
-    const grav = resolveEntityGravity(entity_cfg, base_rot);
+    const grav = GravityHelper.resolveEntityGravity(entity_cfg, base_rot);
 
     const is_pillar_tp = is_nexus or
         (std.mem.indexOf(u8, entity_cfg.BlueprintType, "Teleport") != null and

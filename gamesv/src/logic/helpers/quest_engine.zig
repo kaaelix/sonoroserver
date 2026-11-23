@@ -18,6 +18,7 @@ const ConditionEvaluator = @import("condition.zig");
 const gameplay_tags = @import("gameplay_tags.zig");
 const RewardService = @import("reward.zig");
 const quest_types = @import("quest_types.zig");
+const MoraleHelper = @import("morale.zig");
 const QuestActions = @import("quest_actions.zig");
 const LevelPlayHelper = @import("level_play.zig");
 const RoleHelper = @import("role.zig");
@@ -170,6 +171,7 @@ pub fn onSceneLoadingFinish(ctx: QuestContext) !void {
     // Always re-sync quest tree & tracker state after scene loading finishes (including reconnects
     // or cutscenes in progress) so HUD objectives and map markers never disappear.
     try pushQuestStateNotifies(ctx);
+    try syncMoraleOnSceneLoad(ctx);
 
     if (scene.active_flow_inc_id != 0) return;
 
@@ -2023,7 +2025,30 @@ pub fn onItemUse(ctx: QuestContext, item_id: i32, count: i32) !void {
     }
 }
 
-pub fn onItemGained(ctx: QuestContext, _: i32) !void {
+fn syncMoraleOnSceneLoad(ctx: QuestContext) !void {
+    const active_play: i64 = if (ctx.progress_comp) |pc| pc.info.getKeyInt("morale:active_play") else 0;
+    const play_1_on: i64 = if (ctx.progress_comp) |pc| pc.info.getKeyInt("morale:play:1") else 0;
+    const cfg = MoraleHelper.resolvePlayConfig(ctx.assets, if (active_play > 0 and active_play <= std.math.maxInt(i32)) @intCast(active_play) else 1);
+    const keep_exp = ctx.inventory_comp.info.normalItemCount(cfg.keep_item_id);
+    const temp_exp = ctx.inventory_comp.info.normalItemCount(cfg.temp_item_id);
+    if (active_play <= 0 and play_1_on <= 0 and keep_exp <= 0 and temp_exp <= 0) return;
+
+    _ = try MoraleHelper.syncFromInventory(
+        ctx.alloc,
+        ctx.fs,
+        ctx.io,
+        ctx.conn,
+        ctx.assets,
+        ctx.basic_comp,
+        ctx.inventory_comp,
+        ctx.progress_comp,
+        cfg.play_id,
+        null,
+        true,
+    );
+}
+
+pub fn onItemGained(ctx: QuestContext, item_id: i32) !void {
     const Check = struct {
         fn run(
             c: QuestContext,
@@ -2045,6 +2070,25 @@ pub fn onItemGained(ctx: QuestContext, _: i32) !void {
         }
     };
     var progressed = try advanceMatchingChildNodes(ctx, {}, Check.run);
+    const cfg = MoraleHelper.resolvePlayConfig(ctx.assets, 1);
+    if (item_id == cfg.keep_item_id or item_id == cfg.temp_item_id or
+        item_id == MoraleHelper.default_keep_item_id or item_id == MoraleHelper.default_temp_item_id)
+    {
+        _ = try MoraleHelper.syncFromInventory(
+            ctx.alloc,
+            ctx.fs,
+            ctx.io,
+            ctx.conn,
+            ctx.assets,
+            ctx.basic_comp,
+            ctx.inventory_comp,
+            ctx.progress_comp,
+            null,
+            null,
+            true,
+        );
+        try onConditionStateChanged(ctx);
+    }
     if (try refreshAvailableQuests(ctx, true)) progressed = true;
     if (try checkActiveQuestFailedMonitors(ctx, null)) {
         progressed = true;

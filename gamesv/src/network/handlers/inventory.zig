@@ -740,6 +740,7 @@ pub fn onHandInMingSuRequest(
     basic_comp: *PlayerBasicComponent,
     inventory_comp: *PlayerInventoryComponent,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const pool = assets.tables.dragon_pool.getDataById(txn.message.DragonPoolId) orelse {
         txn.respond(.{ .ErrorCode = .RequestParamError });
@@ -786,6 +787,9 @@ pub fn onHandInMingSuRequest(
         const gains: i32 = @intCast(new_lvl - cur_lvl);
         try progress_comp.info.setKeyInt(alloc.gpa, lvl_k, @intCast(new_lvl));
         try progress_comp.save(fs, alloc.arena);
+        if (gains > 0) {
+            QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onHandInMingSu", err);
+        }
         txn.respond(.{
             .ErrorCode = .Success,
             .DragonPoolId = txn.message.DragonPoolId,
@@ -798,6 +802,7 @@ pub fn onHandInMingSuRequest(
 
     const next_lvl = @as(i32, @intCast(try progress_comp.info.addKeyInt(alloc.gpa, lvl_k, 1)));
     try progress_comp.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onHandInMingSu", err);
     txn.respond(.{
         .ErrorCode = .Success,
         .DragonPoolId = txn.message.DragonPoolId,

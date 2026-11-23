@@ -20,6 +20,7 @@ const TrialRoles = @import("trial_roles.zig");
 const activity_handler = @import("../../network/handlers/activity.zig");
 const map_handler = @import("../../network/handlers/map.zig");
 const spline_state = @import("spline_state.zig");
+const MoraleHelper = @import("morale.zig");
 
 const log = std.log.scoped(.quest_actions);
 
@@ -332,8 +333,19 @@ pub fn executeAction(
     } else if (std.mem.eql(u8, name, "SetupMoraleSystem")) {
         const mpid = quest_types.jsonInt(params.get("MoralePlayId")) orelse 1;
         const is_on = quest_types.jsonBool(params.get("IsOn")) orelse true;
-        const k = try std.fmt.allocPrint(ctx.alloc.arena, "morale:play:{d}", .{mpid});
-        try recordProgressInt(ctx, k, if (is_on) 1 else 0, false);
+        _ = try MoraleHelper.syncFromInventory(
+            ctx.alloc,
+            ctx.fs,
+            ctx.io,
+            ctx.conn,
+            ctx.assets,
+            ctx.basic_comp,
+            ctx.inventory_comp,
+            ctx.progress_comp,
+            mpid,
+            is_on,
+            true,
+        );
     } else if (std.mem.eql(u8, name, "AddTrialFollowShooter")) {
         const sid = quest_types.jsonInt(params.get("Id")) orelse 0;
         try recordProgressInt(ctx, "trial:follow_shooter", sid, false);
