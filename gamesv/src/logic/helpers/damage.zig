@@ -7,6 +7,7 @@ const Assets = @import("../../data/Assets.zig");
 const FileSystem = @import("common").FileSystem;
 const attributes_helper = @import("attributes.zig");
 const buff_helper = @import("buff.zig");
+const gameplay_tags = @import("gameplay_tags.zig");
 const BuffTimerScheduler = @import("../schedulers/BuffTimerScheduler.zig");
 
 fn levelSliceValue(slice: []const i32, skill_level: i32, default_val: i32) i32 {
@@ -159,7 +160,7 @@ fn computeFormulaRaw(
             const rate = p0 / 10000.0;
             const dmg_reduce = @min(@as(f64, @floatFromInt(attributes_helper.get_attr_value(target_attr, .DamageReduce))) / 10000.0, 1.0);
             const elem_reduce = @min(@as(f64, @floatFromInt(attributes_helper.get_attr_value(target_attr, attributes_helper.get_element_reduce(damage.Element)))) / 10000.0, 1.0);
-            const special_mult = @max(0.0, @as(f64, @floatFromInt(attributes_helper.get_attr_value(attacker_attr, .SpecialDamageChange))) / 10000.0);
+            const special_change = @as(f64, @floatFromInt(attributes_helper.get_attr_value(attacker_attr, .SpecialDamageChange))) / 10000.0;
             const target_def = @max(0, attributes_helper.get_attr_value(target_attr, .Def));
             const ignore_def = std.math.clamp(@as(f64, @floatFromInt(attributes_helper.get_attr_value(attacker_attr, .IgnoreDefRate))) / 10000.0, 0.0, 1.0);
             const lv_term = 800.0 + 8.0 * @as(f64, @floatFromInt(attacker_lv));
@@ -167,7 +168,7 @@ fn computeFormulaRaw(
             const raw_res = attributes_helper.get_attr_value(target_attr, attributes_helper.get_element_res(damage.Element));
             const pen = attributes_helper.get_attr_value(attacker_attr, attributes_helper.get_element_pen(damage.Element));
             const res_mult = resistanceMultiplier(raw_res - pen);
-            return @max(0.0, ab_base * rate * def_mult * res_mult * (1.0 - dmg_reduce) * (1.0 - elem_reduce) * (1.0 + @max(-1.0, special_mult)));
+            return @max(0.0, ab_base * rate * def_mult * res_mult * (1.0 - dmg_reduce) * (1.0 - elem_reduce) * (1.0 + @max(-1.0, special_change)));
         },
         else => return calculateHurtCore(rate_scaled, attacker_attr, target_attr, damage, is_crit),
     }
@@ -178,7 +179,8 @@ fn fluctuationFactor(damage: *const Assets.DataTables.Damage, request: pb.Damage
     const lower = levelSliceValue(damage.FluctuationLower, request.SkillLevel, 10000);
     if (upper == lower) return @as(f64, @floatFromInt(lower)) * 0.0001;
     const seed_mod: i64 = @rem(@max(@as(i64, 0), @as(i64, request.RandomSeed)), 10000);
-    return @as(f64, @floatFromInt(@as(i64, upper - lower) * seed_mod + lower)) * 0.0001;
+    const interp_bp = @as(f64, @floatFromInt(lower)) + (@as(f64, @floatFromInt(upper - lower)) * @as(f64, @floatFromInt(seed_mod)) / 10000.0);
+    return interp_bp * 0.0001;
 }
 
 fn rollIsCrit(request: pb.DamageExecuteRequest, crit_rate: i32, io: std.Io) bool {
@@ -300,12 +302,8 @@ pub fn damageEntity(
     const attacker_lookup = query.byNetId(request.AttackerEntityId);
     const attacker_attr: *const Entity.AttributeComponent = if (attacker_lookup) |comps| comps[2] else &fallback_attacker;
 
-    if (attacker_lookup) |comps| {
-        try applyAttackerEnergy(combat_receive_pack, request, damage, comps[0], comps[2], scene, io, alloc);
-    }
-
     const target_comps = query.byNetId(request.TargetEntityId) orelse {
-        const no_target: pb.DamageExecuteNotify = .{
+        return .{
             .DamageId = request.DamageId,
             .AttackerEntityId = request.AttackerEntityId,
             .TargetEntityId = request.TargetEntityId,
@@ -314,17 +312,12 @@ pub fn damageEntity(
             .DamageContext = request.DamageContext,
             .ElementType = damage.Element,
         };
-        try combat_receive_pack.append(alloc.arena, .{ .Message = .{ .CombatNotifyData = .{
-            .CombatCommon = .{ .EntityId = request.AttackerEntityId },
-            .Message = .{ .DamageExecuteNotify = no_target },
-        } } });
-        return no_target;
     };
 
     const target_entity, const target_buffs, const target_attr = target_comps;
     const before_hp = attributes_helper.get_attr_value(target_attr, .Life);
     if (before_hp <= 0) {
-        const dead_notify: pb.DamageExecuteNotify = .{
+        return .{
             .DamageId = request.DamageId,
             .AttackerEntityId = request.AttackerEntityId,
             .TargetEntityId = request.TargetEntityId,
@@ -333,11 +326,28 @@ pub fn damageEntity(
             .DamageContext = request.DamageContext,
             .ElementType = damage.Element,
         };
-        try combat_receive_pack.append(alloc.arena, .{ .Message = .{ .CombatNotifyData = .{
-            .CombatCommon = .{ .EntityId = request.AttackerEntityId },
-            .Message = .{ .DamageExecuteNotify = dead_notify },
-        } } });
-        return dead_notify;
+    }
+
+    if (damage.CalculateType == 0 and damage.ImmuneType != 0) {
+        const invincible_tag_id = gameplay_tags.idFromName(&assets.tables.gameplay_tag_remap, "功能.逻辑状态标识.无敌") catch 1918148596;
+        if (scene.entities.items(.tag)[target_entity.index]) |*target_tags| {
+            if (target_tags.hasTag(&assets.tables.gameplay_tag_parent, invincible_tag_id)) {
+                return .{
+                    .DamageId = request.DamageId,
+                    .AttackerEntityId = request.AttackerEntityId,
+                    .TargetEntityId = request.TargetEntityId,
+                    .PartIndex = effective_part_index,
+                    .SkillLevel = request.SkillLevel,
+                    .DamageContext = request.DamageContext,
+                    .ImmuneType = .Invincible,
+                    .ElementType = damage.Element,
+                };
+            }
+        }
+    }
+
+    if (attacker_lookup) |comps| {
+        try applyAttackerEnergy(combat_receive_pack, request, damage, comps[0], comps[2], scene, io, alloc);
     }
 
     const crit_rate = attributes_helper.get_attr_value(attacker_attr, .Crit);
@@ -431,11 +441,13 @@ pub fn damageEntity(
                         alloc,
                         io,
                     );
-                    try scene.markFsmDirty(
-                        alloc.gpa,
-                        target_entity.net_id,
-                        Entity.FsmComponent.WakeReason.attribute,
-                    );
+                    if (after_hp > 0) {
+                        try scene.markFsmDirty(
+                            alloc.gpa,
+                            target_entity.net_id,
+                            Entity.FsmComponent.WakeReason.attribute,
+                        );
+                    }
                 }
                 if (after_hp <= 0) {
                     killed_target = true;
@@ -464,7 +476,7 @@ pub fn damageEntity(
         }
     }
 
-    const notify: pb.DamageExecuteNotify = .{
+    return .{
         .DamageId = request.DamageId,
         .AttackerEntityId = request.AttackerEntityId,
         .TargetEntityId = request.TargetEntityId,
@@ -478,11 +490,4 @@ pub fn damageEntity(
         .ElementType = damage.Element,
         .ChangeLife = change_life,
     };
-
-    try combat_receive_pack.append(alloc.arena, .{ .Message = .{ .CombatNotifyData = .{
-        .CombatCommon = .{ .EntityId = request.AttackerEntityId },
-        .Message = .{ .DamageExecuteNotify = notify },
-    } } });
-
-    return notify;
 }

@@ -3627,6 +3627,24 @@ fn applyVehicleAction(ctx: QuestContext, name: []const u8, params: std.json.Obje
                 const tv_type = quest_types.jsonStr(tv.object.get("Type")) orelse "";
                 if (quest_types.jsonInt(tv.object.get("EntityId"))) |vid| {
                     ensureQuestEntitySpawned(ctx, vid);
+                    if (ctx.progress_comp) |pc| {
+                        const prev_vid = pc.info.getKeyInt("vehicle:cur");
+                        if (prev_vid > 0 and prev_vid != vid) {
+                            if (ctx.scene) |scene| {
+                                if (scene.findEntityNetIdByConfigId(@intCast(prev_vid))) |old_nid| {
+                                    if (scene.net_id_map.get(old_nid)) |old_idx| {
+                                        if (scene.entities.items(.vehicle)[old_idx]) |*old_veh| old_veh.occupied = false;
+                                    }
+                                }
+                            }
+                            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.VehicleUpdateNotify{
+                                .EntityId = 0,
+                                .PlayerId = ctx.basic_comp.player_id,
+                                .SeatId = -1,
+                                .ExitType = .ExitVehicleTypeNormal,
+                            }) catch {};
+                        }
+                    }
                     try recordProgressInt(ctx, "vehicle:cur", vid, false);
                     try recordProgressInt(ctx, "vehicle:seat", seat, false);
                     if (ctx.scene) |scene| {

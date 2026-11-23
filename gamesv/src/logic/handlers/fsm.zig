@@ -112,6 +112,9 @@ pub fn handleFsmWake(
                         std.log.scoped(.level_play).warn("onEntityKilled failed: {t}", .{err});
                     };
                 }
+                if (cfg.entity_type == .monster) {
+                    scene.queueKilledMonsterRemovalAt(alloc.gpa, entity.net_id, now_ms + 300) catch {};
+                }
             },
             .delayed_destroy => {
                 const item = query.byNetId(due.entity_id) orelse continue;
@@ -134,6 +137,16 @@ pub fn handleFsmWake(
         const item = query.byNetId(entity_id) orelse continue;
         const entity, const fsm, const attribute, const buffs, const logic_state, const tags, const parts = item;
         try fsm.initRuntime(alloc.gpa, now_ms);
+
+        // Dead monsters must not evaluate state transitions back to idle/stand after death.
+        if (attribute) |attr| {
+            if (attributes.get_attr_value(attr, .Life) <= 0 and
+                scene.entities.items(.config)[entity.index].entity_type == .monster)
+            {
+                fsm.finishTick(now_ms);
+                continue;
+            }
+        }
 
         if (fsm.paralysis_active) {
             if (fsm.paralysis_next_ms) |next_ms| {

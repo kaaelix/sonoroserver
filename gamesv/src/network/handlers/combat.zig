@@ -176,20 +176,8 @@ pub fn onCombatSendPackRequest(
     if (state.scene) |*scene| {
         if (scene.pending_killed_removals.items.len > 0) {
             var remove_infos: std.ArrayList(pb.EntityRemoveInfo) = .empty;
-            var write_idx: usize = 0;
-            for (scene.pending_killed_removals.items) |eid| {
-                if (scene.net_id_map.get(eid) == null) continue;
-                scene.remove(alloc.gpa, state.fs, eid) catch {
-                    scene.pending_killed_removals.items[write_idx] = eid;
-                    write_idx += 1;
-                    continue;
-                };
-                try remove_infos.append(state.arena.allocator(), .{
-                    .EntityId = eid,
-                    .Type = .HpIsZero,
-                });
-            }
-            scene.pending_killed_removals.shrinkRetainingCapacity(write_idx);
+            const now_ms = std.Io.Clock.awake.now(io).toMilliseconds();
+            scene.flushDueKilledRemovals(state.fs, alloc.gpa, state.arena.allocator(), now_ms, &remove_infos);
             if (remove_infos.items.len > 0) {
                 state.conn.pushBestEffort(alloc.gpa, io, pb.EntityRemoveNotify{
                     .IsRemove = true,

@@ -119,31 +119,30 @@ pub fn DamageExecuteRequest(
         .IsCrit = execute_data.IsCrit,
         .KilledTarget = execute_data.KilledTarget,
         .ShieldCoverDamage = execute_data.ShieldCoverDamage,
+        .ImmuneType = execute_data.ImmuneType,
         .ElementType = execute_data.ElementType,
         .ChangeLife = execute_data.ChangeLife,
     });
 
     if (execute_data.KilledTarget and !target_is_player) {
-        queueKilledMonsterRemoval(scene, alloc.gpa, execute_data.TargetEntityId) catch |err| {
+        queueKilledMonsterRemoval(scene, alloc.gpa, execute_data.TargetEntityId, io) catch |err| {
             std.log.scoped(.damage).warn("queueKilledMonsterRemoval({d}) failed: {t}", .{ execute_data.TargetEntityId, err });
         };
     }
 }
 
-/// Queues a killed monster for removal after `CombatSendPackRequest` responds
-/// with `ReceivePackNotify`, so the client processes `EntityLivingStatusNotify(.Dead)`
-/// before `EntityRemoveNotify(.HpIsZero)` moves it to `DelayRemoveContainer`.
+/// Queues a killed monster for delayed removal after `CombatSendPackRequest` responds
+/// with `ReceivePackNotify`, giving the client time to process `EntityLivingStatusNotify(.Dead)`
+/// (`MonsterDeathComponent.ExecuteDeath`) before `EntityRemoveNotify(.HpIsZero)` moves it to
+/// `DelayRemoveContainer`.
 fn queueKilledMonsterRemoval(
     scene: *Scene,
     gpa: std.mem.Allocator,
     eid: i64,
+    io: std.Io,
 ) !void {
-    const idx = scene.net_id_map.get(eid) orelse return;
-    if (scene.entities.items(.config)[idx].entity_type != .monster) return;
-    for (scene.pending_killed_removals.items) |existing| {
-        if (existing == eid) return;
-    }
-    try scene.pending_killed_removals.append(gpa, eid);
+    const due_ms = std.Io.Clock.awake.now(io).toMilliseconds() + 300;
+    try scene.queueKilledMonsterRemovalAt(gpa, eid, due_ms);
 }
 
 pub fn HitEndPush(_: pb.HitEndPush) !void {}
@@ -300,7 +299,6 @@ fn killEntityDirect(
             var changed: std.ArrayList(pb.EAttributeType) = .empty;
             try changed.append(alloc.arena, .Life);
             try attributes_helper.generate_attr_messages(receive_data_pack, eid, attr, &changed, alloc, io);
-            try scene.markFsmDirty(alloc.gpa, eid, Entity.FsmComponent.WakeReason.attribute);
         }
     }
 
@@ -328,7 +326,7 @@ fn killEntityDirect(
                 std.log.scoped(.level_play).warn("onEntityKilled failed: {t}", .{err});
             };
         }
-        queueKilledMonsterRemoval(scene, alloc.gpa, eid) catch |err| {
+        queueKilledMonsterRemoval(scene, alloc.gpa, eid, io) catch |err| {
             std.log.scoped(.damage).warn("queueKilledMonsterRemoval({d}) failed: {t}", .{ eid, err });
         };
     }

@@ -433,6 +433,7 @@ pub fn onRemoveSummonEntityRequest(
         const storage = scene.entities.get(index);
         const summoner = storage.summoner orelse continue;
         if (summoner.summoner_id != txn.message.SummonerId) continue;
+        if (summoner.summon_type == .ConcomitantCustom or summoner.summon_type == .ConcomitantVision) continue;
 
         try scene.remove(alloc.gpa, fs, entity_id);
         try remove_infos.append(alloc.arena, .{ .EntityId = entity_id });

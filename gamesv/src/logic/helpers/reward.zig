@@ -440,7 +440,10 @@ pub fn grantItems(
             .value = .{ .ItemList = reward_infos },
         });
         try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.ItemRewardNotify{
-            .DropId = if (drop_id > 0) drop_id else 1,
+            .DropId = if (drop_id > 0 and ctx.assets.tables.drop_package.getDataById(drop_id) != null)
+                drop_id
+            else
+                1201,
             .Reason = effective_reason,
             .Magnification = 1,
             .RewardItems = reward_entries,

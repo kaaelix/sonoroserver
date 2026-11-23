@@ -80,7 +80,7 @@ bt_timers: std.ArrayListUnmanaged(ActiveBtTimer) = .empty,
 bt_occupations: std.ArrayListUnmanaged(BtOccupation) = .empty,
 save_node_keys: std.ArrayListUnmanaged(u64) = .empty,
 trial_role_ids: std.ArrayListUnmanaged(i32) = .empty,
-pending_killed_removals: std.ArrayListUnmanaged(i64) = .empty,
+pending_killed_removals: std.ArrayListUnmanaged(KilledRemovalEntry) = .empty,
 dynamic_interact_options: std.ArrayListUnmanaged(DynamicInteractOption) = .empty,
 play_bubbles: std.ArrayListUnmanaged(PlayBubbleRecord) = .empty,
 player_range_states: std.AutoHashMapUnmanaged(i64, RangeTriggerState) = .empty,
@@ -88,6 +88,11 @@ async_flows: std.ArrayListUnmanaged(AsyncFlowEntry) = .empty,
 action_node_next_idx: std.AutoHashMapUnmanaged(u64, usize) = .empty,
 last_server_rollback_quest_id: i32 = 0,
 last_server_rollback_ms: i64 = 0,
+
+pub const KilledRemovalEntry = struct {
+    entity_id: i64,
+    due_ms: i64,
+};
 
 pub const AsyncFlowEntry = struct {
     inc_id: i64,
@@ -936,12 +941,73 @@ pub fn clearPendingCombineDetaches(scene: *Scene) void {
     scene.pending_combine_detaches.clearRetainingCapacity();
 }
 
-pub fn pendingUpdateWakeDelayMs(scene: *const Scene) ?i64 {
-    return pendingUpdateWakeDelay(scene.battle_state_dirty, scene.pending_combine_detaches.items.len);
+pub fn queueKilledMonsterRemovalAt(scene: *Scene, gpa: Allocator, eid: i64, due_ms: i64) !void {
+    const idx = scene.net_id_map.get(eid) orelse return;
+    if (scene.entities.items(.config)[idx].entity_type != .monster) return;
+    for (scene.pending_killed_removals.items) |*existing| {
+        if (existing.entity_id == eid) {
+            if (due_ms < existing.due_ms) existing.due_ms = due_ms;
+            return;
+        }
+    }
+    try scene.pending_killed_removals.append(gpa, .{ .entity_id = eid, .due_ms = due_ms });
 }
 
-fn pendingUpdateWakeDelay(battle_state_dirty: bool, pending_detach_count: usize) ?i64 {
-    return if (battle_state_dirty or pending_detach_count != 0) 0 else null;
+pub fn nextKilledRemovalWakeDelayMs(scene: *const Scene, now_ms: i64) ?i64 {
+    if (scene.pending_killed_removals.items.len == 0) return null;
+    var best: i64 = std.math.maxInt(i64);
+    for (scene.pending_killed_removals.items) |entry| {
+        const delay = if (entry.due_ms <= now_ms) @as(i64, 0) else entry.due_ms - now_ms;
+        if (delay < best) best = delay;
+    }
+    return best;
+}
+
+pub fn flushDueKilledRemovals(
+    scene: *Scene,
+    fs: *FileSystem,
+    gpa: Allocator,
+    arena: Allocator,
+    now_ms: i64,
+    remove_infos: *std.ArrayList(pb.EntityRemoveInfo),
+) void {
+    if (scene.pending_killed_removals.items.len == 0) return;
+    var write_idx: usize = 0;
+    for (scene.pending_killed_removals.items) |entry| {
+        if (entry.due_ms > now_ms) {
+            scene.pending_killed_removals.items[write_idx] = entry;
+            write_idx += 1;
+            continue;
+        }
+        if (scene.net_id_map.get(entry.entity_id) == null) continue;
+        scene.remove(gpa, fs, entry.entity_id) catch {
+            scene.pending_killed_removals.items[write_idx] = entry;
+            write_idx += 1;
+            continue;
+        };
+        remove_infos.append(arena, .{
+            .EntityId = entry.entity_id,
+            .Type = .HpIsZero,
+        }) catch {};
+    }
+    scene.pending_killed_removals.shrinkRetainingCapacity(write_idx);
+}
+
+pub fn pendingUpdateWakeDelayMs(scene: *const Scene, now_ms: i64) ?i64 {
+    return pendingUpdateWakeDelay(
+        scene.battle_state_dirty,
+        scene.pending_combine_detaches.items.len,
+        scene.nextKilledRemovalWakeDelayMs(now_ms),
+    );
+}
+
+fn pendingUpdateWakeDelay(
+    battle_state_dirty: bool,
+    pending_detach_count: usize,
+    killed_removal_delay_ms: ?i64,
+) ?i64 {
+    if (battle_state_dirty or pending_detach_count != 0) return 0;
+    return killed_removal_delay_ms;
 }
 
 pub fn signalFsmDissolveCombine(scene: *Scene, gpa: Allocator, entity_id: i64) !void {
@@ -1591,10 +1657,11 @@ fn updateBattleState(scene: *Scene) void {
 }
 
 test "scene pending updates wake only for pending work" {
-    try std.testing.expect(pendingUpdateWakeDelay(false, 0) == null);
-    try std.testing.expectEqual(@as(?i64, 0), pendingUpdateWakeDelay(true, 0));
-    try std.testing.expectEqual(@as(?i64, 0), pendingUpdateWakeDelay(false, 1));
-    try std.testing.expectEqual(@as(?i64, 0), pendingUpdateWakeDelay(true, 1));
+    try std.testing.expect(pendingUpdateWakeDelay(false, 0, null) == null);
+    try std.testing.expectEqual(@as(?i64, 0), pendingUpdateWakeDelay(true, 0, null));
+    try std.testing.expectEqual(@as(?i64, 0), pendingUpdateWakeDelay(false, 1, null));
+    try std.testing.expectEqual(@as(?i64, 0), pendingUpdateWakeDelay(true, 1, 250));
+    try std.testing.expectEqual(@as(?i64, 250), pendingUpdateWakeDelay(false, 0, 250));
 }
 
 test "scene active flow replaces and clears owned flow name" {

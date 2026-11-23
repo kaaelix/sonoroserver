@@ -295,7 +295,7 @@ fn drainGameplayDeadlines(state: *State, gpa: Allocator, io: Io, now_ms: i64) bo
             budget.complete();
             scheduled_changed = true;
         }
-        if (deadlineDue(scene.pendingUpdateWakeDelayMs()) and
+        if (deadlineDue(scene.pendingUpdateWakeDelayMs(now_ms)) and
             budget.canStart(clock.now(io).toNanoseconds()))
         {
             var event_queue: EventQueue = .{ .arena = state.arena.allocator() };
@@ -349,7 +349,7 @@ fn nextGameplayWakeDelayMs(state: ?*const State, now_ms: i64) ?i64 {
         if (scene != null) s.buff_timers.nextWakeDelayMs(now_ms) else null,
         if (scene) |active_scene| active_scene.fsm_wakes.nextWakeDelayMs(now_ms) else null,
         if (scene) |active_scene| active_scene.nextQuestWakeDelayMs(now_ms) else null,
-        if (scene) |active_scene| active_scene.pendingUpdateWakeDelayMs() else null,
+        if (scene) |active_scene| active_scene.pendingUpdateWakeDelayMs(now_ms) else null,
         s.dirty_saves.nextWakeDelayMs(now_ms),
     );
 }

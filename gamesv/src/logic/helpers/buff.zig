@@ -287,8 +287,11 @@ fn executeBuffEffects(
                 }
             }
         }
+        const after_hp = attributes_helper.get_attr_value(target_attr, .Life);
         if (change.items.len != 0) {
-            try scene.markFsmDirty(alloc.gpa, target_entity.net_id, Entity.FsmComponent.WakeReason.attribute);
+            if (after_hp > 0) {
+                try scene.markFsmDirty(alloc.gpa, target_entity.net_id, Entity.FsmComponent.WakeReason.attribute);
+            }
             try attributes_helper.generate_attr_messages(
                 combat_receive_pack,
                 target_entity.net_id,
@@ -299,7 +302,6 @@ fn executeBuffEffects(
             );
         }
 
-        const after_hp = attributes_helper.get_attr_value(target_attr, .Life);
         if (before_hp > 0 and after_hp <= 0) {
             if (maybe_assets) |assets| {
                 _ = try handleEntityDeath(
@@ -322,6 +324,8 @@ fn executeBuffEffects(
                     } },
                 } } });
             }
+            const due_ms = std.Io.Clock.awake.now(io).toMilliseconds() + 300;
+            scene.queueKilledMonsterRemovalAt(alloc.gpa, target_entity.net_id, due_ms) catch {};
             _ = try scene.appendBattleStateNotify(alloc.arena, combat_receive_pack);
         }
     }

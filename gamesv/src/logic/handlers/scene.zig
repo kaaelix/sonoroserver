@@ -453,8 +453,9 @@ fn appendCompletedRoadDataLayers(scene_info: *pb.SceneInformation, assets: *cons
 }
 
 pub fn handleScenePendingUpdates(
-    _: EventQueue.Dequeue(.scene_pending_updates),
+    event: EventQueue.Dequeue(.scene_pending_updates),
     scene: *Scene,
+    fs: *FileSystem,
     conn: *Connection,
     alloc: mem.Alloc,
     io: std.Io,
@@ -463,11 +464,20 @@ pub fn handleScenePendingUpdates(
     _ = try scene.appendBattleStateNotify(alloc.arena, &data);
     const combine_detaches = scene.pendingCombineDetaches();
     for (combine_detaches) |detach| try data.append(alloc.arena, Scene.removeCombineNotify(detach));
-    if (data.items.len == 0) return;
+    if (data.items.len != 0) {
+        try conn.push(alloc.gpa, io, pb.CombatReceivePackNotify{ .Data = data });
+        for (combine_detaches) |detach| try scene.signalFsmDissolveCombine(alloc.gpa, detach.combine_entity_id);
+        scene.clearPendingCombineDetaches();
+    }
 
-    try conn.push(alloc.gpa, io, pb.CombatReceivePackNotify{ .Data = data });
-    for (combine_detaches) |detach| try scene.signalFsmDissolveCombine(alloc.gpa, detach.combine_entity_id);
-    scene.clearPendingCombineDetaches();
+    var remove_infos: std.ArrayList(pb.EntityRemoveInfo) = .empty;
+    scene.flushDueKilledRemovals(fs, alloc.gpa, alloc.arena, event.data.now_ms, &remove_infos);
+    if (remove_infos.items.len > 0) {
+        conn.pushBestEffort(alloc.gpa, io, pb.EntityRemoveNotify{
+            .IsRemove = true,
+            .RemoveInfos = remove_infos,
+        });
+    }
 }
 
 pub fn exploreSkillNotify(alloc: mem.Alloc, scene: *Scene, conn: *Connection, io: std.Io) !void {

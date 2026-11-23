@@ -25,6 +25,7 @@ const quest_types = @import("quest_types.zig");
 const ConditionEvaluator = @import("condition.zig");
 const QuestInfo = @import("../../fs/QuestInfo.zig");
 const prologue_quest = @import("prologue_quest.zig");
+const gameplay_tags = @import("gameplay_tags.zig");
 
 const log = std.log.scoped(.level_play);
 
@@ -1329,7 +1330,7 @@ fn recordWorldRespawnCooldown(ctx: LevelPlayContext, cfg_id: i32, duration_ms: i
     try ctx.scene.savePersistent(ctx.fs, ctx.alloc.gpa);
 }
 
-fn spawnVisionCapturePhantom(
+pub fn spawnVisionCapturePhantom(
     ctx: LevelPlayContext,
     killed_net_id: i64,
     killed_cfg_id: i32,
@@ -1352,6 +1353,10 @@ fn spawnVisionCapturePhantom(
         rot = Assets.AssetIndexes.entityWorldRot(lcfg);
     }
 
+    const normal_state_tag_id = gameplay_tags.idFromName(
+        &ctx.assets.tables.gameplay_tag_remap,
+        "关卡.Common.状态.常态",
+    ) catch -1152559349;
     const entity = ctx.scene.spawn(ctx.alloc.gpa, ctx.fs, .{
         Scene.Entity.ConfigComponent{
             .camp = 2,
@@ -1362,6 +1367,8 @@ fn spawnVisionCapturePhantom(
         },
         Scene.Entity.ActorVisibleMarker{},
         Scene.Entity.VisibleMarker{},
+        Scene.Entity.StateTagComponent{ .state_tag_id = normal_state_tag_id },
+        Scene.Entity.TagComponent{},
         Scene.Entity.PositionComponent{
             .location = pos,
             .rotation = rot,

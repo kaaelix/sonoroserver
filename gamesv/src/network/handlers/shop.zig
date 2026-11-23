@@ -33,6 +33,7 @@ const PayCatalogItem = struct {
 };
 
 // Standard Wuthering Waves exchange & store conversion catalog when client PayShopDirectGoods.json is empty.
+// Includes GachaItemIdToShopId mappings (104300001..104300005) and skin recommend goods (106100007..106100008).
 const default_pay_catalog = [_]PayCatalogItem{
     .{ .id = 10001, .shop_id = 100, .tab_id = 1, .item_id = 3, .item_count = 1, .price_id = 4, .price_count = 1, .buy_limit = -1 },
     .{ .id = 40001, .shop_id = 4, .tab_id = 1, .item_id = 50001, .item_count = 1, .price_id = 50004, .price_count = 8, .buy_limit = -1 },
@@ -41,10 +42,24 @@ const default_pay_catalog = [_]PayCatalogItem{
     .{ .id = 40004, .shop_id = 4, .tab_id = 2, .item_id = 50001, .item_count = 1, .price_id = 50003, .price_count = 70, .buy_limit = 7 },
     .{ .id = 40005, .shop_id = 4, .tab_id = 2, .item_id = 50005, .item_count = 1, .price_id = 50003, .price_count = 70, .buy_limit = 7 },
     .{ .id = 40006, .shop_id = 4, .tab_id = 2, .item_id = 50002, .item_count = 1, .price_id = 50003, .price_count = 70, .buy_limit = 7 },
-    .{ .id = 40007, .shop_id = 4, .tab_id = 3, .item_id = 50001, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
-    .{ .id = 40008, .shop_id = 4, .tab_id = 3, .item_id = 50005, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
-    .{ .id = 40009, .shop_id = 4, .tab_id = 3, .item_id = 50002, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
+    .{ .id = 104300001, .shop_id = 4, .tab_id = 3, .item_id = 50002, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
+    .{ .id = 104300002, .shop_id = 4, .tab_id = 3, .item_id = 50005, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
+    .{ .id = 104300003, .shop_id = 4, .tab_id = 3, .item_id = 50001, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
+    .{ .id = 104300004, .shop_id = 4, .tab_id = 3, .item_id = 50007, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
+    .{ .id = 104300005, .shop_id = 4, .tab_id = 3, .item_id = 50008, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
+    .{ .id = 106100007, .shop_id = 6, .tab_id = 3, .item_id = 81011508, .item_count = 1, .price_id = 4, .price_count = 1680, .buy_limit = 1 },
+    .{ .id = 106100008, .shop_id = 6, .tab_id = 3, .item_id = 81011509, .item_count = 1, .price_id = 4, .price_count = 1680, .buy_limit = 1 },
 };
+
+fn recommendTabImage(r: Assets.DataTables.PayShopRecommend) []const u8 {
+    if (std.mem.eql(u8, r.PrefabPath, "UiItem_ShopSkinQianXiao")) return "T_ShopTabRoleQianxiao1";
+    if (std.mem.eql(u8, r.PrefabPath, "UiItem_ShopSkinLinNai")) return "T_ShopTabRoleLinnai1";
+    if (std.mem.eql(u8, r.PrefabPath, "UiItem_ShopSkinMoNing")) return "T_ShopTabRoleMoning";
+    if (std.mem.eql(u8, r.PrefabPath, "UiItem_ShopSkinMoto")) return "T_ShopTabMoto";
+    if (std.mem.eql(u8, r.PrefabPath, "UiItem_ShopSkinMotoFeixue")) return "T_ShopTabMotorFeixue";
+    if (std.mem.eql(u8, r.PrefabPath, "UiItem_ShopSkinMotoYangyang")) return "T_ShopTabMotoYangyang";
+    return "T_ShopTabMonthlyCard";
+}
 
 fn buildPayShopItemPb(entry: PayCatalogItem, bought_count: i32) pb.PayShopItem {
     const sold_out = entry.buy_limit > 0 and bought_count >= entry.buy_limit;
@@ -119,6 +134,7 @@ pub fn onPayShopInfoRequest(
 
     var recs: std.ArrayList(pb.ShopRecommend) = .empty;
     for (assets.tables.pay_shop_recommend.items) |r| {
+        if (!r.Show or r.PrefabPath.len == 0) continue;
         try recs.append(alloc.arena, .{
             .Id = r.Id,
             .RecommendType = r.RecommendType,
@@ -127,6 +143,7 @@ pub fn onPayShopInfoRequest(
             .PrefabPath = r.PrefabPath,
             .Sort = r.Sort,
             .Show = r.Show,
+            .TabImage = recommendTabImage(r),
         });
     }
 
