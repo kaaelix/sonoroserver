@@ -2349,13 +2349,28 @@ pub fn isActivityOpen(ctx: EvalContext, activity_id: i32) bool {
     return a.tables.activity.getDataById(activity_id) != null;
 }
 
-fn scopedVarName(var_obj: std.json.ObjectMap, name: []const u8, buf: []u8) []const u8 {
+fn scopedVarName(ctx: EvalContext, var_obj: std.json.ObjectMap, name: []const u8, buf: []u8) []const u8 {
     const src = getParamStr(var_obj, "Source") orelse "Constant";
     if (std.mem.eql(u8, src, "Other")) {
         const ref_type = getParamStr(var_obj, "RefType") orelse "";
         const ref_id = jsonInt(var_obj.get("RefId")) orelse 0;
         if (ref_type.len > 0 and ref_id != 0) {
             return std.fmt.bufPrint(buf, "{s}:{d}:{s}", .{ ref_type, ref_id, name }) catch name;
+        }
+    } else if (std.mem.eql(u8, src, "Self")) {
+        if (ctx.owner_quest_id > 0) {
+            const k = std.fmt.bufPrint(buf, "Self:{d}:{s}", .{ ctx.owner_quest_id, name }) catch name;
+            if (ctx.quest_comp.info.hasVar(k)) return k;
+        }
+        if (ctx.scene) |scene| {
+            if (scene.active_flow_owner_entity_id != 0) {
+                const k = std.fmt.bufPrint(buf, "EntSelf:{d}:{s}", .{ scene.active_flow_owner_entity_id, name }) catch name;
+                if (ctx.quest_comp.info.hasVar(k)) return k;
+            }
+            if (scene.active_flow_id > 0) {
+                const k = std.fmt.bufPrint(buf, "FlowSelf:{d}:{s}", .{ scene.active_flow_id, name }) catch name;
+                if (ctx.quest_comp.info.hasVar(k)) return k;
+            }
         }
     }
     return name;
@@ -2395,7 +2410,7 @@ fn resolveVarStr(ctx: EvalContext, var_opt: ?std.json.Value) ?[]const u8 {
     }
     const name = getParamStr(v.object, "Name") orelse return null;
     var buf: [128]u8 = undefined;
-    const scoped = scopedVarName(v.object, name, &buf);
+    const scoped = scopedVarName(ctx, v.object, name, &buf);
     const val = ctx.quest_comp.info.getVarStr(scoped);
     if (val.len > 0) return val;
     if (lookupEntityConfigVar(ctx, v.object, name)) |init_val| {
@@ -2420,7 +2435,7 @@ fn resolveVarFloat(ctx: EvalContext, var_opt: ?std.json.Value) f64 {
     }
     const name = getParamStr(v.object, "Name") orelse return 0.0;
     var buf: [128]u8 = undefined;
-    const scoped = scopedVarName(v.object, name, &buf);
+    const scoped = scopedVarName(ctx, v.object, name, &buf);
     const s = ctx.quest_comp.info.getVarStr(scoped);
     if (s.len > 0) {
         if (std.fmt.parseFloat(f64, s)) |f| return f else |_| {}
@@ -2460,7 +2475,7 @@ fn resolveVarValue(ctx: EvalContext, var_opt: ?std.json.Value) i32 {
     if (v.object.get("Name")) |name_v| {
         if (name_v == .string) {
             var buf: [128]u8 = undefined;
-            const scoped = scopedVarName(v.object, name_v.string, &buf);
+            const scoped = scopedVarName(ctx, v.object, name_v.string, &buf);
             if (getParamStr(v.object, "Type")) |vt| {
                 if (std.mem.eql(u8, vt, "Boolean") or std.mem.eql(u8, vt, "Bool")) {
                     if (ctx.quest_comp.info.getVarBool(scoped)) return 1;

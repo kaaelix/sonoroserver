@@ -785,9 +785,11 @@ pub fn onEntityInteractRequest(
     )) {
         try RoleHelper.reviveAndHealFormation(txn.conn, scene, role_comp, events, fs, alloc, io);
     }
-    try QuestEngine.onInteract(qctx, txn.message.EntityId, txn.message.OptionIndex);
-    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
-        _ = try LevelPlayHelper.onEntityInteractFallback(lp_ctx, txn.message.EntityId);
+    const handled = try QuestEngine.onInteractHandled(qctx, txn.message.EntityId, txn.message.OptionIndex);
+    if (!handled) {
+        if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+            _ = try LevelPlayHelper.onEntityInteractFallback(lp_ctx, txn.message.EntityId);
+        }
     }
     txn.respond(.{
         .ErrorCode = .Success,
@@ -807,6 +809,7 @@ fn makeLevelPlayCtx(
     map_comp: *PlayerMapComponent,
     quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
+    progress_comp: *PlayerProgressComponent,
     fs: *FileSystem,
     alloc: mem.Alloc,
     io: std.Io,
@@ -826,6 +829,7 @@ fn makeLevelPlayCtx(
         .map_comp = map_comp,
         .quest_comp = quest_comp,
         .role_comp = role_comp,
+        .progress_comp = progress_comp,
     };
 }
 
@@ -841,12 +845,13 @@ pub fn onGetRewardTreasureBoxRequest(
     map_comp: *PlayerMapComponent,
     quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
+    progress_comp: *PlayerProgressComponent,
     fs: *FileSystem,
     alloc: mem.Alloc,
     io: std.Io,
 ) !void {
     try LevelPlayHelper.onGetRewardTreasureBox(
-        makeLevelPlayCtx(txn.conn, scene, assets, events, basic_comp, inventory_comp, weapon_comp, echo_comp, map_comp, quest_comp, role_comp, fs, alloc, io),
+        makeLevelPlayCtx(txn.conn, scene, assets, events, basic_comp, inventory_comp, weapon_comp, echo_comp, map_comp, quest_comp, role_comp, progress_comp, fs, alloc, io),
         txn.message.EntityId,
     );
     txn.respond(.{ .ErrorCode = .Success });
@@ -864,12 +869,13 @@ pub fn onAnimalDropRequest(
     map_comp: *PlayerMapComponent,
     quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
+    progress_comp: *PlayerProgressComponent,
     fs: *FileSystem,
     alloc: mem.Alloc,
     io: std.Io,
 ) !void {
     try LevelPlayHelper.onAnimalDrop(
-        makeLevelPlayCtx(txn.conn, scene, assets, events, basic_comp, inventory_comp, weapon_comp, echo_comp, map_comp, quest_comp, role_comp, fs, alloc, io),
+        makeLevelPlayCtx(txn.conn, scene, assets, events, basic_comp, inventory_comp, weapon_comp, echo_comp, map_comp, quest_comp, role_comp, progress_comp, fs, alloc, io),
         txn.message.EntityId,
     );
     txn.respond(.{ .ErrorCode = .Success });
@@ -887,12 +893,13 @@ pub fn onAnimalDieRequest(
     map_comp: *PlayerMapComponent,
     quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
+    progress_comp: *PlayerProgressComponent,
     fs: *FileSystem,
     alloc: mem.Alloc,
     io: std.Io,
 ) !void {
     try LevelPlayHelper.onAnimalDrop(
-        makeLevelPlayCtx(txn.conn, scene, assets, events, basic_comp, inventory_comp, weapon_comp, echo_comp, map_comp, quest_comp, role_comp, fs, alloc, io),
+        makeLevelPlayCtx(txn.conn, scene, assets, events, basic_comp, inventory_comp, weapon_comp, echo_comp, map_comp, quest_comp, role_comp, progress_comp, fs, alloc, io),
         txn.message.EntityId,
     );
     txn.respond(.{ .ErrorCode = .Success });
@@ -910,26 +917,15 @@ pub fn onAnimalDestroyRequest(
     map_comp: *PlayerMapComponent,
     quest_comp: *PlayerQuestComponent,
     role_comp: *PlayerRoleComponent,
+    progress_comp: *PlayerProgressComponent,
     fs: *FileSystem,
     alloc: mem.Alloc,
     io: std.Io,
 ) !void {
-    try LevelPlayHelper.onAnimalDestroy(.{
-        .assets = assets,
-        .fs = fs,
-        .conn = txn.conn,
-        .scene = scene,
-        .events = events,
-        .alloc = alloc,
-        .io = io,
-        .basic_comp = basic_comp,
-        .inventory_comp = inventory_comp,
-        .weapon_comp = weapon_comp,
-        .echo_comp = echo_comp,
-        .map_comp = map_comp,
-        .quest_comp = quest_comp,
-        .role_comp = role_comp,
-    }, txn.message.EntityId);
+    try LevelPlayHelper.onAnimalDestroy(
+        makeLevelPlayCtx(txn.conn, scene, assets, events, basic_comp, inventory_comp, weapon_comp, echo_comp, map_comp, quest_comp, role_comp, progress_comp, fs, alloc, io),
+        txn.message.EntityId,
+    );
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -973,8 +969,9 @@ pub fn onEntityDynamicInteractRequest(
     )) {
         try RoleHelper.reviveAndHealFormation(txn.conn, scene, role_comp, events, fs, alloc, io);
     }
-    try QuestEngine.executeDynamicInteractOption(qctx, txn.message.EntityId, txn.message.OptionGuid);
-    try QuestEngine.onInteract(qctx, txn.message.EntityId, 0);
+    if (!try QuestEngine.executeDynamicInteractOptionHandled(qctx, txn.message.EntityId, txn.message.OptionGuid)) {
+        _ = try QuestEngine.onInteractHandled(qctx, txn.message.EntityId, 0);
+    }
     txn.respond(.{
         .ErrorCode = .Success,
         .Interacting = false,

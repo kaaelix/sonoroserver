@@ -11,6 +11,7 @@ const PlayerProgressComponent = @import("../../logic/component/player/PlayerProg
 const ConsumeHelper = @import("../../logic/helpers/consume.zig");
 const EnergyHelper = @import("../../logic/helpers/energy.zig");
 const RewardService = @import("../../logic/helpers/reward.zig");
+const pb_kv = @import("pb_kv.zig");
 
 const FileSystem = common.FileSystem;
 
@@ -849,9 +850,22 @@ pub fn onStorageInfoRequest(
     progress_comp: *const PlayerProgressComponent,
 ) !void {
     var infos: std.ArrayList(pb.ClientStorageInfo) = .empty;
+    var kbuf: [48]u8 = undefined;
+    var seen_sys: std.AutoHashMapUnmanaged(i32, void) = .empty;
+    for (progress_comp.info.dynamic.strs) |entry| {
+        if (std.mem.startsWith(u8, entry.key, "cstorage:msg:")) {
+            const sys_id = std.fmt.parseInt(i32, entry.key["cstorage:msg:".len..], 10) catch continue;
+            if (pb_kv.loadMsg(alloc.arena, progress_comp, entry.key, pb.ClientStorageInfo)) |msg| {
+                try seen_sys.put(alloc.arena, sys_id, {});
+                try infos.append(alloc.arena, msg);
+            }
+        }
+    }
     for (progress_comp.info.dynamic.ints) |entry| {
         if (!std.mem.startsWith(u8, entry.key, "cstorage:i:")) continue;
         const sys_id = std.fmt.parseInt(i32, entry.key["cstorage:i:".len..], 10) catch continue;
+        if (seen_sys.contains(sys_id)) continue;
+        try seen_sys.put(alloc.arena, sys_id, {});
         try infos.append(alloc.arena, .{
             .SystemId = sys_id,
             .Data = .{ .LongData = .{ .Data = entry.val } },
@@ -860,11 +874,14 @@ pub fn onStorageInfoRequest(
     for (progress_comp.info.dynamic.strs) |entry| {
         if (!std.mem.startsWith(u8, entry.key, "cstorage:s:")) continue;
         const sys_id = std.fmt.parseInt(i32, entry.key["cstorage:s:".len..], 10) catch continue;
+        if (seen_sys.contains(sys_id)) continue;
+        try seen_sys.put(alloc.arena, sys_id, {});
         try infos.append(alloc.arena, .{
             .SystemId = sys_id,
             .Data = .{ .StringData = .{ .Data = try alloc.arena.dupe(u8, entry.val) } },
         });
     }
+    _ = &kbuf;
     txn.respond(.{ .Infos = infos });
 }
 
@@ -878,26 +895,25 @@ pub fn onStorageInfoUpdateRequest(
     var kbuf: [48]u8 = undefined;
     for (txn.message.Infos.items) |info| {
         const data = info.Data orelse continue;
+        const mkey = try std.fmt.bufPrint(&kbuf, "cstorage:msg:{d}", .{info.SystemId});
+        try pb_kv.saveMsg(alloc, fs, progress_comp, mkey, info);
+        dirty = true;
         switch (data) {
             .IntData => |v_opt| if (v_opt) |v| {
                 const k = try std.fmt.bufPrint(&kbuf, "cstorage:i:{d}", .{info.SystemId});
                 try progress_comp.info.setKeyInt(alloc.gpa, k, v.Data);
-                dirty = true;
             },
             .LongData => |v_opt| if (v_opt) |v| {
                 const k = try std.fmt.bufPrint(&kbuf, "cstorage:i:{d}", .{info.SystemId});
                 try progress_comp.info.setKeyInt(alloc.gpa, k, v.Data);
-                dirty = true;
             },
             .BoolData => |v_opt| if (v_opt) |v| {
                 const k = try std.fmt.bufPrint(&kbuf, "cstorage:i:{d}", .{info.SystemId});
                 try progress_comp.info.setKeyInt(alloc.gpa, k, if (v.Data) 1 else 0);
-                dirty = true;
             },
             .StringData => |v_opt| if (v_opt) |v| {
                 const k = try std.fmt.bufPrint(&kbuf, "cstorage:s:{d}", .{info.SystemId});
                 try progress_comp.info.setKeyStr(alloc.gpa, k, v.Data);
-                dirty = true;
             },
             else => {},
         }

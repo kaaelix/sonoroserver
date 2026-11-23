@@ -266,6 +266,13 @@ pub fn setVarInt(info: *QuestInfo, gpa: Allocator, key: []const u8, val: i32) !v
     info.vars = grown;
 }
 
+pub fn hasVar(info: QuestInfo, key: []const u8) bool {
+    for (info.vars) |v| {
+        if (std.mem.eql(u8, v.key, key)) return true;
+    }
+    return false;
+}
+
 pub fn getVarInt(info: QuestInfo, key: []const u8) i32 {
     for (info.vars) |v| {
         if (std.mem.eql(u8, v.key, key)) return v.int_val;

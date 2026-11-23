@@ -43,6 +43,12 @@ pub const QuestContext = struct {
     progress_comp: ?*PlayerProgressComponent = null,
 };
 
+pub const DeferredBtVar = struct {
+    owner_id: i32,
+    var_name: []const u8,
+    var_define: pb.VarDefinePb,
+};
+
 /// Decouples quest progression triggers from `quest_actions` to prevent circular imports.
 pub const ActionCallbacks = struct {
     start_flow: ?*const fn (
@@ -78,6 +84,7 @@ pub const ActionCallbacks = struct {
     bt_type: pb.BtType = .BtTypeQuest,
     is_flow_action: bool = false,
     defer_flow_transition: bool = false,
+    deferred_bt_vars: ?*std.ArrayList(DeferredBtVar) = null,
 };
 
 pub fn makeEvalContext(ctx: QuestContext) ConditionEvaluator.EvalContext {
@@ -191,6 +198,17 @@ pub fn resolveVarName(obj: std.json.ObjectMap) ?[]const u8 {
 }
 
 pub fn scopedVarKeyAlloc(arena: std.mem.Allocator, obj: std.json.ObjectMap, base_name: []const u8) ?[]const u8 {
+    return scopedVarKeyWithOwnerAlloc(arena, null, 0, obj, base_name);
+}
+
+/// Scopes `Source == "Self"` variables cleanly across quests, entities, and ambient NPC flows so NPC flow variables never collide globally.
+pub fn scopedVarKeyWithOwnerAlloc(
+    arena: std.mem.Allocator,
+    scene_opt: ?*const Scene,
+    owner_id: i32,
+    obj: std.json.ObjectMap,
+    base_name: []const u8,
+) ?[]const u8 {
     const src = jsonStr(obj.get("Source")) orelse "";
     if (std.mem.eql(u8, src, "Global")) {
         return std.fmt.allocPrint(arena, "var:{s}", .{base_name}) catch null;
@@ -201,10 +219,25 @@ pub fn scopedVarKeyAlloc(arena: std.mem.Allocator, obj: std.json.ObjectMap, base
             return std.fmt.allocPrint(arena, "{s}:{d}:{s}", .{ ref_type, ref_id, base_name }) catch null;
         }
     }
+    if (owner_id > 0) {
+        return std.fmt.allocPrint(arena, "Self:{d}:{s}", .{ owner_id, base_name }) catch null;
+    }
+    if (scene_opt) |scene| {
+        if (scene.active_flow_owner_entity_id != 0) {
+            return std.fmt.allocPrint(arena, "EntSelf:{d}:{s}", .{ scene.active_flow_owner_entity_id, base_name }) catch null;
+        }
+        if (scene.active_flow_id > 0) {
+            return std.fmt.allocPrint(arena, "FlowSelf:{d}:{s}", .{ scene.active_flow_id, base_name }) catch null;
+        }
+    }
     return null;
 }
 
 pub fn resolveVarInt(ctx: QuestContext, v_opt: ?std.json.Value) i32 {
+    return resolveVarIntForOwner(ctx, 0, v_opt);
+}
+
+pub fn resolveVarIntForOwner(ctx: QuestContext, owner_id: i32, v_opt: ?std.json.Value) i32 {
     const v = v_opt orelse return 0;
     if (v != .object) return 0;
     const src = jsonStr(v.object.get("Source")) orelse "Constant";
@@ -227,12 +260,11 @@ pub fn resolveVarInt(ctx: QuestContext, v_opt: ?std.json.Value) i32 {
                 }
             }
         }
-        if (scopedVarKeyAlloc(ctx.alloc.arena, v.object, name)) |skey| {
-            if (is_bool) {
-                if (ctx.quest_comp.info.getVarBool(skey)) return 1;
+        if (scopedVarKeyWithOwnerAlloc(ctx.alloc.arena, ctx.scene, owner_id, v.object, name)) |skey| {
+            if (ctx.quest_comp.info.hasVar(skey)) {
+                if (is_bool) return if (ctx.quest_comp.info.getVarBool(skey)) 1 else 0;
+                return ctx.quest_comp.info.getVarInt(skey);
             }
-            const sv = ctx.quest_comp.info.getVarInt(skey);
-            if (sv != 0) return sv;
         }
         if (is_bool) {
             return if (ctx.quest_comp.info.getVarBool(name)) 1 else 0;

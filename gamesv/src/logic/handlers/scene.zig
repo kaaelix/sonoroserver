@@ -229,6 +229,13 @@ fn applyStoredWorldEntityOverrides(
         changed = true;
     }
 
+    if (progressInt(info, try std.fmt.allocPrint(alloc.arena, "world_camp:{d}", .{config_id}))) |camp_raw| {
+        if (std.math.cast(u8, camp_raw)) |camp8| {
+            scene.entities.items(.config)[index].camp = camp8;
+            changed = true;
+        }
+    }
+
     const lift_key = try std.fmt.allocPrint(alloc.arena, "lift_target:{d}", .{config_id});
     if (progressInt(info, lift_key)) |location| {
         if (std.math.cast(i32, location)) |lift_location| {
@@ -919,6 +926,7 @@ pub fn notifyJoinScene(
         .SceneInfo = scene_info,
         .TransitionOption = .{},
     });
+    scene.join_scene_pushed = true;
 
     try events.enqueue(.after_scene_join, .{
         .pending_flow = event.data.pending_flow,
@@ -1056,6 +1064,7 @@ pub fn afterSceneJoin(
     try notifyTransportRoadways(fs, alloc, scene, conn, assets, io);
     try notifyInfrastructureRoadData(alloc, conn, assets, io);
     try QuestEngine.syncWorldStateOnJoin(qctx);
+    try QuestEngine.pushReadyQuestList(qctx);
 
     const rtc: Io.Clock = .real;
     const monotonic_clock: Io.Clock = .awake;
@@ -1223,6 +1232,7 @@ fn evictDistantAmbientEntities(
     fs: *FileSystem,
     assets: *const Assets,
     conn: *Connection,
+    quest_info: QuestInfo,
     active_quest_targets: *const std.AutoHashMapUnmanaged(i32, void),
     alloc: mem.Alloc,
     io: std.Io,
@@ -1252,6 +1262,19 @@ fn evictDistantAmbientEntities(
         }
         if (scene.active_battle_entities.contains(nid.net_id)) continue;
         if (QuestEngine.isTargetIdInSet(active_quest_targets, cfg.config_id)) continue;
+        if (cfg.config_id > 0) {
+            if (QuestInfo.containsInt(quest_info.world.shown_entities, cfg.config_id)) continue;
+            if (quest_info.getEntityState(cfg.config_id) != null) continue;
+            var keep_lp = false;
+            for (assets.indexes.levelPlayIndicesForRefEntity(cfg.config_id)) |lp_idx| {
+                const lpid = assets.tables.level_play_data.items[lp_idx].LevelPlayId;
+                if (QuestInfo.containsInt(quest_info.progress.entered_level_plays, lpid)) {
+                    keep_lp = true;
+                    break;
+                }
+            }
+            if (keep_lp) continue;
+        }
         if (skip_priority and cfg.config_id > 0) {
             if (assets.findLevelEntity(scene.instance_id, cfg.config_id)) |raw_cfg| {
                 if (isPriorityWorldEntity(assets, raw_cfg)) continue;
@@ -1467,12 +1490,12 @@ fn spawnNearbyWorldEntities(
     defer active_quest_targets.deinit(alloc.gpa);
 
     if (need_evict) {
-        evictDistantAmbientEntities(scene, fs, assets, conn, &active_quest_targets, alloc, io, player_loc, 24000.0, true);
+        evictDistantAmbientEntities(scene, fs, assets, conn, quest_comp.info, &active_quest_targets, alloc, io, player_loc, 24000.0, true);
         if (scene.entities.slice().len >= 215) {
-            evictDistantAmbientEntities(scene, fs, assets, conn, &active_quest_targets, alloc, io, player_loc, 21000.0, true);
+            evictDistantAmbientEntities(scene, fs, assets, conn, quest_comp.info, &active_quest_targets, alloc, io, player_loc, 21000.0, true);
         }
         if (scene.entities.slice().len >= 230) {
-            evictDistantAmbientEntities(scene, fs, assets, conn, &active_quest_targets, alloc, io, player_loc, 32000.0, false);
+            evictDistantAmbientEntities(scene, fs, assets, conn, quest_comp.info, &active_quest_targets, alloc, io, player_loc, 32000.0, false);
         }
     }
     if (scene.entities.slice().len >= 240) return;

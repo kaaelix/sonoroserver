@@ -32,6 +32,7 @@ pub const prologue_quest_id: i32 = 139000025;
 const max_steps_per_advance: usize = 96;
 
 pub const QuestContext = quest_types.QuestContext;
+pub const DeferredBtVar = quest_types.DeferredBtVar;
 pub const makeEvalContext = quest_types.makeEvalContext;
 const makeEvalContextForQuest = quest_types.makeEvalContextForQuest;
 pub const makeRewardContext = quest_types.makeRewardContext;
@@ -78,6 +79,38 @@ pub fn actionCallbacks() quest_types.ActionCallbacks {
 }
 
 pub fn onVarChanged(ctx: QuestContext, owner_id: i32, var_name: []const u8) !void {
+    const VarEvt = struct { owner_id: i32, name: []const u8 };
+    const Check = struct {
+        fn run(
+            c: QuestContext,
+            ev: VarEvt,
+            qid: i32,
+            _: QuestInfo.ActiveQuest,
+            nodes: []const LazyNodeStore.NodeEntry,
+            node: LazyNodeStore.NodeEntry,
+            cond: std.json.ObjectMap,
+            ctype: []const u8,
+        ) !bool {
+            if (!std.mem.eql(u8, ctype, "ListenToEvent")) return false;
+            const et = cond.get("EventType") orelse return false;
+            if (et != .object) return false;
+            if (!std.mem.eql(u8, jsonStr(et.object.get("Type")) orelse "", "VarValueChange")) return false;
+            const want_name = jsonStr(et.object.get("VarName")) orelse jsonStr(et.object.get("Name")) orelse "";
+            if (want_name.len > 0 and ev.name.len > 0 and !std.mem.eql(u8, want_name, ev.name)) return false;
+            if (et.object.get("Var")) |vobj| {
+                if (vobj == .object) {
+                    if (quest_types.resolveVarName(vobj.object)) |vn| {
+                        if (vn.len > 0 and ev.name.len > 0 and !std.mem.eql(u8, vn, ev.name)) return false;
+                    }
+                }
+            }
+            const _oid = ev.owner_id;
+            _ = _oid;
+            try completeChildQuest(c, qid, nodes, node);
+            return true;
+        }
+    };
+    _ = try advanceMatchingChildNodes(ctx, VarEvt{ .owner_id = owner_id, .name = var_name }, Check.run);
     if (refresh_loop_depth == 0) {
         if (try recheckPendingConditions(ctx)) {
             try finalizeProgression(ctx);
@@ -285,7 +318,11 @@ pub fn extractNodeTargetEntityIds(out: []i32, node: LazyNodeStore.NodeEntry) []c
     var count: usize = 0;
     if (getChildCondition(node.data)) |cond| {
         const ctype = jsonStr(cond.get("Type")) orelse "";
-        if (std.mem.eql(u8, ctype, "Kill")) {
+        if (std.mem.eql(u8, ctype, "ReachArea")) {
+            appendJsonIntArray(out, &count, cond.get("RangeEntities"));
+            appendUniqueTargetId(out, &count, jsonInt(cond.get("RangeEntityId")) orelse 0);
+            appendUniqueTargetId(out, &count, jsonInt(cond.get("EntityId")) orelse 0);
+        } else if (std.mem.eql(u8, ctype, "Kill")) {
             appendJsonIntArray(out, &count, cond.get("TargetsToAwake"));
             appendJsonIntArray(out, &count, cond.get("ExistTargets"));
         } else if (std.mem.eql(u8, ctype, "MonsterCreator")) {
@@ -523,6 +560,37 @@ fn isFlowReplayServerAction(name: []const u8) bool {
         "AwakeEntity",
         "DestroyEntity",
         "SetEntityVisible",
+        "HideGroup",
+        "ShowHidedGroup",
+        "HideSpecificEntities",
+        "ShowSpecificEntities",
+        "HideTargetRange",
+        "ShowTargetRange",
+        "HideByRangeInFlow",
+        "ShowAllHidedGroupInFlow",
+        "ShowHidedGroupInFlow",
+        "LockEntity",
+        "UnlockEntity",
+        "SetEntityPos",
+        "ResetEntityPos",
+        "SetPlayerPos",
+        "ServerSetPlayerPos",
+        "ChangeEntityCamp",
+        "MoveSceneItem",
+        "MoveWithSpline",
+        "NewMoveWithSpline",
+        "StopNewMoveWithSpline",
+        "NpcMoveToPoint",
+        "AddFlowInteractOption",
+        "RemoveFlowInteractOption",
+        "ModifySceneItemAttributeTag",
+        "SetElementalBoxToTarget",
+        "ChangeElementalBoxState",
+        "ChangeLiftTarget",
+        "AddPlayBubble",
+        "ClearPlayBubble",
+        "RunActions",
+        "FinishState",
         "AddTrialCharacter",
         "RemoveTrialCharacter",
         "UpdateTrialCharacter",
@@ -566,6 +634,15 @@ fn scanFlowActionsForFinishDoInteract(items: []const std.json.Value) bool {
         if (act != .object) continue;
         const name = jsonStr(act.object.get("Name")) orelse continue;
         if (std.mem.eql(u8, name, "FinishDoInteract")) return true;
+        if (std.mem.eql(u8, name, "RunActions")) {
+            if (act.object.get("Params")) |p| {
+                if (p == .object) {
+                    if (p.object.get("ActionList")) |al| {
+                        if (al == .array and scanFlowActionsForFinishDoInteract(al.array.items)) return true;
+                    }
+                }
+            }
+        }
         if (std.mem.eql(u8, name, "ShowTalk")) {
             const params = act.object.get("Params") orelse continue;
             if (params != .object) continue;
@@ -573,6 +650,12 @@ fn scanFlowActionsForFinishDoInteract(items: []const std.json.Value) bool {
             if (tis != .array) continue;
             for (tis.array.items) |ti| {
                 if (ti != .object) continue;
+                if (ti.object.get("IntroActions")) |iacts| {
+                    if (iacts == .array and scanFlowActionsForFinishDoInteract(iacts.array.items)) return true;
+                }
+                if (ti.object.get("Actions")) |tacts| {
+                    if (tacts == .array and scanFlowActionsForFinishDoInteract(tacts.array.items)) return true;
+                }
                 const opts = ti.object.get("Options") orelse continue;
                 if (opts != .array) continue;
                 for (opts.array.items) |opt| {
@@ -593,13 +676,28 @@ fn executeSingleFlowReplayAction(
     nid: i32,
     act: std.json.Value,
     outcome: *FlowEndReplayOutcome,
-) !void {
+) anyerror!void {
     if (act != .object) return;
     const name = jsonStr(act.object.get("Name")) orelse return;
     const action_id = jsonInt(act.object.get("ActionId")) orelse 0;
     if (action_id > 0 and scene.hasFlowActionExecuted(action_id)) return;
     if (std.mem.eql(u8, name, "FinishDoInteract")) {
         outcome.finish_do_interact_executed = true;
+        if (action_id > 0) scene.markFlowActionExecuted(ctx.alloc.gpa, action_id) catch {};
+        return;
+    }
+    if (std.mem.eql(u8, name, "RunActions")) {
+        if (act.object.get("Params")) |p| {
+            if (p == .object) {
+                if (p.object.get("ActionList")) |al| {
+                    if (al == .array) {
+                        for (al.array.items) |sub_act| {
+                            try executeSingleFlowReplayAction(ctx, scene, qid, nid, sub_act, outcome);
+                        }
+                    }
+                }
+            }
+        }
         if (action_id > 0) scene.markFlowActionExecuted(ctx.alloc.gpa, action_id) catch {};
         return;
     }
@@ -646,25 +744,62 @@ fn replayFlowStateOnEnd(
             const tis_val = params.object.get("TalkItems") orelse continue;
             if (tis_val != .array) continue;
 
-            for (option_infos) |entry| {
-                if (st_aid > 0 and entry.key != 0 and entry.key != st_aid) continue;
-                for (entry.value.OptionIndexList.items) |opt_sel| {
-                    for (tis_val.array.items) |ti| {
-                        if (ti != .object) continue;
-                        if ((jsonInt(ti.object.get("Id")) orelse 0) != opt_sel.TalkId) continue;
-                        const opts_val = ti.object.get("Options") orelse break;
-                        if (opts_val != .array) break;
-                        const idx = std.math.cast(usize, opt_sel.OptionIndex) orelse break;
-                        if (idx >= opts_val.array.items.len) break;
+            for (tis_val.array.items) |ti| {
+                if (ti != .object) continue;
+                const tid = jsonInt(ti.object.get("Id")) orelse 0;
+                const opts_val_opt = ti.object.get("Options");
+                const has_options = if (opts_val_opt) |ov| (ov == .array and ov.array.items.len > 0) else false;
+
+                var selected_indices: std.ArrayList(usize) = .empty;
+                for (option_infos) |entry| {
+                    if (st_aid > 0 and entry.key != 0 and entry.key != st_aid) continue;
+                    for (entry.value.OptionIndexList.items) |opt_sel| {
+                        if (opt_sel.TalkId == tid) {
+                            if (std.math.cast(usize, opt_sel.OptionIndex)) |idx| {
+                                selected_indices.append(ctx.alloc.arena, idx) catch {};
+                            }
+                        }
+                    }
+                }
+
+                // Linear TalkItems without branching options (or selected branched TalkItems) execute IntroActions + Actions.
+                if (!has_options or selected_indices.items.len > 0) {
+                    if (ti.object.get("IntroActions")) |iacts| {
+                        if (iacts == .array) {
+                            for (iacts.array.items) |iact| {
+                                try executeSingleFlowReplayAction(ctx, scene, qid, nid, iact, &outcome);
+                            }
+                        }
+                    }
+                    if (ti.object.get("Actions")) |tacts| {
+                        if (tacts == .array) {
+                            for (tacts.array.items) |tact| {
+                                try executeSingleFlowReplayAction(ctx, scene, qid, nid, tact, &outcome);
+                            }
+                        }
+                    }
+                }
+
+                if (has_options) {
+                    const opts_val = opts_val_opt.?;
+                    for (selected_indices.items) |idx| {
+                        if (idx >= opts_val.array.items.len) continue;
                         const opt_obj = opts_val.array.items[idx];
-                        if (opt_obj != .object) break;
-                        const oacts = opt_obj.object.get("Actions") orelse break;
+                        if (opt_obj != .object) continue;
+                        if (opt_obj.object.get("HiddenOption")) |ho| {
+                            if (ho == .bool and ho.bool) continue;
+                        }
+                        if (opt_obj.object.get("PreCondition")) |pc_val| {
+                            if (!ConditionEvaluator.evalInlineConditionBlock(makeEvalContextForQuest(ctx, qid), pc_val)) {
+                                continue;
+                            }
+                        }
+                        const oacts = opt_obj.object.get("Actions") orelse continue;
                         if (oacts == .array) {
                             for (oacts.array.items) |oact| {
                                 try executeSingleFlowReplayAction(ctx, scene, qid, nid, oact, &outcome);
                             }
                         }
-                        break;
                     }
                 }
             }
@@ -708,7 +843,10 @@ pub fn onFlowEnd(
                 matched_qid,
                 matched_nid,
                 option_infos,
-            ) catch .{};
+            ) catch |err| blk: {
+                logHookErr("replayFlowStateOnEnd", err);
+                break :blk .{};
+            };
         }
 
         scene.clearActiveFlow(ctx.alloc.gpa);
@@ -726,6 +864,7 @@ pub fn onFlowEnd(
                 false,
                 false,
             );
+            scene.active_flow_owner_entity_id = owner_entity_id;
             return;
         }
 
@@ -737,7 +876,18 @@ pub fn onFlowEnd(
                 const nodes = try ctx.assets.quest_nodes.getOwnerNodes(ctx.io, matched_qid);
                 if (QuestInfo.isNodeActive(aq, matched_nid)) {
                     if (findNodeById(nodes, matched_nid)) |node| {
-                        try completeChildQuest(ctx, matched_qid, nodes, node.*);
+                        var ready_to_complete = true;
+                        if (getChildCondition(node.data)) |cond| {
+                            const ctype = jsonStr(cond.get("Type")) orelse "";
+                            if (std.mem.eql(u8, ctype, "DoInteract")) {
+                                if (matchDoInteract(cond, owner_entity_id, resolveConfigId(scene, owner_entity_id), 0)) |matched_opt| {
+                                    ready_to_complete = try markAndCheckDoInteractComplete(ctx, matched_qid, node.*, cond, owner_entity_id, matched_opt);
+                                }
+                            }
+                        }
+                        if (ready_to_complete) {
+                            try completeChildQuest(ctx, matched_qid, nodes, node.*);
+                        }
                         try finalizeProgression(ctx);
                     }
                 } else if (findNodeById(nodes, matched_nid)) |node| {
@@ -801,10 +951,15 @@ pub fn onFlowAction(ctx: QuestContext, flow_inc_id: i64, action_id: i32) !void {
 
     const action_val = Assets.LazyFlowStore.findActionById(state_val, action_id) orelse return;
     try scene.markFlowActionExecuted(ctx.alloc.gpa, action_id);
+    const saved_owner = scene.active_flow_owner_entity_id;
+    const prev_state_id = scene.active_flow_state_id;
     const actions = [_]std.json.Value{action_val};
     var cbs = actionCallbacks();
     cbs.is_flow_action = true;
     try QuestActions.executeActionList(ctx, cbs, scene.active_flow_quest_id, scene.active_flow_node_id, &actions);
+    if (scene.active_flow_state_id != prev_state_id and scene.active_flow_owner_entity_id == 0 and saved_owner != 0) {
+        scene.active_flow_owner_entity_id = saved_owner;
+    }
 }
 
 fn dispatchPostFlowFollowups(ctx: QuestContext, scene: *Scene) !void {
@@ -863,8 +1018,27 @@ fn completeFirstActivePlayFlow(ctx: QuestContext, quest_id: i32) !bool {
 }
 
 pub fn onInteract(ctx: QuestContext, entity_id: i64, option_index: i32) !void {
+    _ = try onInteractHandled(ctx, entity_id, option_index);
+}
+
+pub fn onInteractHandled(ctx: QuestContext, entity_id: i64, option_index: i32) !bool {
     const cfg_id = resolveConfigId(ctx.scene, entity_id);
     var progressed = false;
+
+    // Determine normal InteractComponent option count so normal options at low indices aren't hijacked by DoInteract fallbacks.
+    var normal_opts_len: usize = 0;
+    if (cfg_id > 0) {
+        const inst_id = if (ctx.scene) |s| s.instance_id else 8;
+        if (ctx.assets.findLevelEntity(inst_id, cfg_id)) |lcfg| {
+            var components = lcfg.ComponentsData;
+            if (ctx.assets.findTemplateConfig(lcfg.BlueprintType)) |template| {
+                template.ComponentsData.mergeInto(&components);
+            }
+            if (components.InteractComponent) |ic| {
+                if (!(ic.Disabled orelse false)) normal_opts_len = ic.Options.len;
+            }
+        }
+    }
 
     // 1) Activate on-demand "Interact" quests bound to this entity
     if (ctx.quest_comp.info.hasFinishedQuest(prologue_quest_id)) {
@@ -881,7 +1055,8 @@ pub fn onInteract(ctx: QuestContext, entity_id: i64, option_index: i32) !void {
     }
 
     // 2) Advance active DoInteract / HandInItems ChildQuest nodes matching this entity
-    const InteractMatcher = struct { entity_id: i64, cfg_id: i32, option_index: i32 };
+    const prefer_normal_opt = option_index >= 0 and @as(usize, @intCast(option_index)) < normal_opts_len;
+    const InteractMatcher = struct { entity_id: i64, cfg_id: i32, option_index: i32, allow_fallback: bool };
     const Check = struct {
         fn run(
             c: QuestContext,
@@ -894,8 +1069,10 @@ pub fn onInteract(ctx: QuestContext, entity_id: i64, option_index: i32) !void {
             ctype: []const u8,
         ) !bool {
             if (std.mem.eql(u8, ctype, "DoInteract")) {
-                if (matchDoInteract(cond, m.entity_id, m.cfg_id, m.option_index)) |matched_opt| {
-                    return try handleInteractOption(c, qid, nodes, node, cond, m.entity_id, matched_opt);
+                if (m.allow_fallback) {
+                    if (matchDoInteract(cond, m.entity_id, m.cfg_id, m.option_index)) |matched_opt| {
+                        return try handleInteractOption(c, qid, nodes, node, cond, m.entity_id, matched_opt);
+                    }
                 }
             } else if (std.mem.eql(u8, ctype, "HandInItems")) {
                 if (matchesHandInEntity(cond, m.entity_id, m.cfg_id)) {
@@ -912,12 +1089,14 @@ pub fn onInteract(ctx: QuestContext, entity_id: i64, option_index: i32) !void {
         .entity_id = entity_id,
         .cfg_id = cfg_id,
         .option_index = option_index,
+        .allow_fallback = !prefer_normal_opt,
     }, Check.run)) {
         progressed = true;
     }
 
     if (progressed) {
         try finalizeProgression(ctx);
+        return true;
     } else if (cfg_id > 0 and option_index >= 0) {
         const inst_id = if (ctx.scene) |s| s.instance_id else 8;
         const no_active_flow = if (ctx.scene) |s| s.active_flow_inc_id == 0 else true;
@@ -929,6 +1108,13 @@ pub fn onInteract(ctx: QuestContext, entity_id: i64, option_index: i32) !void {
             if (components.InteractComponent) |ic| {
                 const opt_idx: usize = @intCast(option_index);
                 if (opt_idx < ic.Options.len) {
+                    if (ic.Options[opt_idx].Condition) |opt_cond| {
+                        var eval_ctx = makeEvalContext(ctx);
+                        eval_ctx.self_entity_config_id = cfg_id;
+                        if (!ConditionEvaluator.evalInlineConditionBlock(eval_ctx, opt_cond)) {
+                            return false;
+                        }
+                    }
                     if (ic.Options[opt_idx].Type) |ot| {
                         if (std.mem.eql(u8, ot.Type, "Flow")) {
                             if (no_active_flow) {
@@ -943,17 +1129,20 @@ pub fn onInteract(ctx: QuestContext, entity_id: i64, option_index: i32) !void {
                                             fl.FlowId,
                                             if (fl.StateId > 0) fl.StateId else 1,
                                         );
+                                        return true;
                                     }
                                 }
                             }
                         } else if (std.mem.eql(u8, ot.Type, "Actions")) {
                             try executeNormalInteractActions(ctx, entity_id, cfg_id, option_index, ot.Actions, no_active_flow);
+                            return true;
                         }
                     }
                 }
             }
         }
     }
+    return false;
 }
 
 fn executeNormalInteractActions(
@@ -964,7 +1153,8 @@ fn executeNormalInteractActions(
     actions: []const @import("../../data/tables/entity_components/Interact.zig").InteractAction,
     no_active_flow: bool,
 ) !void {
-    const callbacks = actionCallbacks();
+    var callbacks = actionCallbacks();
+    callbacks.is_flow_action = false;
     var state_changed = false;
     var started_flow = false;
     for (actions) |act| {
@@ -990,6 +1180,17 @@ fn executeNormalInteractActions(
             const state_str = if (p.EntityState.len > 0) p.EntityState else p.State;
             if (state_str.len == 0) continue;
             try QuestActions.applyEntityStateChange(ctx, callbacks, cfg_id, state_str);
+            state_changed = true;
+        } else if (act.Raw) |raw_act| {
+            const prev_owner = if (ctx.scene) |scene| blk: {
+                const prev = scene.active_flow_owner_entity_id;
+                scene.active_flow_owner_entity_id = entity_id;
+                break :blk prev;
+            } else @as(i64, 0);
+            defer if (ctx.scene) |scene| {
+                scene.active_flow_owner_entity_id = prev_owner;
+            };
+            try QuestActions.executeAction(ctx, callbacks, cfg_id, option_index, raw_act);
             state_changed = true;
         } else if (std.mem.eql(u8, act.Name, "ChangeEntityState")) {
             const p = act.Params orelse continue;
@@ -1644,7 +1845,10 @@ pub fn onEntityStateChanged(ctx: QuestContext, entity_config_id: i32, state_name
                 if (cond.get("EventType")) |et| {
                     if (et == .object and std.mem.eql(u8, jsonStr(et.object.get("Type")) orelse "", "EntityStateChange")) {
                         const target_id = jsonInt(et.object.get("EntityId")) orelse 0;
-                        if (target_id == 0 or target_id == ev.eid) {
+                        const want_state = jsonStr(et.object.get("State")) orelse "";
+                        if ((target_id == 0 or target_id == ev.eid) and
+                            (want_state.len == 0 or std.mem.eql(u8, want_state, ev.state)))
+                        {
                             try completeChildQuest(c, qid, nodes, node);
                             return true;
                         }
@@ -1869,9 +2073,13 @@ pub fn onForcedOccupation(ctx: QuestContext, tree_inc_id: i64) !void {
 }
 
 pub fn executeDynamicInteractOption(ctx: QuestContext, entity_id: i64, option_guid: []const u8) !void {
-    if (option_guid.len == 0) return;
-    const scene = ctx.scene orelse return;
-    const opt = scene.findDynamicInteractOption(option_guid) orelse return;
+    _ = try executeDynamicInteractOptionHandled(ctx, entity_id, option_guid);
+}
+
+pub fn executeDynamicInteractOptionHandled(ctx: QuestContext, entity_id: i64, option_guid: []const u8) !bool {
+    if (option_guid.len == 0) return false;
+    const scene = ctx.scene orelse return false;
+    const opt = scene.findDynamicInteractOption(option_guid) orelse return false;
     const target_entity_id = if (entity_id != 0) entity_id else opt.entity_net_id;
     switch (opt.kind) {
         .flow => {
@@ -1880,13 +2088,13 @@ pub fn executeDynamicInteractOption(ctx: QuestContext, entity_id: i64, option_gu
                 if (scene.active_flow_inc_id != 0 and scene.active_flow_quest_id == opt.quest_id and scene.active_flow_node_id == opt.node_id) {
                     scene.active_flow_owner_entity_id = target_entity_id;
                 }
+                return true;
             } else if (opt.bt_type == .BtTypeLevelPlay and opt.quest_id > 0 and opt.node_id > 0) {
                 if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
-                    _ = try LevelPlayHelper.onDynamicInteract(lp_ctx, opt.quest_id, opt.node_id, target_entity_id);
+                    if (try LevelPlayHelper.onDynamicInteract(lp_ctx, opt.quest_id, opt.node_id, target_entity_id)) return true;
                 }
-            } else {
-                try onInteract(ctx, target_entity_id, 0);
             }
+            return try onInteractHandled(ctx, target_entity_id, 0);
         },
         .actions => {
             if (opt.actions_json.len > 0) {
@@ -1903,22 +2111,24 @@ pub fn executeDynamicInteractOption(ctx: QuestContext, entity_id: i64, option_gu
                 if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
                     _ = try LevelPlayHelper.onDynamicInteract(lp_ctx, opt.quest_id, opt.node_id, target_entity_id);
                 }
+                return true;
             } else if (opt.quest_id > 0 and opt.node_id > 0) {
                 _ = try onSubmitNode(ctx, opt.quest_id, opt.quest_id, opt.node_id);
-            } else {
-                try onInteract(ctx, target_entity_id, 0);
+                return true;
             }
+            return try onInteractHandled(ctx, target_entity_id, 0);
         },
         .none => {
             if (opt.bt_type == .BtTypeLevelPlay and opt.quest_id > 0 and opt.node_id > 0) {
                 if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
                     _ = try LevelPlayHelper.onDynamicInteract(lp_ctx, opt.quest_id, opt.node_id, target_entity_id);
                 }
+                return true;
             } else if (opt.quest_id > 0 and opt.node_id > 0) {
                 _ = try onSubmitNode(ctx, opt.quest_id, opt.quest_id, opt.node_id);
-            } else {
-                try onInteract(ctx, target_entity_id, 0);
+                return true;
             }
+            return try onInteractHandled(ctx, target_entity_id, 0);
         },
     }
 }
@@ -2919,10 +3129,7 @@ pub fn onProgressionUnlockChanged(ctx: QuestContext) !void {
     try QuestActions.pushFuncOpen(ctx);
     const show_list = try buildPreShowQuestList(ctx);
     try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestShowListNotify{ .QuestId = show_list });
-    const ready_list = try buildReadyQuestList(ctx);
-    if (ready_list.items.len > 0) {
-        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestReadyListNotify{ .QuestId = ready_list });
-    }
+    try pushReadyQuestList(ctx);
 }
 
 /// Evaluates which active quests require block/video subpackage resources that the client
@@ -3301,10 +3508,7 @@ fn activateQuest(ctx: QuestContext, quest_id: i32, push_updates: bool) anyerror!
         try ctx.conn.push(ctx.alloc.gpa, ctx.io, ql);
 
         try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestShowListNotify{ .QuestId = try buildPreShowQuestList(ctx) });
-        const ready_list = try buildReadyQuestList(ctx);
-        if (ready_list.items.len > 0) {
-            try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestReadyListNotify{ .QuestId = ready_list });
-        }
+        try pushReadyQuestList(ctx);
 
         var tree_infos: std.ArrayList(pb.TreeInfo) = .empty;
         try tree_infos.append(ctx.alloc.arena, initTreeInfo(quest_id, .empty, .empty));
@@ -3564,6 +3768,7 @@ fn stepNode(
             if (node.data == .object) {
                 if (node.data.object.get("ExitCondition")) |ec| {
                     if (ConditionEvaluator.evalInlineConditionBlock(makeEvalContextForQuest(ctx, quest_id), ec)) {
+                        try deactivateSubtree(ctx, quest_id, nodes, node.id, push_updates);
                         try finishNonChildNode(ctx, quest_id, node, push_updates);
                         return .completed;
                     }
@@ -3888,10 +4093,25 @@ fn shouldAutoCompleteChildQuest(ctx: QuestContext, quest_id: i32, node: LazyNode
 
     if (std.mem.eql(u8, ctype, "ListenToEvent")) {
         if (cond.get("EventType")) |et| {
-            if (et == .object and std.mem.eql(u8, jsonStr(et.object.get("Type")) orelse "", "EntityStateChange")) {
-                const eid = jsonInt(et.object.get("EntityId")) orelse 0;
-                if (eid > 0 and ctx.scene != null) {
-                    return ctx.quest_comp.info.getEntityState(eid) != null;
+            if (et == .object) {
+                const et_type = jsonStr(et.object.get("Type")) orelse "";
+                if (std.mem.eql(u8, et_type, "EntityStateChange")) {
+                    const eid = jsonInt(et.object.get("EntityId")) orelse 0;
+                    const want_state = jsonStr(et.object.get("State")) orelse "";
+                    if (eid > 0 and ctx.scene != null) {
+                        if (ctx.quest_comp.info.getEntityState(eid)) |st| {
+                            return want_state.len == 0 or std.mem.eql(u8, want_state, st);
+                        }
+                    }
+                } else if (std.mem.eql(u8, et_type, "VarValueChange")) {
+                    if (et.object.get("Var")) |vobj| {
+                        if (vobj == .object) {
+                            if (et.object.get("Value")) |want_v| {
+                                const cur = quest_types.resolveVarIntForOwner(ctx, quest_id, vobj);
+                                return cur == (jsonInt(want_v) orelse cur + 1);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -5659,6 +5879,16 @@ fn buildReadyQuestList(ctx: QuestContext) !std.ArrayList(i32) {
     return list;
 }
 
+pub fn pushReadyQuestList(ctx: QuestContext) !void {
+    if (ctx.scene) |scene| {
+        if (!scene.join_scene_pushed) return;
+    }
+    const ready_list = try buildReadyQuestList(ctx);
+    if (ready_list.items.len > 0) {
+        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestReadyListNotify{ .QuestId = ready_list });
+    }
+}
+
 fn pushQuestStateNotifies(ctx: QuestContext) !void {
     try pushQuestStateNotifiesWithEnter(ctx, false, false);
 }
@@ -5680,12 +5910,9 @@ fn pushQuestStateNotifiesWithEnter(ctx: QuestContext, send_enter: bool, send_tre
     }
 
     const show_list = try buildPreShowQuestList(ctx);
-    const ready_list = try buildReadyQuestList(ctx);
 
     try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestListNotify{ .Quests = quest_list });
-    if (ready_list.items.len > 0) {
-        try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestReadyListNotify{ .QuestId = ready_list });
-    }
+    try pushReadyQuestList(ctx);
     try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestShowListNotify{ .QuestId = show_list });
     try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestFinishListNotify{ .QuestId = finish_list });
     if (send_trees and tree_infos.items.len > 0) {
@@ -6342,7 +6569,14 @@ fn pushNodeStatus(
     }
 }
 
+var finalizing_depth: u32 = 0;
+
 fn finalizeProgression(ctx: QuestContext) !void {
+    if (finalizing_depth == 0) {
+        finalizing_depth += 1;
+        defer finalizing_depth -= 1;
+        _ = stepPendingControlNodes(ctx) catch false;
+    }
     ensureTrackedFocusValid(ctx);
     if (ctx.scene) |scene| scene.current_quest_id = ctx.quest_comp.info.tracked_quest_id;
     syncSceneCurrentNode(ctx);
@@ -6619,7 +6853,8 @@ fn resolveConfigId(scene_opt: ?*const Scene, net_or_cfg: i64) i32 {
             return scene.entities.items(.config)[idx].config_id;
         }
     }
-    return @intCast(@max(0, @min(net_or_cfg, std.math.maxInt(i32))));
+    if (net_or_cfg <= 0 or net_or_cfg > std.math.maxInt(i32)) return 0;
+    return @intCast(net_or_cfg);
 }
 
 fn matchesReachRoleOption(ctx: QuestContext, cond: std.json.ObjectMap) bool {
@@ -6993,7 +7228,7 @@ fn isBattleAttrOrWaitSatisfied(
                         else
                             entityHpPercent(ctx, eid);
                         if (pct_opt) |pct| {
-                            const in_range = (pct >= min_pct and pct <= max_pct) or (max_pct < 100.0 and pct <= max_pct);
+                            const in_range = pct >= min_pct and pct <= max_pct;
                             if (in_range) {
                                 passed += 1;
                                 break;
@@ -7008,9 +7243,10 @@ fn isBattleAttrOrWaitSatisfied(
             const eid = jsonInt(o.object.get("EntityId")) orelse 0;
             const state_str = jsonStr(o.object.get("State")) orelse "";
             const tag_cfg_id = jsonInt(o.object.get("TagConfigId")) orelse 0;
+            const has_tag_or_state = state_str.len > 0 or tag_cfg_id != 0;
             if ((state_str.len > 0 and entityHasStateTag(ctx, eid, state_str)) or
                 (tag_cfg_id != 0 and entityHasTagId(ctx, eid, tag_cfg_id)) or
-                (hit_cfg_id != 0 and (eid == 0 or eid == hit_cfg_id) and hp_ratio <= 0.75))
+                (!has_tag_or_state and hit_cfg_id != 0 and (eid == 0 or eid == hit_cfg_id) and hp_ratio <= 0.75))
             {
                 passed += 1;
             }

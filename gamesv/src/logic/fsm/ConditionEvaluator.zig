@@ -24,21 +24,22 @@ pub fn evaluate(
     depth: usize,
 ) bool {
     if (depth > 12) return false;
+    var result: bool = undefined;
     if (condition.IsClient orelse false) {
-        return clientPasses(comp, fsm_id, transition, condition_index);
+        result = clientPasses(comp, fsm_id, transition, condition_index);
+    } else {
+        result = evaluateRaw(
+            comp,
+            fsm_id,
+            transition,
+            conditions,
+            condition,
+            condition_index,
+            ctx,
+            activation_state,
+            depth,
+        );
     }
-
-    var result = evaluateRaw(
-        comp,
-        fsm_id,
-        transition,
-        conditions,
-        condition,
-        condition_index,
-        ctx,
-        activation_state,
-        depth,
-    );
     if (condition.Reverse) result = !result;
     return result;
 }

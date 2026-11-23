@@ -148,15 +148,19 @@ pub fn onChangeEntityStateRequest(
     qctx: QuestEngine.QuestContext,
 ) !void {
     const map_id: i32 = if (scene_opt.*) |*scene| assets.resolveMapConfigId(scene.instance_id) else 8;
-    const resolved_cfg_id: i64 = if (scene_opt.*) |*scene|
-        (scene.findConfigIdByNetId(txn.message.EntityId) orelse txn.message.EntityId)
-    else
-        txn.message.EntityId;
+    var resolved_cfg_id: i64 = txn.message.EntityId;
+    var net_id_opt: ?i64 = null;
+    if (scene_opt.*) |*scene| {
+        if (scene.net_id_map.get(txn.message.EntityId)) |idx| {
+            resolved_cfg_id = scene.entities.items(.config)[idx].config_id;
+            net_id_opt = txn.message.EntityId;
+        } else {
+            net_id_opt = scene.findEntityNetIdByConfigId(txn.message.EntityId);
+        }
+    }
     const state_name_opt = stateNameFromTagId(assets, map_id, resolved_cfg_id, txn.message.StateTagId);
     if (scene_opt.*) |*scene| {
         if (txn.message.EntityId != 0) {
-            const net_id_opt: ?i64 = scene.findEntityNetIdByConfigId(txn.message.EntityId) orelse
-                if (scene.net_id_map.contains(@as(i64, txn.message.EntityId))) @as(i64, txn.message.EntityId) else null;
             if (net_id_opt) |net_id| {
                 if (try scene.updateEntityStateTagId(alloc.gpa, net_id, txn.message.StateTagId)) |upd| {
                     try QuestEngine.emitEntityStateTagUpdate(txn.conn, alloc.gpa, alloc.arena, io, net_id, upd);
@@ -853,9 +857,14 @@ pub fn onSceneItemStateRequest(
     txn: *Transaction(pb.SceneItemStateRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
 ) !void {
-    try persistIntKey(alloc, fs, pc, "scene_item_state", txn.message.EntityId, txn.message.OperateType);
+    const cfg_id: i64 = if (scene_opt.*) |*scene|
+        (scene.findConfigIdByNetId(txn.message.EntityId) orelse txn.message.EntityId)
+    else
+        txn.message.EntityId;
+    try persistIntKey(alloc, fs, pc, "scene_item_state", cfg_id, txn.message.OperateType);
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -1398,10 +1407,18 @@ pub fn onHookLockPointRequest(
     txn: *Transaction(pb.HookLockPointRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
     qctx: QuestEngine.QuestContext,
 ) !void {
-    try persistIntKey(alloc, fs, pc, "hook_point:active", txn.message.EntityId, 1);
+    const target_id: i64 = if (scene_opt.*) |*scene|
+        (scene.findConfigIdByNetId(txn.message.EntityId) orelse txn.message.EntityId)
+    else
+        txn.message.EntityId;
+    try persistIntKey(alloc, fs, pc, "hook_point:active", target_id, 1);
+    if (target_id != txn.message.EntityId) {
+        try persistIntKey(alloc, fs, pc, "hook_point:active", txn.message.EntityId, 1);
+    }
     try handleHookLockPointAction(qctx, txn.message.EntityId, .Hooked);
     txn.respond(.{ .ErrorCode = .Success });
 }
@@ -1410,10 +1427,18 @@ pub fn onHookLockPointFinishRequest(
     txn: *Transaction(pb.HookLockPointFinishRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
     qctx: QuestEngine.QuestContext,
 ) !void {
-    try persistClaimKey(alloc, fs, pc, "hook_point:fin", txn.message.EntityId);
+    const target_id: i64 = if (scene_opt.*) |*scene|
+        (scene.findConfigIdByNetId(txn.message.EntityId) orelse txn.message.EntityId)
+    else
+        txn.message.EntityId;
+    try persistClaimKey(alloc, fs, pc, "hook_point:fin", target_id);
+    if (target_id != txn.message.EntityId) {
+        try persistClaimKey(alloc, fs, pc, "hook_point:fin", txn.message.EntityId);
+    }
     try handleHookLockPointAction(qctx, txn.message.EntityId, .ExitEndpoint);
     txn.respond(.{ .ErrorCode = .Success });
 }
@@ -1422,10 +1447,18 @@ pub fn onHookLockPointExitRequest(
     txn: *Transaction(pb.HookLockPointExitRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
     qctx: QuestEngine.QuestContext,
 ) !void {
-    try persistIntKey(alloc, fs, pc, "hook_point:active", txn.message.EntityId, 0);
+    const target_id: i64 = if (scene_opt.*) |*scene|
+        (scene.findConfigIdByNetId(txn.message.EntityId) orelse txn.message.EntityId)
+    else
+        txn.message.EntityId;
+    try persistIntKey(alloc, fs, pc, "hook_point:active", target_id, 0);
+    if (target_id != txn.message.EntityId) {
+        try persistIntKey(alloc, fs, pc, "hook_point:active", txn.message.EntityId, 0);
+    }
     try handleHookLockPointAction(qctx, txn.message.EntityId, .ExitMidway);
     txn.respond(.{ .ErrorCode = .Success });
 }

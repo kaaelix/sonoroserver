@@ -211,6 +211,7 @@ fn ensureEntitySpawned(ctx: LevelPlayContext, config_id: i32) void {
 
 var lp_step_depth: u32 = 0;
 var lp_recheck_pending: bool = false;
+var lp_deferred_bt_vars: ?*std.ArrayList(QuestEngine.DeferredBtVar) = null;
 
 const LpStepResult = enum {
     running,
@@ -693,7 +694,9 @@ fn stepLevelPlayNode(
                 dirty_pc.* = false;
             }
         }
-        try completeLevelPlay(ctx, lp_id);
+        if (!initial_boot) {
+            try completeLevelPlay(ctx, lp_id);
+        }
         return .tree_ended;
     } else if (std.mem.eql(u8, node.node_type, "QuestFailed")) {
         if (try QuestEngine.evalQuestFailedConditionPub(qctx, lp_id, node, player_pos_opt, &ctx.scene.lp_fail_timers)) |reason| {
@@ -728,6 +731,7 @@ fn stepLevelPlayNode(
                     }
                     var lp_cbs = QuestEngine.actionCallbacks();
                     lp_cbs.bt_type = .BtTypeLevelPlay;
+                    lp_cbs.deferred_bt_vars = lp_deferred_bt_vars;
                     QuestEngine.executeActionList(qctx, lp_cbs, lp_id, node.id, items) catch {};
                     if (!initial_boot and push_updates) {
                         QuestEngine.pushBtLevelEventsForType(qctx, .BtTypeLevelPlay, lp_id, node.id, .ActionGroupNodeAction, items) catch {};
@@ -798,6 +802,7 @@ fn stepLevelPlayNode(
             if (node.data == .object) {
                 if (node.data.object.get("ExitCondition")) |ec| {
                     if (QuestEngine.evalInlineCondition(qctx, lp_id, ec)) {
+                        deactivateLpSubtree(ctx, lp_id, nodes, node.id, push_updates and !initial_boot, dirty_pc);
                         finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
                         return .completed;
                     }
@@ -955,9 +960,12 @@ fn enterAndStartLevelPlay(
         markLpBtBooted(ctx, lp_id, &dirty_pc);
         var newly_activated: std.ArrayList(LazyNodeStore.NodeEntry) = .empty;
         var newly_actions: std.ArrayList(LazyNodeStore.NodeEntry) = .empty;
+        var deferred_vars: std.ArrayList(QuestEngine.DeferredBtVar) = .empty;
         var steps: usize = 0;
 
         lp_step_depth += 1;
+        const prev_deferred = lp_deferred_bt_vars;
+        lp_deferred_bt_vars = &deferred_vars;
         const res = stepLevelPlayNode(
             ctx,
             lp_id,
@@ -971,9 +979,11 @@ fn enterAndStartLevelPlay(
             &dirty_pc,
             &steps,
         ) catch |err| {
+            lp_deferred_bt_vars = prev_deferred;
             lp_step_depth -= 1;
             return err;
         };
+        lp_deferred_bt_vars = prev_deferred;
         lp_step_depth -= 1;
 
         if (dirty_pc) {
@@ -983,7 +993,17 @@ fn enterAndStartLevelPlay(
             }
         }
 
+        // Always create the client BehaviorTree BEFORE any BtVarUpdateNotify, ActionNotify, or LeaveLevelPlayNotify.
         try pushLevelPlayBehaviorTreeInfo(ctx, lp_id, nodes);
+
+        for (deferred_vars.items) |dv| {
+            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BtVarUpdateNotify{
+                .TreeOwnerId = dv.owner_id,
+                .TreeIncId = dv.owner_id,
+                .VarName = dv.var_name,
+                .VarDefine = dv.var_define,
+            }) catch {};
+        }
 
         for (newly_activated.items) |act_node| {
             QuestEngine.pushBtLevelEventsForType(
@@ -1014,7 +1034,9 @@ fn enterAndStartLevelPlay(
             }
         }
 
-        if (res == .completed or lp_recheck_pending) {
+        if (res == .tree_ended) {
+            try completeLevelPlay(ctx, lp_id);
+        } else if (res == .completed or lp_recheck_pending) {
             lp_recheck_pending = false;
             try stepLevelPlayTree(ctx, lp_id, nodes, true, player_pos_opt);
         }
@@ -1035,6 +1057,7 @@ fn runLevelPlayActions(ctx: LevelPlayContext, owner_id: i32, node_id: i32, actio
 
     var lp_cbs = QuestEngine.actionCallbacks();
     lp_cbs.bt_type = .BtTypeLevelPlay;
+    lp_cbs.deferred_bt_vars = lp_deferred_bt_vars;
     QuestEngine.executeActionList(
         toQuestCtx(ctx),
         lp_cbs,
@@ -1216,7 +1239,7 @@ fn checkLevelPlayKillProgress(ctx: LevelPlayContext, killed_cfg_id: i32, killed_
                         if (et == .array) {
                             for (et.array.items) |item| {
                                 const tid = jsonInt(item) orelse continue;
-                                if (tid != killed_cfg_id and isTargetStillAliveInScene(ctx.scene, tid, killed_net_id)) {
+                                if (isTargetStillAliveInScene(ctx.scene, tid, killed_net_id)) {
                                     any_alive = true;
                                     break;
                                 }
@@ -1778,7 +1801,6 @@ pub fn onLevelPlayEnabled(ctx: LevelPlayContext, level_play_id: i32, enabled: bo
 }
 
 pub fn onDynamicInteract(ctx: LevelPlayContext, lp_id: i32, node_id: i32, entity_id: i64) !bool {
-    _ = entity_id;
     if (lp_id <= 0 or node_id <= 0) return false;
     const lp = ctx.assets.tables.level_play_data.getDataById(lp_id) orelse return false;
     if (!matchesSceneInstance(ctx.assets, lp, ctx.scene.instance_id)) return false;
@@ -1787,6 +1809,50 @@ pub fn onDynamicInteract(ctx: LevelPlayContext, lp_id: i32, node_id: i32, entity
     const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp_id) catch return false;
     const node = findLpNodeById(nodes, node_id) orelse return false;
     if (!std.mem.eql(u8, node.node_type, "ChildQuest")) return false;
+
+    if (entity_id != 0) {
+        if (QuestEngine.getChildConditionPub(node.data)) |cond| {
+            const cfg_id: i32 = if (ctx.scene.net_id_map.get(entity_id)) |idx|
+                std.math.cast(i32, ctx.scene.entities.items(.config)[idx].config_id) orelse 0
+            else
+                std.math.cast(i32, entity_id) orelse 0;
+            var matched = false;
+            var has_targets = false;
+            if (jsonInt(cond.get("EntityId"))) |eid| {
+                if (eid > 0) {
+                    has_targets = true;
+                    if (eid == cfg_id or @as(i64, eid) == entity_id) matched = true;
+                }
+            }
+            if (cond.get("AddOptions")) |opts_v| {
+                if (opts_v == .array and opts_v.array.items.len > 0) {
+                    for (opts_v.array.items) |o| {
+                        if (o != .object) continue;
+                        const eid = jsonInt(o.object.get("EntityId")) orelse continue;
+                        if (eid > 0) {
+                            has_targets = true;
+                            if (eid == cfg_id or @as(i64, eid) == entity_id) matched = true;
+                        }
+                    }
+                }
+            }
+            if (cond.get("HandInItems")) |hi| {
+                if (hi == .object) {
+                    if (hi.object.get("AddOption")) |ao| {
+                        if (ao == .object) {
+                            if (jsonInt(ao.object.get("EntityId"))) |eid| {
+                                if (eid > 0) {
+                                    has_targets = true;
+                                    if (eid == cfg_id or @as(i64, eid) == entity_id) matched = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (has_targets and !matched) return false;
+        }
+    }
 
     var dirty_pc = false;
     try completeLpChildQuest(ctx, lp_id, nodes, node.*, true, &dirty_pc);
@@ -2054,6 +2120,10 @@ pub fn allowsLevelPlayClientSubmit(ctype: []const u8) bool {
         "ShowUi",
         "AwakeAndLoadEntity",
         "GetItem",
+        "CheckPlayerInput",
+        "ReadPhoneMessage",
+        "FinishBvbChallenge",
+        "FinishArcadeGameplay",
     };
     for (allowed) |name| {
         if (std.mem.eql(u8, ctype, name)) return true;
@@ -2343,6 +2413,26 @@ pub fn onEntityKilledWithConditions(
             const ctype = jsonStr(cond_val.object.get("Type")) orelse continue;
             if (!std.mem.eql(u8, ctype, "CrossSceneSyncKillMonster") and
                 !std.mem.eql(u8, ctype, "FinishKuroSimpleCombatKillMonster")) continue;
+            if (!isLpNodeActive(progress_comp, lp_id, node.id) and
+                !QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, lp_id)) continue;
+
+            var has_filter = false;
+            var matches_filter = false;
+            if (jsonInt(cond_val.object.get("EntityId"))) |eid| {
+                if (eid > 0) {
+                    has_filter = true;
+                    if (eid == killed_cfg) matches_filter = true;
+                }
+            }
+            inline for (.{ "EntityIds", "ExistTargets", "TargetsToAwake", "MonsterCreatorEntityIds" }) |field| {
+                if (cond_val.object.get(field)) |arr| {
+                    if (arr == .array and arr.array.items.len > 0) {
+                        has_filter = true;
+                        if (jsonArrayContainsInt(arr, killed_cfg)) matches_filter = true;
+                    }
+                }
+            }
+            if (has_filter and !matches_filter) continue;
 
             try finishLevelPlayNodeAndMaybeComplete(ctx, progress_comp, lp_id, nodes, node);
             break;

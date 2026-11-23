@@ -706,9 +706,10 @@ pub fn onSimpleCombatEntityDieRequest(
             _ = try progress_comp.info.addKeyInt(alloc.gpa, "simple_combat:coins", 1);
         }
         if (scene_opt.* != null) {
-            QuestEngine.onEntityKilled(qctx, entry.key, null) catch |err| QuestEngine.logHookErr("onEntityKilled", err);
+            const cfg_opt = std.math.cast(i32, entry.key);
+            QuestEngine.onEntityKilled(qctx, entry.key, cfg_opt) catch |err| QuestEngine.logHookErr("onEntityKilled", err);
             if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
-                LevelPlayHelper.onEntityKilledWithConditions(lp_ctx, progress_comp, entry.key, null) catch |err| {
+                LevelPlayHelper.onEntityKilledWithConditions(lp_ctx, progress_comp, entry.key, cfg_opt) catch |err| {
                     std.log.scoped(.level_play).warn("onEntityKilled failed: {t}", .{err});
                 };
             }

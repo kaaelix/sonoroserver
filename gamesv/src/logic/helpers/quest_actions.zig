@@ -2193,12 +2193,27 @@ fn emitVarChanged(
         }) catch {};
     }
     if (owner_id > 0) {
-        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BtVarUpdateNotify{
-            .TreeOwnerId = owner_id,
-            .TreeIncId = owner_id,
-            .VarName = var_name,
-            .VarDefine = var_define,
-        }) catch {};
+        if (callbacks.deferred_bt_vars) |deferred| {
+            const name_dup = ctx.alloc.arena.dupe(u8, var_name) catch var_name;
+            var def_dup = var_define;
+            if (def_dup.Value) |v| {
+                if (v == .String) {
+                    def_dup.Value = .{ .String = ctx.alloc.arena.dupe(u8, v.String) catch v.String };
+                }
+            }
+            deferred.append(ctx.alloc.arena, .{
+                .owner_id = owner_id,
+                .var_name = name_dup,
+                .var_define = def_dup,
+            }) catch {};
+        } else {
+            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BtVarUpdateNotify{
+                .TreeOwnerId = owner_id,
+                .TreeIncId = owner_id,
+                .VarName = var_name,
+                .VarDefine = var_define,
+            }) catch {};
+        }
     }
     if (callbacks.on_var_changed) |cb| {
         try cb(ctx, owner_id, var_name);
@@ -2229,7 +2244,7 @@ fn applySetVar(ctx: QuestContext, callbacks: ActionCallbacks, owner_id: i32, par
     const src = quest_types.jsonStr(left.object.get("Source")) orelse "Self";
     const is_global = std.mem.eql(u8, src, "Global");
     const store_key: []const u8 = if (!is_global)
-        (quest_types.scopedVarKeyAlloc(ctx.alloc.arena, left.object, base_name) orelse base_name)
+        (quest_types.scopedVarKeyWithOwnerAlloc(ctx.alloc.arena, ctx.scene, owner_id, left.object, base_name) orelse base_name)
     else
         base_name;
 
@@ -2287,7 +2302,7 @@ fn applySetVar(ctx: QuestContext, callbacks: ActionCallbacks, owner_id: i32, par
                 .Value = .{ .String = sv },
             }, is_global);
         } else {
-            const iv = quest_types.resolveVarInt(ctx, right);
+            const iv = quest_types.resolveVarIntForOwner(ctx, owner_id, right);
             try ctx.quest_comp.info.setVarInt(ctx.alloc.gpa, store_key, iv);
             if (is_global) persistGlobalVarInt(ctx, base_name, iv);
             try emitVarChanged(ctx, callbacks, owner_id, base_name, .{
@@ -2305,12 +2320,12 @@ fn applyCalculateVar(ctx: QuestContext, callbacks: ActionCallbacks, owner_id: i3
     const src = quest_types.jsonStr(res_obj.object.get("Source")) orelse "Self";
     const is_global = std.mem.eql(u8, src, "Global");
     const store_key: []const u8 = if (!is_global)
-        (quest_types.scopedVarKeyAlloc(ctx.alloc.arena, res_obj.object, base_name) orelse base_name)
+        (quest_types.scopedVarKeyWithOwnerAlloc(ctx.alloc.arena, ctx.scene, owner_id, res_obj.object, base_name) orelse base_name)
     else
         base_name;
 
-    const v1 = quest_types.resolveVarInt(ctx, params.get("Var1"));
-    const v2 = quest_types.resolveVarInt(ctx, params.get("Var2"));
+    const v1 = quest_types.resolveVarIntForOwner(ctx, owner_id, params.get("Var1"));
+    const v2 = quest_types.resolveVarIntForOwner(ctx, owner_id, params.get("Var2"));
     const op = quest_types.jsonStr(params.get("Op")) orelse "Add";
 
     const out: i32 = if (std.mem.eql(u8, op, "Add"))
@@ -2377,6 +2392,9 @@ pub fn ensureQuestEntitySpawned(ctx: QuestContext, entity_config_id: i32) void {
     if (entity_config_id <= 0) return;
     if (ctx.quest_comp.info.hasOpenedChest(entity_config_id)) return;
     if (QuestInfo.containsInt(ctx.quest_comp.info.world.hidden_entities, entity_config_id)) return;
+    if (ctx.assets.findLevelEntity(scene.instance_id, entity_config_id)) |entity_cfg| {
+        if (!entityDataLayersActive(ctx.assets, ctx.quest_comp.info, scene.instance_id, entity_cfg)) return;
+    }
     const slice = scene.entities.slice();
     for (slice.items(.config)) |cfg| {
         if (cfg.config_id == entity_config_id) return;
@@ -2392,9 +2410,33 @@ pub fn ensureQuestEntitySpawned(ctx: QuestContext, entity_config_id: i32) void {
         ctx.io,
         @intCast(entity_config_id),
     );
-    if (ctx.quest_comp.info.getEntityState(entity_config_id)) |saved_state| {
-        if (saved_state.len != 0) {
-            if (scene.findEntityNetIdByConfigId(entity_config_id)) |nid| {
+    if (scene.findEntityNetIdByConfigId(entity_config_id)) |nid| {
+        if (ctx.progress_comp) |pc| {
+            var kbuf: [48]u8 = undefined;
+            const xk = std.fmt.bufPrint(&kbuf, "world_pos:{d}:x", .{entity_config_id}) catch "";
+            const xr = if (xk.len > 0) pc.info.getKeyInt(xk) else 0;
+            const yk = std.fmt.bufPrint(&kbuf, "world_pos:{d}:y", .{entity_config_id}) catch "";
+            const yr = if (yk.len > 0) pc.info.getKeyInt(yk) else 0;
+            const zk = std.fmt.bufPrint(&kbuf, "world_pos:{d}:z", .{entity_config_id}) catch "";
+            const zr = if (zk.len > 0) pc.info.getKeyInt(zk) else 0;
+            if (xr != 0 or yr != 0 or zr != 0) {
+                const fx: f32 = @bitCast(@as(u32, @truncate(@as(u64, @bitCast(xr)))));
+                const fy: f32 = @bitCast(@as(u32, @truncate(@as(u64, @bitCast(yr)))));
+                const fz: f32 = @bitCast(@as(u32, @truncate(@as(u64, @bitCast(zr)))));
+                _ = scene.setEntityPosition(nid, .{ fx, fy, fz }, null);
+            }
+            const ck = std.fmt.bufPrint(&kbuf, "world_camp:{d}", .{entity_config_id}) catch "";
+            if (ck.len > 0) {
+                const cval = pc.info.getKeyInt(ck);
+                if (cval > 0) {
+                    if (scene.net_id_map.get(nid)) |eidx| {
+                        scene.entities.items(.config)[eidx].camp = std.math.cast(u8, cval) orelse scene.entities.items(.config)[eidx].camp;
+                    }
+                }
+            }
+        }
+        if (ctx.quest_comp.info.getEntityState(entity_config_id)) |saved_state| {
+            if (saved_state.len != 0) {
                 if (scene.updateEntityStateTag(ctx.alloc.gpa, &ctx.assets.tables.gameplay_tag_remap, nid, saved_state) catch null) |upd| {
                     if (upd.old_tag_id != upd.new_tag_id) {
                         emitEntityStateTagUpdate(ctx.conn, ctx.alloc.gpa, ctx.alloc.arena, ctx.io, nid, upd) catch {};
@@ -2698,6 +2740,7 @@ fn applySetEntityPos(ctx: QuestContext, params: std.json.ObjectMap) !void {
     const net_id = scene.findEntityNetIdByConfigId(cfg_id) orelse return;
     if (!scene.setEntityPosition(net_id, pos, yaw_opt)) return;
     try pushEntityMoved(ctx, net_id, pos, yaw_opt);
+    persistQuestEntityPosition(ctx, cfg_id, net_id, pos) catch {};
 }
 
 fn applyResetEntityPos(ctx: QuestContext, params: std.json.ObjectMap) !void {
@@ -2706,8 +2749,8 @@ fn applyResetEntityPos(ctx: QuestContext, params: std.json.ObjectMap) !void {
     const cfg = ctx.assets.findLevelEntity(scene.instance_id, cfg_id) orelse return;
     const pos = Assets.AssetIndexes.entityWorldPos(cfg) orelse return;
     if (scene.findEntityNetIdByConfigId(cfg_id)) |net_id| {
-        _ = scene.setEntityPosition(net_id, pos, null);
         try pushEntityMoved(ctx, net_id, pos, null);
+        persistQuestEntityPosition(ctx, cfg_id, net_id, pos) catch {};
     }
     ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.EntityPosResetNotify{ .EntityId = cfg_id }) catch {};
 }
@@ -2717,7 +2760,17 @@ fn applyChangeEntityCamp(ctx: QuestContext, params: std.json.ObjectMap) !void {
     const cfg_id = quest_types.jsonInt(params.get("TargetEntity")) orelse
         quest_types.jsonInt(params.get("EntityId")) orelse return;
     const camp = quest_types.jsonInt(params.get("Camp")) orelse return;
+    if (ctx.progress_comp) |pc| {
+        const key = try std.fmt.allocPrint(ctx.alloc.arena, "world_camp:{d}", .{cfg_id});
+        try pc.info.setKeyInt(ctx.alloc.gpa, key, camp);
+        try pc.save(ctx.fs, ctx.alloc.arena);
+    }
     const net_id = scene.findEntityNetIdByConfigId(cfg_id) orelse return;
+    if (scene.net_id_map.get(net_id)) |idx| {
+        if (std.math.cast(u8, camp)) |c8| {
+            scene.entities.items(.config)[idx].camp = c8;
+        }
+    }
     ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.ModifyEntityCampNotify{
         .TargetEntityId = net_id,
         .Camp = camp,
@@ -2845,7 +2898,7 @@ fn applyRandomVar(ctx: QuestContext, callbacks: ActionCallbacks, owner_id: i32, 
     const src = quest_types.jsonStr(rv.object.get("Source")) orelse "Self";
     const is_global = std.mem.eql(u8, src, "Global");
     const store_key: []const u8 = if (!is_global)
-        (quest_types.scopedVarKeyAlloc(ctx.alloc.arena, rv.object, base_name) orelse base_name)
+        (quest_types.scopedVarKeyWithOwnerAlloc(ctx.alloc.arena, ctx.scene, owner_id, rv.object, base_name) orelse base_name)
     else
         base_name;
     const max_val: i32 = if (params.get("RightVar")) |rw| switch (rw) {

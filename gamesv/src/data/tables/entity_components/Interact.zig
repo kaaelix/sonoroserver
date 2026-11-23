@@ -64,6 +64,47 @@ pub const ActionParams = struct {
 pub const InteractAction = struct {
     Name: []const u8 = "",
     Params: ?ActionParams = null,
+    Raw: ?std.json.Value = null,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const val = try std.json.innerParse(std.json.Value, allocator, source, options);
+        if (val != .object) return error.UnexpectedToken;
+        var out: @This() = .{ .Raw = val };
+        if (val.object.get("Name")) |nv| {
+            if (nv == .string) out.Name = nv.string;
+        }
+        if (val.object.get("Params")) |pv| {
+            if (pv == .object) {
+                var p: ActionParams = .{};
+                if (pv.object.get("FlowListName")) |v| if (v == .string) { p.FlowListName = v.string; };
+                if (pv.object.get("FlowId")) |v| if (v == .integer) { p.FlowId = std.math.cast(i32, v.integer) orelse 0; };
+                if (pv.object.get("StateId")) |v| if (v == .integer) { p.StateId = std.math.cast(i32, v.integer) orelse 0; };
+                if (pv.object.get("EntityState")) |v| if (v == .string) { p.EntityState = v.string; };
+                if (pv.object.get("State")) |v| if (v == .string) { p.State = v.string; };
+                if (pv.object.get("Type")) |v| if (v == .string) { p.Type = v.string; };
+                if (pv.object.get("EntityId")) |v| if (v == .integer) { p.EntityId = std.math.cast(i32, v.integer) orelse 0; };
+                if (pv.object.get("DungeonId")) |v| if (v == .integer) { p.DungeonId = std.math.cast(i32, v.integer) orelse 0; };
+                if (pv.object.get("LocationEntityId")) |v| if (v == .integer) { p.LocationEntityId = v.integer; };
+                if (pv.object.get("EntityIds")) |v| if (v == .array and v.array.items.len > 0) {
+                    const arr = try allocator.alloc(i32, v.array.items.len);
+                    var n: usize = 0;
+                    for (v.array.items) |item| {
+                        if (item == .integer) {
+                            if (std.math.cast(i32, item.integer)) |id| {
+                                arr[n] = id;
+                                n += 1;
+                            }
+                        }
+                    }
+                    out.Params = p;
+                    out.Params.?.EntityIds = arr[0..n];
+                    return out;
+                };
+                out.Params = p;
+            }
+        }
+        return out;
+    }
 };
 
 pub const OptionType = struct {
@@ -74,6 +115,7 @@ pub const OptionType = struct {
 
 pub const InteractOption = struct {
     Type: ?OptionType = null,
+    Condition: ?std.json.Value = null,
 };
 
 pub const RandomInteractOption = struct {

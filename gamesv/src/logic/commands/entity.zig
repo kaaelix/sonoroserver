@@ -598,7 +598,7 @@ pub const spawn = struct {
             try part.syncActiveTags(tags, alloc.gpa);
         }
 
-        const initially_hidden = location_override != null and entity_config.IsHidden;
+        const initially_hidden = location_override != null and (entity_config.IsHidden or entity_config.InSleep);
         if (spawn_base.entity_type == .monster) {
             passive_ga_skill_component = try buildMonsterPassiveGaSkill(assets, model_id, alloc.gpa);
         }
