@@ -104,16 +104,21 @@ pub fn onLordGymBeginRequest(
                 try QuestEngine.enterInst(qctx, target_inst, 0);
             }
         }
-        try txn.conn.push(alloc.gpa, io, pb.EnterLevelPlayNotify{
-            .Id = gym.PlayId,
-            .State = 1,
-            .CanGetReward = false,
-        });
-        try txn.conn.push(alloc.gpa, io, pb.LevelPlayStateNotify{
-            .Id = gym.PlayId,
-            .State = 1,
-            .CompleteNumber = 0,
-        });
+        const LevelPlayHelper = @import("../../logic/helpers/level_play.zig");
+        if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+            try LevelPlayHelper.onLevelPlayEnabled(lp_ctx, gym.PlayId, true);
+        } else {
+            try txn.conn.push(alloc.gpa, io, pb.EnterLevelPlayNotify{
+                .Id = gym.PlayId,
+                .State = 1,
+                .CanGetReward = false,
+            });
+            try txn.conn.push(alloc.gpa, io, pb.LevelPlayStateNotify{
+                .Id = gym.PlayId,
+                .State = 1,
+                .CompleteNumber = 0,
+            });
+        }
     }
     txn.respond(.{ .ErrorCode = .Success });
 }

@@ -115,7 +115,6 @@ public static class ExtraHandlers
             if (pid > 0) SqliteStore.SetKv(pid, "special_item", "equipped", "0");
             return OkResp(EMessageId.SpecialItemUnEquipResponse, new SpecialItemUnEquipResponse { ErrorCode = ErrorCode.Success });
         };
-        map[(ushort)EMessageId.ItemDisuseRequest] = (_, _) => OkResp(EMessageId.ItemDisuseResponse, new ItemDisuseResponse { ErrCode = ErrorCode.Success });
         map[(ushort)EMessageId.UnlockInstEntranceRequest] = (_, _) => OkResp(EMessageId.UnlockInstEntranceResponse, new UnlockInstEntranceResponse { ErrorCode = ErrorCode.Success });
         map[(ushort)EMessageId.AddReviveRegionRequest] = (_, _) => OkResp(EMessageId.AddReviveRegionResponse, new AddReviveRegionResponse { ErrorCode = ErrorCode.Success });
         map[(ushort)EMessageId.RemoveReviveRegionRequest] = (_, _) => OkResp(EMessageId.RemoveReviveRegionResponse, new RemoveReviveRegionResponse { ErrorCode = ErrorCode.Success });
@@ -143,7 +142,6 @@ public static class ExtraHandlers
         map[(ushort)EMessageId.SetAlertUiVisibleRequest] = (_, _) => OkResp(EMessageId.SetAlertUiVisibleResponse, new SetAlertUiVisibleResponse { ErrorCode = ErrorCode.Success });
         map[(ushort)EMessageId.CheckGearRequest] = (_, _) => OkResp(EMessageId.CheckGearResponse, new CheckGearResponse { ErrorCode = ErrorCode.Success });
         map[(ushort)EMessageId.GravityGearRequest] = (_, _) => OkResp(EMessageId.GravityGearResponse, new GravityGearResponse { ErrorCode = ErrorCode.Success });
-        map[(ushort)EMessageId.FollowTrackRequest] = (_, _) => OkResp(EMessageId.FollowTrackResponse, new FollowTrackResponse { ErrorCode = ErrorCode.Success });
         map[(ushort)EMessageId.ExploreSkillPullGiantRequest] = (_, payload) =>
         {
             var req = Parse<ExploreSkillPullGiantRequest>(payload);

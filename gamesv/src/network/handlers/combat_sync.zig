@@ -22,6 +22,8 @@ const ConsumeHelper = @import("../../logic/helpers/consume.zig");
 const EnergyHelper = @import("../../logic/helpers/energy.zig");
 const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
 const LevelPlayHelper = @import("../../logic/helpers/level_play.zig");
+const attributes_helper = @import("../../logic/helpers/attributes.zig");
+const RoleHelper = @import("../../logic/helpers/role.zig");
 
 const log = std.log.scoped(.combat_sync);
 
@@ -365,10 +367,20 @@ pub fn onBuffItemRequest(
     events: *EventQueue,
     basic_comp: *PlayerBasicComponent,
     inventory_comp: *PlayerInventoryComponent,
+    role_comp: *PlayerRoleComponent,
     progress_comp: *PlayerProgressComponent,
     io: std.Io,
 ) !void {
     const count = if (txn.message.Num > 0) txn.message.Num else 1;
+    const buff_cfg_opt = assets.tables.buff_item.getDataById(txn.message.ItemId);
+    const cd_sec: i64 = if (buff_cfg_opt) |bi| @max(@as(i64, 1), @as(i64, bi.Cd)) else 10;
+    const now_ms = EnergyHelper.nowSeconds(io) * 1000;
+    const key = try std.fmt.allocPrint(alloc.arena, "buff_cd:{d}", .{txn.message.ItemId});
+    if (progress_comp.info.getKeyInt(key) > now_ms) {
+        txn.respond(.{ .ErrorCode = .ErrBuffItemCdLimit, .RoleId = txn.message.RoleId });
+        return;
+    }
+
     if (txn.message.ItemId > 0) {
         const costs = [_]ConsumeHelper.CostItem{.{ .id = txn.message.ItemId, .count = count }};
         if (!(try ConsumeHelper.consumeCosts(txn.conn, alloc, fs, basic_comp, inventory_comp, &costs, io))) {
@@ -377,11 +389,7 @@ pub fn onBuffItemRequest(
         }
     }
 
-    const buff_cfg_opt = assets.tables.buff_item.getDataById(txn.message.ItemId);
-    const cd_sec: i64 = if (buff_cfg_opt) |bi| @max(@as(i64, 1), @as(i64, bi.Cd)) else 10;
-    const now_ms = EnergyHelper.nowSeconds(io) * 1000;
     const cd_until = now_ms + cd_sec * 1000;
-    const key = try std.fmt.allocPrint(alloc.arena, "buff_cd:{d}", .{txn.message.ItemId});
     try progress_comp.info.setKeyInt(alloc.gpa, key, cd_until);
     try progress_comp.save(fs, alloc.arena);
 
@@ -400,7 +408,71 @@ pub fn onBuffItemRequest(
                     const cfgs = scene.entities.items(.config);
                     for (cfgs, 0..) |c, idx| {
                         if (c.entity_type == .player and c.config_type == .character and c.config_id == target_role) {
-                            const ent: Scene.Entity = .{ .net_id = scene.entities.items(.entity_id)[idx].net_id, .index = idx };
+                            const net_id = scene.entities.items(.entity_id)[idx].net_id;
+                            const ent: Scene.Entity = .{ .net_id = net_id, .index = idx };
+
+                            // Handle special instant food effects (101 = revive, 33/34 = stamina recovery)
+                            var pack_data: std.ArrayList(pb.CombatReceiveData) = .empty;
+                            var any_revived = false;
+                            for (bi.Buffs) |bid| {
+                                const b = assets.tables.buff.getDataById(bid) orelse continue;
+                                if (b.ExtraEffectID == 101) {
+                                    if (scene.entities.items(.attribute)[idx]) |*attr| {
+                                        const life_max = @max(1, attributes_helper.get_attr_value(attr, .LifeMax));
+                                        const cur_life = attributes_helper.get_attr_value(attr, .Life);
+                                        const flat_hp: i32 = if (b.ExtraEffectParameters.len > 0)
+                                            (std.fmt.parseInt(i32, b.ExtraEffectParameters[0], 10) catch 0)
+                                        else
+                                            0;
+                                        const pct_permyriad: i32 = if (b.ExtraEffectParameters.len > 1)
+                                            (std.fmt.parseInt(i32, b.ExtraEffectParameters[1], 10) catch 500)
+                                        else
+                                            500;
+                                        const pct_hp: i32 = @intCast(@divTrunc(@as(i64, life_max) * @as(i64, pct_permyriad), 10_000));
+                                        const heal_amt: i32 = @max(1, flat_hp + pct_hp);
+                                        if (cur_life <= 0) {
+                                            _ = attributes_helper.revive_entity(attr, heal_amt);
+                                            any_revived = true;
+                                            try pack_data.append(alloc.arena, .{ .Message = .{ .CombatNotifyData = .{
+                                                .CombatCommon = .{ .EntityId = net_id },
+                                                .Message = .{ .EntityLivingStatusNotify = .{
+                                                    .Id = net_id,
+                                                    .LivingStatus = .Alive,
+                                                } },
+                                            } } });
+                                            var changed: std.ArrayList(pb.EAttributeType) = .empty;
+                                            try changed.append(alloc.arena, .Life);
+                                            try attributes_helper.generate_attr_messages(&pack_data, net_id, attr, &changed, alloc, io);
+                                        } else {
+                                            const ch = try attributes_helper.change_attr(attr, .Life, .Delta, .Current, heal_amt, alloc);
+                                            try attributes_helper.generate_attr_messages(&pack_data, net_id, attr, &ch, alloc, io);
+                                        }
+                                        const final_hp = @max(0, attributes_helper.get_attr_value(attr, .Life));
+                                        if (role_comp.role_map.getPtr(target_role)) |role_info| {
+                                            role_info.current_hp = final_hp;
+                                            events.enqueueBestEffort(.role_info_modified, .{ .role_id = target_role });
+                                            RoleHelper.saveRoleInfo(fs, alloc.arena, role_comp, target_role) catch {};
+                                        }
+                                        scene.markFsmDirty(alloc.gpa, net_id, Scene.Entity.FsmComponent.WakeReason.attribute) catch {};
+                                    }
+                                } else if (b.ExtraEffectID == 33 or b.ExtraEffectID == 34) {
+                                    if (scene.entities.items(.attribute)[idx]) |*attr| {
+                                        const stamina_amt: i32 = if (b.ExtraEffectParameters.len > 0)
+                                            @max(1, @as(i32, @intFromFloat(@round(std.fmt.parseFloat(f32, b.ExtraEffectParameters[0]) catch 40.0))) * 100)
+                                        else
+                                            4000;
+                                        const ch = try attributes_helper.change_attr(attr, .Strength, .Delta, .Current, stamina_amt, alloc);
+                                        try attributes_helper.generate_attr_messages(&pack_data, net_id, attr, &ch, alloc, io);
+                                    }
+                                }
+                            }
+                            if (pack_data.items.len != 0) {
+                                try txn.conn.push(alloc.gpa, io, pb.CombatReceivePackNotify{ .Data = pack_data });
+                            }
+                            if (any_revived) {
+                                try events.enqueue(.update_formations, .{});
+                            }
+
                             const entries = try alloc.arena.alloc(@import("../../logic/events.zig").BuffAdditionEntry, bi.Buffs.len);
                             for (bi.Buffs, 0..) |bid, bi_idx| {
                                 entries[bi_idx] = .{ .id = bid, .stack_count = 1, .is_active = true };
@@ -535,11 +607,90 @@ pub fn onTargetGearHitRequest(
 pub fn onThrowDamageRequest(
     txn: *Transaction(pb.ThrowDamageRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    assets: *const Assets,
+    scene_opt: *?Scene,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
+    const eid = txn.message.EntityId;
+    var net_id: i64 = eid;
+    var cfg_id: i64 = eid;
+    var max_dur: i32 = 1;
+    var dmg_step: i32 = 1;
+    var found_in_scene = false;
+
+    if (scene_opt.*) |*scene| {
+        if (scene.net_id_map.get(eid)) |idx| {
+            found_in_scene = true;
+            net_id = eid;
+            cfg_id = scene.entities.items(.config)[idx].config_id;
+        } else if (std.math.cast(i32, eid)) |cid32| {
+            if (scene.findEntityNetIdByConfigId(cid32)) |nid| {
+                found_in_scene = true;
+                net_id = nid;
+                cfg_id = cid32;
+            }
+        }
+        if (cfg_id > 0) {
+            if (LevelPlayHelper.resolveEntityConfig(assets, scene.instance_id, cfg_id)) |res| {
+                if (res.components.DestructibleItem) |di| {
+                    if (di.Durability) |d| {
+                        if (d > 0) max_dur = d;
+                    }
+                }
+            }
+        }
+    }
+
+    if (txn.message.CalculateId > 0) {
+        if (assets.tables.damage.getDataById(txn.message.CalculateId) != null) {
+            dmg_step = 1;
+        }
+    }
+
+    const dur_key = try std.fmt.allocPrint(alloc.arena, "durability:{d}", .{cfg_id});
+    const cur_dur: i32 = blk: {
+        const saved = progress_comp.info.getKeyInt(dur_key);
+        if (saved > 0 and saved <= std.math.maxInt(i32)) break :blk @intCast(saved);
+        break :blk max_dur;
+    };
+    const next_dur: i32 = @max(@as(i32, 0), cur_dur - dmg_step);
+    try progress_comp.info.setKeyInt(alloc.gpa, dur_key, next_dur);
     _ = try progress_comp.info.addKeyInt(alloc.gpa, "combat:throw_dmg", 1);
+
+    txn.conn.pushBestEffort(alloc.gpa, io, pb.ThrowDamageNotify{
+        .EntityId = net_id,
+        .Durability = next_dur,
+    });
+
+    if (next_dur <= 0) {
+        const empty_key = try std.fmt.allocPrint(alloc.arena, "explore:durability_empty:{d}", .{cfg_id});
+        _ = try progress_comp.info.markClaim(alloc.gpa, empty_key);
+        _ = try progress_comp.info.setKeyInt(alloc.gpa, "explore:durability_empty", 1);
+
+        if (scene_opt.*) |*scene| {
+            if (found_in_scene and scene.net_id_map.contains(net_id)) {
+                if (try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, net_id, "关卡.Common.状态.销毁")) |upd| {
+                    try QuestEngine.emitEntityStateTagUpdateChecked(scene, assets, txn.conn, alloc.gpa, alloc.arena, io, net_id, upd);
+                }
+                if (cfg_id > 0 and cfg_id <= std.math.maxInt(i32)) {
+                    QuestEngine.onEntityStateChanged(qctx, @intCast(cfg_id), "关卡.Common.状态.销毁") catch {};
+                }
+                var removes: std.ArrayList(pb.EntityRemoveInfo) = .empty;
+                try removes.append(alloc.arena, .{ .EntityId = net_id });
+                try scene.remove(alloc.gpa, fs, net_id);
+                txn.conn.pushBestEffort(alloc.gpa, io, pb.EntityRemoveNotify{
+                    .IsRemove = true,
+                    .RemoveInfos = removes,
+                });
+            }
+        }
+    }
+
     try progress_comp.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onThrowDamage", err);
     txn.respond(.{ .ErrorCode = .Success });
 }
 

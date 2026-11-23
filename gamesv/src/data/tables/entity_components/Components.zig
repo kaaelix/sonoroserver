@@ -1,5 +1,5 @@
 const std = @import("std");
-const Extra = @import("Extra.zig");
+pub const Extra = @import("Extra.zig");
 
 BaseInfoComponent: ?@import("BaseInfo.zig") = null,
 AiComponent: ?@import("Ai.zig") = null,
@@ -31,6 +31,7 @@ GravityFlipComponent: ?@import("GravityFlip.zig") = null,
 CollectComponent: ?@import("Collect.zig") = null,
 TeleControl2: ?@import("TeleControl2.zig") = null,
 extra: []const Extra.Entry = &.{},
+template_extra: []const Extra.Entry = &.{},
 
 fn parseComponentPtrOrStruct(
     comptime T: type,
@@ -139,7 +140,7 @@ pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.jso
 
         var matched = false;
         inline for (comptime std.meta.fields(@This())) |field| {
-            if (!comptime std.mem.eql(u8, field.name, "extra")) {
+            if (comptime !std.mem.eql(u8, field.name, "extra") and !std.mem.eql(u8, field.name, "template_extra")) {
                 if (std.mem.eql(u8, field.name, field_name)) {
                     @field(r, field.name) = try parseComponentPtrOrStruct(field.type, allocator, source, options);
                     matched = true;
@@ -172,8 +173,13 @@ pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.jso
 }
 
 fn mergeComponentField(comptime field_name: []const u8, template: *const @This(), target: *@This()) void {
+    if (comptime std.mem.eql(u8, field_name, "template_extra")) return;
     if (comptime std.mem.eql(u8, field_name, "extra")) {
-        if (target.extra.len == 0 and template.extra.len > 0) target.extra = template.extra;
+        if (target.extra.len == 0 and template.extra.len > 0) {
+            target.extra = template.extra;
+        } else if (template.extra.len > 0) {
+            target.template_extra = template.extra;
+        }
         return;
     }
     if (@field(target, field_name)) |*target_comp| {
@@ -223,6 +229,33 @@ pub fn mergeInto(template: *const @This(), target: *@This()) void {
             if (rg.Config.len == 0 and tg.Config.len > 0) rg.Config = tg.Config;
         }
     }
+}
+
+pub fn hasExtra(self: *const @This(), tag: std.meta.Tag(Extra.Entry)) bool {
+    for (self.extra) |entry| {
+        if (entry == tag) return true;
+    }
+    for (self.template_extra) |entry| {
+        if (entry == tag) return true;
+    }
+    return false;
+}
+
+pub fn findExtra(self: *const @This(), comptime tag: std.meta.Tag(Extra.Entry)) ?@FieldType(Extra.Entry, @tagName(tag)) {
+    for (self.extra) |entry| {
+        if (entry == tag) return @field(entry, @tagName(tag));
+    }
+    for (self.template_extra) |entry| {
+        if (entry == tag) return @field(entry, @tagName(tag));
+    }
+    return null;
+}
+
+/// LevelEntity/Template GravityFlipComponent.DefaultGravity uses 1-based EGravityFlipType (1..4),
+/// whereas protobuf pb.GravityFlipType uses 0-based (0..3).
+pub fn gravityFlipFromDefault(default_gravity: i32) ?i32 {
+    if (default_gravity >= 1 and default_gravity <= 4) return default_gravity - 1;
+    return null;
 }
 
 test "Components explicit null Disabled merge parity" {

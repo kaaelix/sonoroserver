@@ -186,6 +186,17 @@ pub fn grantMonsterDropWithEchoOption(
     return total;
 }
 
+pub fn grantEchoCaptureOnly(
+    ctx: RewardContext,
+    vision_capture_id: i32,
+    calabash_level: i32,
+) !GrantResult {
+    if (vision_capture_id <= 0) return .{};
+    const echo_item_id = resolvePhantomDropItemId(ctx.assets, vision_capture_id, calabash_level) orelse return .{};
+    const items = [_]RewardItem{.{ .item_id = echo_item_id, .count = 1 }};
+    return try grantItems(ctx, 0, false, &items, 1);
+}
+
 pub fn grantItems(
     ctx: RewardContext,
     drop_id: i32,

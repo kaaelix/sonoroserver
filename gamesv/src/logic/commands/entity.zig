@@ -55,7 +55,8 @@ fn spawnBaseFromLogic(entity_logic: EntityLogic) ?EntitySpawnBase {
         .Npc => .{ .config_type = .level, .entity_type = .npc, .entity_state = .default },
         .Vision => .{ .config_type = .level, .entity_type = .vision, .entity_state = .default },
         .Custom => .{ .config_type = .level, .entity_type = .custom, .entity_state = .default },
-        .ClientOnly, .ServerOnly, .SimpleCombat => null,
+        .SimpleCombat => .{ .config_type = .level, .entity_type = .monster, .entity_state = .default },
+        .ClientOnly, .ServerOnly => null,
     };
 }
 
@@ -402,7 +403,7 @@ pub const spawn = struct {
         location_override: ?[3]f32,
         silent: bool,
     ) !void {
-        try spawnWithLocationInternal(
+        _ = try spawnWithLocationInternal(
             events,
             scene,
             fs,
@@ -418,6 +419,8 @@ pub const spawn = struct {
             location_override,
             silent,
             null,
+            false,
+            false,
         );
     }
 
@@ -437,8 +440,10 @@ pub const spawn = struct {
         location_override: ?[3]f32,
         silent: bool,
         progress_info: ProgressInfo,
-    ) !void {
-        try spawnWithLocationInternal(
+        respect_sleep_hidden: bool,
+        defer_publish: bool,
+    ) !?Entity {
+        return try spawnWithLocationInternal(
             events,
             scene,
             fs,
@@ -454,7 +459,46 @@ pub const spawn = struct {
             location_override,
             silent,
             progress_info,
+            respect_sleep_hidden,
+            defer_publish,
         );
+    }
+
+    pub fn publishWorldSpawn(
+        scene: *Scene,
+        fs: *FileSystem,
+        assets: *const Assets,
+        conn: *Connection,
+        alloc: mem.Alloc,
+        io: std.Io,
+        entity: Entity,
+        entity_id: i64,
+        source_map_id: i32,
+    ) !void {
+        const selected = selectSpawnConfig(assets, entity_id, scene.instance_id, source_map_id) orelse return;
+        const ai_id = if (selected.entity_config.ComponentsData.AiComponent) |comp| comp.AiId else null;
+        const repeat_boss = useRepeatBossStartup(ai_id, assets);
+        var route_patch_sent = false;
+        publishDebugSpawn(
+            scene,
+            fs,
+            assets,
+            conn,
+            alloc,
+            io,
+            entity,
+            entity_id,
+            selected.entity_config.MapId,
+            repeat_boss,
+            &selected.entity_config.ComponentsData,
+            false,
+            false,
+            &route_patch_sent,
+        ) catch |publish_err| {
+            if (route_patch_sent) removeClientDebugSpawnOwner(conn, alloc, io, entity_id, entity.net_id);
+            scene.rollbackSpawn(alloc.gpa, fs, entity.net_id) catch |rollback_err| return rollback_err;
+            return publish_err;
+        };
     }
 
     fn spawnWithLocationInternal(
@@ -473,7 +517,9 @@ pub const spawn = struct {
         location_override: ?[3]f32,
         silent: bool,
         progress_info: ?ProgressInfo,
-    ) !void {
+        respect_sleep_hidden: bool,
+        defer_publish: bool,
+    ) !?Entity {
         const selected = selectSpawnConfig(assets, entity_id, scene.instance_id, source_map_id) orelse {
             if (!silent) {
                 if (source_map_id) |map_id| {
@@ -482,7 +528,7 @@ pub const spawn = struct {
                     try respond(events, alloc.arena, "{d} couldn't be spawned, couldn't find it in LevelEntityConfig", .{entity_id});
                 }
             }
-            return;
+            return null;
         };
         const entity_config = selected.entity_config;
         const blueprint_config = selected.blueprint_config;
@@ -492,7 +538,7 @@ pub const spawn = struct {
             if (!silent) {
                 try respond(events, alloc.arena, "{d} couldn't be spawned, unhandled entity logic: {s}", .{ entity_id, @tagName(blueprint_config.EntityLogic) });
             }
-            return;
+            return null;
         };
         const components_data = entity_config.ComponentsData;
 
@@ -509,7 +555,7 @@ pub const spawn = struct {
                     "{d} couldn't be spawned, active instances use map {d} with repeat_boss={s}",
                     .{ entity_id, route.source_map_id, if (route.repeat_boss) "true" else "false" },
                 );
-                return;
+                return null;
             }
         }
         const weapon_id = if (ai_comp) |comp| parseOptionalInt(comp.WeaponId) else 0;
@@ -598,7 +644,7 @@ pub const spawn = struct {
             try part.syncActiveTags(tags, alloc.gpa);
         }
 
-        const initially_hidden = location_override != null and (entity_config.IsHidden or entity_config.InSleep);
+        const initially_hidden = respect_sleep_hidden and (entity_config.IsHidden or entity_config.InSleep);
         if (spawn_base.entity_type == .monster) {
             passive_ga_skill_component = try buildMonsterPassiveGaSkill(assets, model_id, alloc.gpa);
         }
@@ -662,12 +708,7 @@ pub const spawn = struct {
             if (use_ai_runtime) Entity.LogicStateComponent{} else null,
             monster_ai_component,
             if (use_ai_runtime) Entity.CharacterAttachComponent{} else null,
-            if (spawn_base.entity_type == .vehicle or blk: {
-                for (entity_config.ComponentsData.extra) |entry| {
-                    if (entry == .VehicleComponent) break :blk true;
-                }
-                break :blk false;
-            }) Entity.VehicleComponent{ .source = .VehicleSourceNone } else null,
+            if (spawn_base.entity_type == .vehicle or components_data.hasExtra(.VehicleComponent)) Entity.VehicleComponent{ .source = .VehicleSourceNone } else null,
             tag_component,
             part_component,
             fsm_component,
@@ -679,7 +720,22 @@ pub const spawn = struct {
             if (base_info.GravityConfig != null) Entity.GravityComponent{ .location = gravity } else null;
         if (components_data.GravityFlipComponent) |gfc| {
             if (gfc.DefaultGravity) |dg| {
-                if (dg >= 0 and dg <= 3) scene.entities.items(.world_item)[entity.index].gravity_flip = dg;
+                scene.entities.items(.world_item)[entity.index].gravity_flip = Components.gravityFlipFromDefault(dg);
+            }
+        }
+        if (components_data.TeleControl2 != null) {
+            scene.entities.items(.world_item)[entity.index].be_controlled_present = true;
+        }
+        if (blueprint_config.EntityType == .Drop or blueprint_config.EntityType == .DropItem) {
+            scene.entities.items(.world_item)[entity.index].drop_present = true;
+        }
+        if (spawn_base.entity_type == .npc) {
+            if (base_info.Category) |cat| {
+                if (cat.NpcType) |nt| scene.entities.items(.world_item)[entity.index].sub_entity_type = nt;
+            } else if (blueprint_config.EntityType == .PasserbyNpc) {
+                scene.entities.items(.world_item)[entity.index].sub_entity_type = 2;
+            } else if (std.mem.eql(u8, entity_config.BlueprintType, "SimpleNpc") or std.mem.eql(u8, entity_config.BlueprintType, "SimpleNPc")) {
+                scene.entities.items(.world_item)[entity.index].sub_entity_type = 1;
             }
         }
         if (components_data.RangeComponent != null) {
@@ -696,51 +752,56 @@ pub const spawn = struct {
                 }
             }
         }
-        for (components_data.extra) |entry| {
-            switch (entry) {
-                .FanComponent => |fc| {
-                    scene.entities.items(.world_item)[entity.index].fan_turns = if (fc.InitCircle) |ic| std.math.cast(i32, ic) orelse 0 else 0;
-                },
-                .HookLockPoint => |hlp| {
-                    scene.entities.items(.world_item)[entity.index].hook_disabled = (hlp.DisableAtCreateStage orelse false) or (hlp.Disabled orelse false);
-                },
-                .ConnectorComponent => {
-                    scene.entities.items(.world_item)[entity.index].connector_initiated = false;
-                },
-                .ElementalHolderComponent => |eh| {
-                    scene.entities.items(.world_item)[entity.index].elemental_holder_enable = !(eh.Disabled orelse false);
-                },
-                .NearbyTrackingComponent => |nt| {
-                    scene.entities.items(.world_item)[entity.index].nearby_tracking_enable = nt.IsEnable orelse !(nt.Disabled orelse false);
-                },
-                .FlowerPollutionComponent => {
-                    scene.entities.items(.world_item)[entity.index].flower_pollution = true;
-                },
-                .BuffProducerComponent => {
-                    scene.entities.items(.world_item)[entity.index].buff_producer_present = true;
-                },
-                .BuffConsumerComponent => {
-                    scene.entities.items(.world_item)[entity.index].buff_consumer_present = true;
-                },
-                .SceneItemEventListenerComponent => {
-                    scene.entities.items(.world_item)[entity.index].listener_present = true;
-                },
-                .BatchBulletCasterComponent => {
-                    scene.entities.items(.world_item)[entity.index].batch_bullet_cast_present = true;
-                },
-                .QuickHackComponent => {
-                    scene.entities.items(.world_item)[entity.index].hacking_present = true;
-                },
-                .HackManagementComponent => {
-                    scene.entities.items(.world_item)[entity.index].hack_target_present = true;
-                },
-                .PullingObjectFoundation => {
-                    scene.entities.items(.world_item)[entity.index].pulling_foundation_present = true;
-                },
-                .SunSpiritGearComponent => {
-                    scene.entities.items(.world_item)[entity.index].spirit_gear_present = true;
-                },
-                else => {},
+        for ([2][]const @import("../../data/tables/entity_components/Extra.zig").Entry{
+            components_data.extra,
+            components_data.template_extra,
+        }) |extra_slice| {
+            for (extra_slice) |entry| {
+                switch (entry) {
+                    .FanComponent => |fc| {
+                        scene.entities.items(.world_item)[entity.index].fan_turns = if (fc.InitCircle) |ic| std.math.cast(i32, ic) orelse 0 else 0;
+                    },
+                    .HookLockPoint => |hlp| {
+                        scene.entities.items(.world_item)[entity.index].hook_disabled = (hlp.DisableAtCreateStage orelse false) or (hlp.Disabled orelse false);
+                    },
+                    .ConnectorComponent => {
+                        scene.entities.items(.world_item)[entity.index].connector_initiated = false;
+                    },
+                    .ElementalHolderComponent => |eh| {
+                        scene.entities.items(.world_item)[entity.index].elemental_holder_enable = !(eh.Disabled orelse false);
+                    },
+                    .NearbyTrackingComponent => |nt| {
+                        scene.entities.items(.world_item)[entity.index].nearby_tracking_enable = nt.IsEnable orelse !(nt.Disabled orelse false);
+                    },
+                    .FlowerPollutionComponent => {
+                        scene.entities.items(.world_item)[entity.index].flower_pollution = true;
+                    },
+                    .BuffProducerComponent => {
+                        scene.entities.items(.world_item)[entity.index].buff_producer_present = true;
+                    },
+                    .BuffConsumerComponent => {
+                        scene.entities.items(.world_item)[entity.index].buff_consumer_present = true;
+                    },
+                    .SceneItemEventListenerComponent => {
+                        scene.entities.items(.world_item)[entity.index].listener_present = true;
+                    },
+                    .BatchBulletCasterComponent => {
+                        scene.entities.items(.world_item)[entity.index].batch_bullet_cast_present = true;
+                    },
+                    .QuickHackComponent => {
+                        scene.entities.items(.world_item)[entity.index].hacking_present = true;
+                    },
+                    .HackManagementComponent => {
+                        scene.entities.items(.world_item)[entity.index].hack_target_present = true;
+                    },
+                    .PullingObjectFoundation => {
+                        scene.entities.items(.world_item)[entity.index].pulling_foundation_present = true;
+                    },
+                    .SunSpiritGearComponent => {
+                        scene.entities.items(.world_item)[entity.index].spirit_gear_present = true;
+                    },
+                    else => {},
+                }
             }
         }
         scene.entities.items(.world_item)[entity.index].interact = interact_state_component;
@@ -761,31 +822,34 @@ pub const spawn = struct {
         attribute_component = null;
         tag_component = null;
         part_component = null;
-        var route_patch_sent = false;
-        publishDebugSpawn(
-            scene,
-            fs,
-            assets,
-            conn,
-            alloc,
-            io,
-            entity,
-            entity_id,
-            entity_config.MapId,
-            repeat_boss_startup,
-            &components_data,
-            is_frozen orelse false,
-            is_tune_broken orelse false,
-            &route_patch_sent,
-        ) catch |publish_err| {
-            if (route_patch_sent) removeClientDebugSpawnOwner(conn, alloc, io, entity_id, entity.net_id);
-            scene.rollbackSpawn(alloc.gpa, fs, entity.net_id) catch |rollback_err| return rollback_err;
-            return publish_err;
-        };
+        if (!defer_publish) {
+            var route_patch_sent = false;
+            publishDebugSpawn(
+                scene,
+                fs,
+                assets,
+                conn,
+                alloc,
+                io,
+                entity,
+                entity_id,
+                entity_config.MapId,
+                repeat_boss_startup,
+                &components_data,
+                is_frozen orelse false,
+                is_tune_broken orelse false,
+                &route_patch_sent,
+            ) catch |publish_err| {
+                if (route_patch_sent) removeClientDebugSpawnOwner(conn, alloc, io, entity_id, entity.net_id);
+                scene.rollbackSpawn(alloc.gpa, fs, entity.net_id) catch |rollback_err| return rollback_err;
+                return publish_err;
+            };
+        }
 
         if (!silent) {
             try respond(events, alloc.arena, "spawned {d}, map: {d}, bp: {s}, camp: {d}, ai_id: {any}", .{ entity_id, entity_config.MapId, entity_config.BlueprintType, final_camp, ai_id });
         }
+        return entity;
     }
 };
 

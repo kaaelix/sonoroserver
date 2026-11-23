@@ -9,6 +9,7 @@ const Scene = @import("../../logic/Scene.zig");
 const PlayerBasicComponent = @import("../../logic/component/player/PlayerBasicComponent.zig");
 const PlayerInventoryComponent = @import("../../logic/component/player/PlayerInventoryComponent.zig");
 const PlayerProgressComponent = @import("../../logic/component/player/PlayerProgressComponent.zig");
+const PlayerQuestComponent = @import("../../logic/component/player/PlayerQuestComponent.zig");
 const ConsumeHelper = @import("../../logic/helpers/consume.zig");
 const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
 const LevelPlayHelper = @import("../../logic/helpers/level_play.zig");
@@ -1103,23 +1104,62 @@ pub fn onBathPhotoRequest(
 pub fn onPlaceItemOnBoardRequest(
     txn: *Transaction(pb.PlaceItemOnBoardRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
-    const key = try std.fmt.allocPrint(alloc.arena, "misc:board_item:{d}", .{txn.message.ToPlace});
+    const key = try std.fmt.allocPrint(alloc.arena, "misc:board_item:{d}:{d}", .{
+        txn.message.TargetBoardEntityId,
+        txn.message.PlacementEntityId,
+    });
     try pb_kv.saveMsg(alloc, fs, progress_comp, key, txn.message);
+    txn.conn.pushBestEffort(alloc.gpa, io, pb.MovePlacementNotify{
+        .TargetBoardEntityId = txn.message.TargetBoardEntityId,
+        .PlacementEntityId = txn.message.PlacementEntityId,
+        .PosRot = txn.message.PosRot,
+        .PosOnBoard = txn.message.PosOnBoard,
+    });
     txn.respond(.{ .ToPlace = txn.message.ToPlace, .ErrCode = .Success });
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onPlaceItemOnBoard", err);
 }
 
 pub fn onCommitBoardRequest(
     txn: *Transaction(pb.CommitBoardRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    assets: *const Assets,
+    scene_opt: *?Scene,
     progress_comp: *PlayerProgressComponent,
+    quest_comp: *PlayerQuestComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const key = try std.fmt.allocPrint(alloc.arena, "misc:board_commit:{d}", .{txn.message.BoardEntityId});
     try pb_kv.persistClaim(alloc, fs, progress_comp, key);
+    txn.conn.pushBestEffort(alloc.gpa, io, pb.CommitBoardSuccessNotify{
+        .BoardEntityId = txn.message.BoardEntityId,
+    });
+    if (scene_opt.*) |*scene| {
+        const nid_opt: ?i64 = if (scene.net_id_map.contains(txn.message.BoardEntityId))
+            txn.message.BoardEntityId
+        else if (std.math.cast(i32, txn.message.BoardEntityId)) |cid32|
+            scene.findEntityNetIdByConfigId(cid32)
+        else
+            null;
+        if (nid_opt) |nid| {
+            const cfg_id = scene.findConfigIdByNetId(nid) orelse txn.message.BoardEntityId;
+            if (cfg_id > 0) {
+                _ = quest_comp.info.setEntityState(alloc.gpa, cfg_id, "关卡.Common.状态.激活") catch false;
+                quest_comp.save(fs, alloc.arena) catch {};
+            }
+            if (try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, nid, "关卡.Common.状态.激活")) |upd| {
+                QuestEngine.emitEntityStateTagUpdateChecked(scene, assets, txn.conn, alloc.gpa, alloc.arena, io, nid, upd) catch {};
+            }
+        }
+    }
     txn.respond(.{ .ErrCode = .Success });
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onCommitBoard", err);
 }
 
 pub fn onConstructTrapRequest(
@@ -1331,39 +1371,62 @@ pub fn onFoundationRequest(
 pub fn onFoundationCoreOperateRequest(
     txn: *Transaction(pb.FoundationCoreOperateRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
     assets: *const Assets,
     scene: *Scene,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const key = try std.fmt.allocPrint(alloc.arena, "misc:foundation_core:{d}", .{txn.message.FoundationEntityIncId});
     try pb_kv.persistInt(alloc, fs, progress_comp, key, if (txn.message.IsTakeOut) 0 else 1);
-    if (!txn.message.IsTakeOut) {
-        try pb_kv.persistInt(alloc, fs, progress_comp, "misc:hand_core_box", 0);
-        try pb_kv.persistInt(alloc, fs, progress_comp, "misc:hand_core_src", 0);
-        txn.respond(.{ .ErrorCode = .Success, .FromFoundationEntityId = 0 });
-        return;
-    }
 
     const cfg_id: i32 = if (scene.net_id_map.get(txn.message.FoundationEntityIncId)) |idx|
         scene.entities.items(.config)[idx].config_id
+    else if (scene.findConfigIdByNetId(txn.message.FoundationEntityIncId)) |cid|
+        @intCast(std.math.clamp(cid, 1, std.math.maxInt(i32)))
     else
         @intCast(@max(1, @min(txn.message.FoundationEntityIncId, std.math.maxInt(i32))));
+
+    if (!txn.message.IsTakeOut) {
+        const hand_box: i32 = @intCast(std.math.clamp(progress_comp.info.getKeyInt("misc:hand_core_box"), 0, std.math.maxInt(i32)));
+        const hand_src: i32 = @intCast(std.math.clamp(progress_comp.info.getKeyInt("misc:hand_core_src"), 0, std.math.maxInt(i32)));
+        const resolved_box = if (hand_box > 0) hand_box else 850001;
+        const resolved_src = if (hand_src > 0) hand_src else cfg_id;
+        if (scene.net_id_map.get(txn.message.FoundationEntityIncId)) |idx| {
+            scene.entities.items(.world_item)[idx].foundation_source_entity_id = resolved_src;
+        }
+        try pb_kv.persistInt(alloc, fs, progress_comp, "misc:hand_core_box", 0);
+        try pb_kv.persistInt(alloc, fs, progress_comp, "misc:hand_core_src", 0);
+        txn.conn.pushBestEffort(alloc.gpa, io, pb.EntityFoundationCoreChangeNotify{
+            .FoundationEntityId = cfg_id,
+            .HasFoundationCore = true,
+            .FoundationCoreInfo = .{
+                .SourceEntityId = resolved_src,
+                .ElementalBoxId = resolved_box,
+                .State = "关卡.Common.状态.激活",
+                .Priority = 1,
+                .EntityId = cfg_id,
+            },
+        });
+        txn.respond(.{ .ErrorCode = .Success, .FromFoundationEntityId = resolved_src });
+        QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onFoundationCoreOperate", err);
+        return;
+    }
 
     var box_id: i32 = 850001;
     var elem_type_opt: ?[]const u8 = null;
     if (assets.findLevelEntity(scene.instance_id, cfg_id)) |le| {
-        for (le.ComponentsData.extra) |entry| {
-            switch (entry) {
-                .ElementalBoxFoundationComponent => |ef| {
-                    if (ef.InitialActiveElementalBoxId) |eid| {
-                        if (eid > 0) box_id = @intCast(eid);
-                    }
-                    if (ef.ElementalType) |et| {
-                        if (et.len > 0) elem_type_opt = et;
-                    }
-                },
-                else => {},
+        var merged = le.ComponentsData;
+        if (assets.findTemplateConfig(le.BlueprintType)) |tpl| {
+            tpl.ComponentsData.mergeInto(&merged);
+        }
+        if (merged.findExtra(.ElementalBoxFoundationComponent)) |ef| {
+            if (ef.InitialActiveElementalBoxId) |eid| {
+                if (eid > 0) box_id = @intCast(eid);
+            }
+            if (ef.ElementalType) |et| {
+                if (et.len > 0) elem_type_opt = et;
             }
         }
     }
@@ -1381,8 +1444,15 @@ pub fn onFoundationCoreOperateRequest(
         "关卡.Common.状态.激活";
     const priority: i32 = if (box_cfg) |bc| bc.Priority else 1;
 
+    if (scene.net_id_map.get(txn.message.FoundationEntityIncId)) |idx| {
+        scene.entities.items(.world_item)[idx].foundation_source_entity_id = 0;
+    }
     try pb_kv.persistInt(alloc, fs, progress_comp, "misc:hand_core_box", resolved_box_id);
     try pb_kv.persistInt(alloc, fs, progress_comp, "misc:hand_core_src", cfg_id);
+    txn.conn.pushBestEffort(alloc.gpa, io, pb.EntityFoundationCoreChangeNotify{
+        .FoundationEntityId = cfg_id,
+        .HasFoundationCore = false,
+    });
     txn.respond(.{
         .ErrorCode = .Success,
         .FromFoundationEntityId = cfg_id,
@@ -1395,6 +1465,7 @@ pub fn onFoundationCoreOperateRequest(
             .EntityId = cfg_id,
         },
     });
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onFoundationCoreOperate", err);
 }
 
 pub fn onPullingFoundationRequest(

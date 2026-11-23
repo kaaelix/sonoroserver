@@ -791,6 +791,17 @@ pub fn onEntityFollowTrackRequest(
     txn.respond(.{ .ErrorCode = .Success });
 }
 
+pub fn onFollowTrackRequest(
+    txn: *Transaction(pb.FollowTrackRequest),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    progress_comp: *PlayerProgressComponent,
+) !void {
+    const key = try std.fmt.allocPrint(alloc.arena, "wp:follow_track:{d}", .{txn.message.EntityId});
+    try pb_kv.persistClaim(alloc, fs, progress_comp, key);
+    txn.respond(.{ .ErrorCode = .Success });
+}
+
 pub fn onEntityOnLandedRequest(txn: *Transaction(pb.EntityOnLandedRequest)) !void {
     txn.respond(.{});
 }
@@ -931,6 +942,8 @@ pub fn onCharacterDeathPush(
     fs: *FileSystem,
     scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
+    role_comp: *PlayerRoleComponent,
+    events: *EventQueue,
     qctx: QuestEngine.QuestContext,
 ) !void {
     _ = try pc.info.addKeyInt(alloc.gpa, "combat:char_death_cnt", 1);
@@ -940,23 +953,41 @@ pub fn onCharacterDeathPush(
         if (txn.message.RoleId > 0) {
             const slice = scene.entities.slice();
             for (slice.items(.entity_id), slice.items(.config)) |eid, cfg| {
-                if (cfg.entity_type == .player and cfg.config_id == txn.message.RoleId) {
+                if (cfg.entity_type == .player and cfg.config_type == .character and cfg.config_id == txn.message.RoleId) {
                     target_nid = eid.net_id;
                     break;
                 }
             }
         }
         if (scene.net_id_map.get(target_nid)) |idx| {
+            const cfg = scene.entities.items(.config)[idx];
+            var cpack: std.ArrayList(pb.CombatReceiveData) = .empty;
             if (scene.entities.items(.attribute)[idx]) |*attr| {
                 _ = attributes_helper.set_life_unconditional(attr, 0);
                 var changed: std.ArrayList(pb.EAttributeType) = .empty;
                 try changed.append(alloc.arena, .Life);
-                var cpack: std.ArrayList(pb.CombatReceiveData) = .empty;
                 try attributes_helper.generate_attr_messages(&cpack, target_nid, attr, &changed, alloc, io);
-                if (cpack.items.len > 0) {
-                    try txn.conn.push(alloc.gpa, io, pb.CombatReceivePackNotify{ .Data = cpack });
+            }
+            try scene.setBattleEntityActive(alloc.gpa, target_nid, false);
+            try cpack.append(alloc.arena, .{ .Message = .{ .CombatNotifyData = .{
+                .CombatCommon = .{ .EntityId = target_nid },
+                .Message = .{ .EntityLivingStatusNotify = .{
+                    .Id = target_nid,
+                    .LivingStatus = .Dead,
+                } },
+            } } });
+            if (cpack.items.len > 0) {
+                try txn.conn.push(alloc.gpa, io, pb.CombatReceivePackNotify{ .Data = cpack });
+            }
+            if (cfg.config_type == .character) {
+                if (role_comp.role_map.getPtr(cfg.config_id)) |role_info| {
+                    role_info.current_hp = 0;
+                    events.enqueueBestEffort(.role_info_modified, .{ .role_id = cfg.config_id });
+                    RoleHelper.saveRoleInfo(fs, alloc.arena, role_comp, cfg.config_id) catch {};
                 }
             }
+            events.enqueueBestEffort(.update_formations, .{});
+            RoleHelper.maybePushPartyWipeNotify(txn.conn, scene, alloc, io);
             scene.markFsmDirty(alloc.gpa, target_nid, Scene.Entity.FsmComponent.WakeReason.attribute) catch {};
         }
     }

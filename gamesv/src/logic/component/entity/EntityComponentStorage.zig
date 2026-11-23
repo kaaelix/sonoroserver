@@ -34,10 +34,18 @@ pub const WorldItemState = struct {
     buff_consumer_present: bool = false,
     listener_present: bool = false,
     batch_bullet_cast_present: bool = false,
+    be_controlled_present: bool = false,
+    drop_present: bool = false,
     hacking_present: bool = false,
     hack_target_present: bool = false,
     pulling_foundation_present: bool = false,
     spirit_gear_present: bool = false,
+    foundation_source_entity_id: i32 = 0,
+    sub_entity_type: i32 = 0,
+    drop_item_id: i32 = 0,
+    drop_item_count: i32 = 1,
+    in_range_entity_ids: [8]i64 = @splat(0),
+    in_range_entity_len: u8 = 0,
     be_controlled_player_id: ?i64 = null,
     be_controlled_show: bool = false,
     npc_spline_id: i32 = 0,
@@ -274,11 +282,26 @@ pub fn entityToProto(
         if (life_max <= 0) break :blk null;
         break :blk if (attr_comp.attributes[life_idx].current <= 0) .Dead else .Alive;
     } else null;
+    const resolved_sub_type: i32 = if (storage.world_item.sub_entity_type != 0)
+        storage.world_item.sub_entity_type
+    else if (storage.config.entity_type == .npc) blk: {
+        if (assets.findLevelEntityAnyMap(storage.config.config_id)) |le| {
+            if (le.ComponentsData.BaseInfoComponent) |bi| {
+                if (bi.Category) |cat| {
+                    if (cat.NpcType) |nt| break :blk nt;
+                }
+            }
+            if (std.mem.eql(u8, le.BlueprintType, "SimpleNpc") or std.mem.eql(u8, le.BlueprintType, "SimpleNPc")) break :blk 1;
+            if (std.mem.eql(u8, le.BlueprintType, "PasserbyNpc")) break :blk 2;
+        }
+        break :blk 0;
+    } else 0;
     var entity: pb.EntityPb = .{
         .Id = net_id,
         .ConfigId = storage.config.config_id,
         .ConfigType = @enumFromInt(@intFromEnum(storage.config.config_type)),
         .EntityType = @enumFromInt(@intFromEnum(storage.config.entity_type)),
+        .SubEntityType = resolved_sub_type,
         .EntityState = @enumFromInt(@intFromEnum(storage.config.state)),
         .d3s = .{ .Camp = storage.config.camp },
         .LivingStatus = living_status,
@@ -388,8 +411,16 @@ pub fn entityToProto(
         if (storage.world_item.in_range_player_id > 0) {
             try in_range_players.append(alloc.arena, storage.world_item.in_range_player_id);
         }
+        var in_range_entities: std.ArrayList(i64) = .empty;
+        const n_ents = @min(@as(usize, storage.world_item.in_range_entity_len), storage.world_item.in_range_entity_ids.len);
+        for (storage.world_item.in_range_entity_ids[0..n_ents]) |eid| {
+            if (eid > 0) try in_range_entities.append(alloc.arena, eid);
+        }
         try entity.ComponentPbs.append(alloc.arena, .{
-            .ComponentPb = .{ .RangeComponent = .{ .InRangePlayers = in_range_players } },
+            .ComponentPb = .{ .RangeComponent = .{
+                .InRangePlayers = in_range_players,
+                .InRangeEntities = in_range_entities,
+            } },
         });
     }
 
@@ -462,11 +493,32 @@ pub fn entityToProto(
         });
     }
 
-    if (storage.world_item.be_controlled_player_id != null or storage.world_item.be_controlled_show) {
+    if (storage.world_item.be_controlled_present or storage.world_item.be_controlled_player_id != null or storage.world_item.be_controlled_show) {
         try entity.ComponentPbs.append(alloc.arena, .{
             .ComponentPb = .{ .BeControlledComponentPb = .{
                 .PlayerEntityId = storage.world_item.be_controlled_player_id orelse 0,
                 .IsShow = storage.world_item.be_controlled_show,
+            } },
+        });
+    }
+
+    if (storage.world_item.drop_present) {
+        try entity.ComponentPbs.append(alloc.arena, .{
+            .ComponentPb = .{ .DropComponentPb = .{
+                .ItemId = storage.world_item.drop_item_id,
+                .ItemCount = storage.world_item.drop_item_count,
+                .EntityConfigId = storage.config.config_id,
+            } },
+        });
+    }
+
+    if (storage.world_item.foundation_source_entity_id > 0) {
+        try entity.ComponentPbs.append(alloc.arena, .{
+            .ComponentPb = .{ .EntityFoundationComponentPb = .{
+                .egM = .{ .FoundationCoreInfo = .{
+                    .SourceEntityId = storage.world_item.foundation_source_entity_id,
+                    .State = "关卡.Common.状态.激活",
+                } },
             } },
         });
     }

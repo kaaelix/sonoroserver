@@ -352,7 +352,9 @@ pub fn extractNodeTargetEntityIds(out: []i32, node: LazyNodeStore.NodeEntry) []c
                 }
             }
         } else if (std.mem.eql(u8, ctype, "HandInItems")) {
-            if (cond.get("HandInItems")) |hi| {
+            if (cond.get("AddOption")) |ao| {
+                if (ao == .object) appendUniqueTargetId(out, &count, jsonInt(ao.object.get("EntityId")) orelse 0);
+            } else if (cond.get("HandInItems")) |hi| {
                 if (hi == .object) {
                     if (hi.object.get("AddOption")) |ao| {
                         if (ao == .object) appendUniqueTargetId(out, &count, jsonInt(ao.object.get("EntityId")) orelse 0);
@@ -720,6 +722,7 @@ fn replayFlowStateOnEnd(
     qid: i32,
     nid: i32,
     option_infos: []const pb.MapEntry(i32, pb.FlowOptionInfoList),
+    is_skip: bool,
 ) !FlowEndReplayOutcome {
     var outcome: FlowEndReplayOutcome = .{};
     const state_val = (try ctx.assets.flow_states.getFlowState(
@@ -764,8 +767,8 @@ fn replayFlowStateOnEnd(
                     }
                 }
 
-                // Linear TalkItems without branching options (or selected branched TalkItems) execute IntroActions + Actions.
-                if (!has_options or selected_indices.items.len > 0) {
+                // Linear TalkItems (or selected branched TalkItems, or skipped flows) execute IntroActions + Actions.
+                if (!has_options or selected_indices.items.len > 0 or is_skip) {
                     if (ti.object.get("IntroActions")) |iacts| {
                         if (iacts == .array) {
                             for (iacts.array.items) |iact| {
@@ -845,6 +848,7 @@ pub fn onFlowEnd(
                 matched_qid,
                 matched_nid,
                 option_infos,
+                is_skip,
             ) catch |err| blk: {
                 logHookErr("replayFlowStateOnEnd", err);
                 break :blk .{};
@@ -894,6 +898,21 @@ pub fn onFlowEnd(
                     }
                 } else if (findNodeById(nodes, matched_nid)) |node| {
                     if (std.mem.eql(u8, node.node_type, "Action") or std.mem.eql(u8, node.node_type, "ActionWithResult")) {
+                        const akey = actionNodeProgressKey(matched_qid, matched_nid);
+                        const total_actions = countNodeActions(node.*);
+                        const next_idx = scene.action_node_next_idx.get(akey) orelse total_actions;
+                        if (next_idx < total_actions) {
+                            try dispatchPostFlowFollowups(ctx, scene);
+                            if (scene.active_flow_inc_id == 0 and !scene.hasPendingFlowForNode(matched_qid, matched_nid) and ctx.quest_comp.info.hasActiveQuest(matched_qid)) {
+                                try advanceQuestTree(ctx, matched_qid, true);
+                                try finalizeProgression(ctx);
+                            }
+                            return;
+                        } else if (scene.hasPendingFlowForNode(matched_qid, matched_nid)) {
+                            try dispatchPostFlowFollowups(ctx, scene);
+                            return;
+                        }
+                        _ = scene.action_node_next_idx.remove(akey);
                         try finishNonChildNode(ctx, matched_qid, node.*, true);
                         try advanceQuestTree(ctx, matched_qid, true);
                         try finalizeProgression(ctx);
@@ -905,6 +924,27 @@ pub fn onFlowEnd(
         }
         try dispatchPostFlowFollowups(ctx, scene);
         return;
+    }
+
+    if (flow_inc_id != 0) {
+        if (scene.takeAsyncFlow(flow_inc_id)) |af_val| {
+            var af = af_val;
+            defer af.deinit(ctx.alloc.gpa);
+            if (af.flow_list_name.len > 0 and af.flow_id > 0 and af.state_id > 0) {
+                _ = replayFlowStateOnEnd(
+                    ctx,
+                    scene,
+                    af.flow_list_name,
+                    af.flow_id,
+                    af.state_id,
+                    af.quest_id,
+                    af.node_id,
+                    option_infos,
+                    is_skip,
+                ) catch |err| logHookErr("replayAsyncFlowStateOnEnd", err);
+            }
+            return;
+        }
     }
 
     // Ignore stale/out-of-order FlowEndRequest when a different flow is active,
@@ -935,31 +975,47 @@ pub fn onFlowEnd(
     }
 }
 
-/// Executes a single server-driven action within the scene's active flow state.
+/// Executes a single server-driven action within the scene's active or async flow state.
 pub fn onFlowAction(ctx: QuestContext, flow_inc_id: i64, action_id: i32) !void {
     const scene = ctx.scene orelse return;
-    if (action_id <= 0 or scene.active_flow_list_name.len == 0) return;
-    if (scene.active_flow_inc_id != 0 and flow_inc_id != 0 and scene.active_flow_inc_id != flow_inc_id) {
+    if (action_id <= 0) return;
+
+    var target_list_name: []const u8 = scene.active_flow_list_name;
+    var target_flow_id: i32 = scene.active_flow_id;
+    var target_state_id: i32 = scene.active_flow_state_id;
+    var target_quest_id: i32 = scene.active_flow_quest_id;
+    var target_node_id: i32 = scene.active_flow_node_id;
+    var is_active = true;
+
+    if (scene.active_flow_inc_id == 0 or (flow_inc_id != 0 and scene.active_flow_inc_id != flow_inc_id)) {
+        const af = scene.findAsyncFlow(flow_inc_id) orelse return;
+        target_list_name = try ctx.alloc.arena.dupe(u8, af.flow_list_name);
+        target_flow_id = af.flow_id;
+        target_state_id = af.state_id;
+        target_quest_id = af.quest_id;
+        target_node_id = af.node_id;
+        is_active = false;
+    } else if (target_list_name.len == 0) {
         return;
     }
 
     const state_val = (try ctx.assets.flow_states.getFlowState(
         ctx.io,
         ctx.alloc.arena,
-        scene.active_flow_list_name,
-        scene.active_flow_id,
-        scene.active_flow_state_id,
+        target_list_name,
+        target_flow_id,
+        target_state_id,
     )) orelse return;
 
     const action_val = Assets.LazyFlowStore.findActionById(state_val, action_id) orelse return;
-    try scene.markFlowActionExecuted(ctx.alloc.gpa, action_id);
+    if (is_active) try scene.markFlowActionExecuted(ctx.alloc.gpa, action_id);
     const saved_owner = scene.active_flow_owner_entity_id;
     const prev_state_id = scene.active_flow_state_id;
     const actions = [_]std.json.Value{action_val};
     var cbs = actionCallbacks();
     cbs.is_flow_action = true;
-    try QuestActions.executeActionList(ctx, cbs, scene.active_flow_quest_id, scene.active_flow_node_id, &actions);
-    if (scene.active_flow_state_id != prev_state_id and scene.active_flow_owner_entity_id == 0 and saved_owner != 0) {
+    try QuestActions.executeActionList(ctx, cbs, target_quest_id, target_node_id, &actions);
+    if (is_active and scene.active_flow_state_id != prev_state_id and scene.active_flow_owner_entity_id == 0 and saved_owner != 0) {
         scene.active_flow_owner_entity_id = saved_owner;
     }
 }
@@ -1362,6 +1418,62 @@ fn startNormalInteractFlow(
     };
 }
 
+fn jsonArrayContainsInt(arr_val_opt: ?std.json.Value, needle: i32) bool {
+    const arr_val = arr_val_opt orelse return false;
+    if (arr_val != .array) return false;
+    for (arr_val.array.items) |v| {
+        if ((jsonInt(v) orelse 0) == needle) return true;
+    }
+    return false;
+}
+
+fn isEntityKillRelevantToQuest(
+    aq: QuestInfo.ActiveQuest,
+    nodes: []const LazyNodeStore.NodeEntry,
+    cfg_id: i32,
+) bool {
+    for (aq.active_nodes) |nid| {
+        const node = findNodeById(nodes, nid) orelse continue;
+        if (!std.mem.eql(u8, node.node_type, "ChildQuest")) continue;
+        const cond = getChildCondition(node.data) orelse continue;
+        const ctype = jsonStr(cond.get("Type")) orelse continue;
+        if (std.mem.eql(u8, ctype, "MonsterCreator")) {
+            const list = cond.get("MonsterCreatorEntityIds");
+            if (list == null or (list.? == .array and list.?.array.items.len == 0)) return true;
+            if (jsonArrayContainsInt(list, cfg_id)) return true;
+        } else if (std.mem.eql(u8, ctype, "Kill")) {
+            var has_any_list = false;
+            inline for (.{ "TargetsToAwake", "ExistTargets" }) |field| {
+                if (cond.get(field)) |arr| {
+                    if (arr == .array and arr.array.items.len > 0) has_any_list = true;
+                }
+                if (jsonArrayContainsInt(cond.get(field), cfg_id)) return true;
+            }
+            if (!has_any_list) return true;
+        } else if (std.mem.eql(u8, ctype, "DetectCombatState") or std.mem.eql(u8, ctype, "DetectCombatState2")) {
+            if ((jsonInt(cond.get("EntityId")) orelse 0) == cfg_id) return true;
+            if (cond.get("Conditions")) |cs| {
+                if (cs == .array) {
+                    for (cs.array.items) |c| {
+                        if (c == .object and (jsonInt(c.object.get("EntityId")) orelse 0) == cfg_id) return true;
+                    }
+                }
+            }
+        }
+    }
+    for (nodes) |node| {
+        if (!std.mem.eql(u8, node.node_type, "QuestFailed")) continue;
+        if (!isSubtreeActiveForMonitor(nodes, aq.active_nodes, node.parent_id)) continue;
+        if (node.data != .object) continue;
+        const fc_val = node.data.object.get("FailedCondition") orelse continue;
+        if (fc_val != .object) continue;
+        const edc_val = fc_val.object.get("EntityDeathCondition") orelse continue;
+        if (edc_val != .object) continue;
+        if (jsonArrayContainsInt(edc_val.object.get("EntityIds"), cfg_id)) return true;
+    }
+    return false;
+}
+
 pub fn onEntityKilled(ctx: QuestContext, target_net_id: i64, config_id_opt: ?i32) !void {
     const cfg_id = config_id_opt orelse resolveConfigId(ctx.scene, target_net_id);
     if (cfg_id <= 0) return;
@@ -1370,8 +1482,11 @@ pub fn onEntityKilled(ctx: QuestContext, target_net_id: i64, config_id_opt: ?i32
     const active_snapshot = try snapshotActiveQuestIds(ctx);
 
     for (active_snapshot) |qid| {
+        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, qid) catch continue;
         if (ctx.quest_comp.info.findActiveQuestPtr(qid)) |aq_ptr| {
-            _ = try QuestInfo.recordKilledEntity(aq_ptr, ctx.alloc.gpa, cfg_id);
+            if (isEntityKillRelevantToQuest(aq_ptr.*, nodes, cfg_id)) {
+                _ = try QuestInfo.recordKilledEntity(aq_ptr, ctx.alloc.gpa, cfg_id);
+            }
         }
 
         if (try checkCombatStateForQuest(ctx, qid, cfg_id, 0.0)) {
@@ -1379,8 +1494,6 @@ pub fn onEntityKilled(ctx: QuestContext, target_net_id: i64, config_id_opt: ?i32
         }
 
         const aq_ptr = ctx.quest_comp.info.findActiveQuestPtr(qid) orelse continue;
-
-        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, qid) catch continue;
         const node_ids = try ctx.alloc.arena.dupe(i32, aq_ptr.active_nodes);
         for (node_ids) |nid| {
             const node = findNodeById(nodes, nid) orelse continue;
@@ -1755,8 +1868,17 @@ fn recordChallengeDungeonFinish(ctx: QuestContext, dungeon_id: i32) !void {
         }) catch {};
     }
 
+    const preferred_tower_id = pc.info.getKeyInt("tower:last_floor_id");
+    var matched_tc: ?Assets.DataTables.TowerConfig = null;
     for (ctx.assets.tables.tower_config.items) |tc| {
         if (tc.InstanceId != dungeon_id) continue;
+        if (preferred_tower_id > 0 and tc.Id == preferred_tower_id) {
+            matched_tc = tc;
+            break;
+        }
+        if (matched_tc == null) matched_tc = tc;
+    }
+    if (matched_tc) |tc| {
         const limit_s: i64 = if (ctx.assets.tables.instance_dungeon.getDataById(dungeon_id)) |inst|
             (if (inst.AutoLeaveTime > 0) inst.AutoLeaveTime else 300)
         else
@@ -1817,7 +1939,6 @@ fn recordChallengeDungeonFinish(ctx: QuestContext, dungeon_id: i32) !void {
             .NeedUpdateSeason = false,
             .CurrentFloorData = floor_pb,
         }) catch {};
-        break;
     }
 
     if (changed) {
@@ -2041,6 +2162,12 @@ pub fn onBtRollback(ctx: QuestContext, owner_id: i32, tree_inc_id: i64, _: i32) 
     }
     const quest_id = if (owner_id > 0) owner_id else (std.math.cast(i32, tree_inc_id) orelse return);
     if (quest_id > 0 and ctx.quest_comp.info.hasActiveQuest(quest_id)) {
+        if (ctx.scene) |scene| {
+            if (scene.last_server_rollback_quest_id == quest_id and (nowMs(ctx.io) - scene.last_server_rollback_ms) < 5000) {
+                scene.last_server_rollback_quest_id = 0;
+                return;
+            }
+        }
         try rollbackQuestToNode(ctx, quest_id, 0, .DefaultFail, true);
         try finalizeProgression(ctx);
     } else if (quest_id > 0 and QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, quest_id)) {
@@ -2598,6 +2725,7 @@ pub fn destroyQuest(ctx: QuestContext, quest_id: i32) !void {
         scene.fail_timers.cancelQuest(quest_id);
         scene.releaseOccupationsForTree(ctx.alloc.gpa, quest_id, quest_id);
         scene.clearSaveNodesForOwner(quest_id);
+        scene.clearActionNodeProgressForOwner(quest_id);
         _ = interruptActiveFlowForQuest(ctx, quest_id);
     }
     if (!ctx.quest_comp.info.hasActiveQuest(quest_id)) return;
@@ -2875,7 +3003,6 @@ pub fn leaveInst(ctx: QuestContext, pos_entity_id: i32) !void {
                 scene.recordFailedDungeon(ctx.alloc.gpa, prev_inst) catch {};
             }
         }
-        try onDungeonEvent(ctx, prev_inst, true);
     }
 }
 
@@ -3304,7 +3431,7 @@ fn stepPendingControlNodes(ctx: QuestContext) !bool {
                 break;
             }
         }
-        if (has_control) {
+        if (has_control or aq.active_nodes.len == 0) {
             try advanceQuestTree(ctx, qid, true);
             progressed = true;
         }
@@ -3499,11 +3626,6 @@ fn activateQuest(ctx: QuestContext, quest_id: i32, push_updates: bool) anyerror!
 
     _ = try ctx.quest_comp.info.getOrAddActiveQuest(ctx.alloc.gpa, quest_id);
 
-    if (ctx.assets.tables.quest_data.getDataById(quest_id)) |q| {
-        try executeActions(ctx, quest_id, 0, q.Data.ActiveActions);
-        try executeActions(ctx, quest_id, 0, q.Data.AcceptActions);
-    }
-
     if (push_updates) {
         var ql: pb.QuestListNotify = .default;
         try ql.Quests.append(ctx.alloc.arena, .{ .QuestId = quest_id, .Status = .InProgress });
@@ -3515,6 +3637,11 @@ fn activateQuest(ctx: QuestContext, quest_id: i32, push_updates: bool) anyerror!
         var tree_infos: std.ArrayList(pb.TreeInfo) = .empty;
         try tree_infos.append(ctx.alloc.arena, initTreeInfo(quest_id, .empty, .empty));
         try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BehaviorTreeInfoNotify{ .TreeInfos = tree_infos });
+    }
+
+    if (ctx.assets.tables.quest_data.getDataById(quest_id)) |q| {
+        try executeActions(ctx, quest_id, 0, q.Data.ActiveActions);
+        try executeActions(ctx, quest_id, 0, q.Data.AcceptActions);
     }
 
     try advanceQuestTree(ctx, quest_id, push_updates);
@@ -3586,7 +3713,14 @@ fn stepNode(
         return .completed;
     } else if (std.mem.eql(u8, node.node_type, "ParallelSelect") or std.mem.eql(u8, node.node_type, "Parallel")) {
         const is_parallel_all = std.mem.eql(u8, node.node_type, "Parallel");
-        const needed_sel: i32 = @max(1, node.count);
+        var eligible_children: i32 = 0;
+        for (nodes) |child| {
+            if (child.parent_id != node.id) continue;
+            if (!std.mem.eql(u8, child.node_type, "QuestFailed")) {
+                eligible_children += 1;
+            }
+        }
+        const needed_sel: i32 = if (node.count > 0) node.count else @max(@as(i32, 1), eligible_children);
         var finished_count: i32 = 0;
         var failed_count: i32 = 0;
         var total_children: i32 = 0;
@@ -3679,24 +3813,16 @@ fn stepNode(
     } else if (std.mem.eql(u8, node.node_type, "Action") or std.mem.eql(u8, node.node_type, "ActionWithResult")) {
         if (node.data == .object) {
             var single_buf: [1]std.json.Value = undefined;
-            const action_items: ?[]const std.json.Value = if (node.data.object.get("Actions")) |acts_val|
-                (if (acts_val == .array) acts_val.array.items else null)
-            else if (node.data.object.get("Action")) |single_act| blk: {
-                if (single_act != .object) break :blk null;
-                single_buf[0] = single_act;
-                break :blk single_buf[0..1];
-            } else null;
-            if (action_items) |items| {
-                if (push_updates and items.len > 0) {
+            if (extractNodeActionItems(node.data, &single_buf)) |items| {
+                const akey = actionNodeProgressKey(quest_id, node.id);
+                const start_idx: usize = if (ctx.scene) |sc| (sc.action_node_next_idx.get(akey) orelse 0) else 0;
+                if (start_idx == 0 and push_updates and items.len > 0) {
                     try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.UpdateNodeStatusNotify{
                         .TreeOwnerId = quest_id,
                         .TreeIncId = quest_id,
                         .NodeId = node.id,
                         .Status = .Activate,
                     });
-                }
-                try executeActions(ctx, quest_id, node.id, items);
-                if (push_updates and items.len > 0) {
                     try pushBtLevelEvents(
                         ctx,
                         quest_id,
@@ -3705,15 +3831,32 @@ fn stepNode(
                         items,
                     );
                 }
+                if (start_idx < items.len) {
+                    for (items[start_idx..], start_idx..) |act_item, idx| {
+                        try executeActions(ctx, quest_id, node.id, &.{act_item});
+                        if (ctx.scene) |scene| {
+                            if (isSyncPlayFlowAction(act_item) and
+                                ((scene.active_flow_inc_id != 0 and
+                                scene.active_flow_quest_id == quest_id and
+                                scene.active_flow_node_id == node.id) or
+                                scene.hasPendingFlowForNode(quest_id, node.id)))
+                            {
+                                try scene.action_node_next_idx.put(ctx.alloc.gpa, akey, idx + 1);
+                                return .running;
+                            }
+                        }
+                    }
+                }
                 if (ctx.scene) |scene| {
-                    if (!hasAsyncPlayFlowAction(items) and
-                        ((scene.active_flow_inc_id != 0 and
+                    if ((scene.active_flow_inc_id != 0 and
                         scene.active_flow_quest_id == quest_id and
                         scene.active_flow_node_id == node.id) or
-                        scene.hasPendingFlowForNode(quest_id, node.id)))
+                        scene.hasPendingFlowForNode(quest_id, node.id))
                     {
+                        try scene.action_node_next_idx.put(ctx.alloc.gpa, akey, items.len);
                         return .running;
                     }
+                    _ = scene.action_node_next_idx.remove(akey);
                 }
             }
         }
@@ -4912,6 +5055,11 @@ fn rollbackQuestToNode(
         scene.fail_timers.cancelQuest(quest_id);
         scene.releaseOccupationsForTree(ctx.alloc.gpa, quest_id, quest_id);
         scene.clearSaveNodesForOwner(quest_id);
+        scene.clearActionNodeProgressForOwner(quest_id);
+        if (!client_initiated and reason != .GiveUpFail) {
+            scene.last_server_rollback_quest_id = quest_id;
+            scene.last_server_rollback_ms = nowMs(ctx.io);
+        }
         _ = interruptActiveFlowForQuest(ctx, quest_id);
     }
 
@@ -4970,6 +5118,10 @@ fn rollbackQuestToNode(
         removeDoInteractOptionsForNode(ctx, quest_id, aid);
         _ = try QuestInfo.markNodeInactive(aq_ptr, ctx.alloc.gpa, aid);
     }
+    if (aq_ptr.killed_entities.len != 0) {
+        ctx.alloc.gpa.free(aq_ptr.killed_entities);
+        aq_ptr.killed_entities = &.{};
+    }
     if (latest_ckpt_id > 0) {
         const fin_copy = try ctx.alloc.arena.dupe(i32, aq_ptr.finished_nodes);
         for (fin_copy) |fid| {
@@ -5006,6 +5158,7 @@ fn succeedQuest(ctx: QuestContext, quest_id: i32) anyerror!void {
         scene.fail_timers.cancelQuest(quest_id);
         scene.releaseOccupationsForTree(ctx.alloc.gpa, quest_id, quest_id);
         scene.clearSaveNodesForOwner(quest_id);
+        scene.clearActionNodeProgressForOwner(quest_id);
     }
 
     quest_transition_depth += 1;
@@ -5260,6 +5413,47 @@ fn completeGuideById(ctx: QuestContext, guide_id: i32) anyerror!void {
     _ = try completeMatchingChildQuests(ctx, "Guide", "GuideGroupId", guide_id);
 }
 
+fn actionNodeProgressKey(quest_id: i32, node_id: i32) u64 {
+    return (@as(u64, @as(u32, @bitCast(quest_id))) << 32) | @as(u64, @as(u32, @bitCast(node_id)));
+}
+
+fn extractNodeActionItems(data: std.json.Value, single_buf: *[1]std.json.Value) ?[]const std.json.Value {
+    if (data != .object) return null;
+    if (data.object.get("Actions")) |acts_val| {
+        return if (acts_val == .array) acts_val.array.items else null;
+    }
+    if (data.object.get("Action")) |single_act| {
+        if (single_act != .object) return null;
+        single_buf[0] = single_act;
+        return single_buf[0..1];
+    }
+    return null;
+}
+
+fn countNodeActions(node: LazyNodeStore.NodeEntry) usize {
+    var single_buf: [1]std.json.Value = undefined;
+    const items = extractNodeActionItems(node.data, &single_buf) orelse return 0;
+    return items.len;
+}
+
+fn isPlayFlowActionAsync(act: std.json.Value) bool {
+    if (act != .object) return false;
+    if (jsonBool(act.object.get("Async"))) |b| return b;
+    if (act.object.get("Params")) |pv| {
+        if (pv == .object) {
+            if (jsonBool(pv.object.get("Async"))) |b| return b;
+        }
+    }
+    return false;
+}
+
+fn isSyncPlayFlowAction(act: std.json.Value) bool {
+    if (act != .object) return false;
+    const name = jsonStr(act.object.get("Name")) orelse return false;
+    if (!std.mem.eql(u8, name, "PlayFlow")) return false;
+    return !isPlayFlowActionAsync(act);
+}
+
 pub fn hasAsyncPlayFlowAction(items: []const std.json.Value) bool {
     var saw_play_flow = false;
     for (items) |act| {
@@ -5267,10 +5461,7 @@ pub fn hasAsyncPlayFlowAction(items: []const std.json.Value) bool {
         const name = jsonStr(act.object.get("Name")) orelse continue;
         if (!std.mem.eql(u8, name, "PlayFlow")) continue;
         saw_play_flow = true;
-        const pv = act.object.get("Params") orelse continue;
-        if (pv == .object) {
-            if (!(jsonBool(pv.object.get("Async")) orelse false)) return false;
-        } else return false;
+        if (!isPlayFlowActionAsync(act)) return false;
     }
     return saw_play_flow;
 }
@@ -5281,7 +5472,7 @@ fn startFlowFromObj(
     node_id: i32,
     obj: std.json.ObjectMap,
 ) !void {
-    try startFlowWithMode(ctx, quest_id, node_id, obj, true);
+    try startFlowWithMode(ctx, quest_id, node_id, obj, true, null);
 }
 
 fn startFlowWithMode(
@@ -5290,12 +5481,13 @@ fn startFlowWithMode(
     node_id: i32,
     obj: std.json.ObjectMap,
     enqueue_if_busy: bool,
+    is_async_override: ?bool,
 ) !void {
     const flow_name = jsonStr(obj.get("FlowListName")) orelse return;
     if (flow_name.len == 0) return;
     const flow_id = jsonInt(obj.get("FlowId")) orelse 1;
     const state_id = jsonInt(obj.get("StateId")) orelse 1;
-    const is_async = jsonBool(obj.get("Async")) orelse false;
+    const is_async = is_async_override orelse (jsonBool(obj.get("Async")) orelse false);
     const bt_type: pb.BtType = if (quest_id > 0 and
         ctx.quest_comp.info.findActiveQuest(quest_id) == null and
         ctx.assets.tables.level_play_data.getDataById(quest_id) != null)
@@ -5350,7 +5542,8 @@ fn startFlowParamsBt(
             scene.active_flow_bt_type = bt_type;
             prepareFlowStateEntities(ctx, flow_name, flow_id, state_id);
         }
-    } else if (ctx.scene != null) {
+    } else if (ctx.scene) |scene| {
+        try scene.recordAsyncFlow(ctx.alloc.gpa, inc_id, quest_id, node_id, bt_type, flow_name, flow_id, state_id, 0);
         prepareFlowStateEntities(ctx, flow_name, flow_id, state_id);
     }
 
@@ -5702,11 +5895,25 @@ fn buildChildNodeProgress(
     }
 
     if (std.mem.eql(u8, ctype, "CheckEntityState")) {
-        var ids_buf: [32]i32 = undefined;
-        const target_ids = extractNodeTargetEntityIds(&ids_buf, node);
         var eids: std.ArrayList(i32) = .empty;
-        for (target_ids) |tid| {
-            try eids.append(ctx.alloc.arena, tid);
+        if (cond.get("Conditions")) |cs| {
+            if (cs == .array) {
+                for (cs.array.items) |c| {
+                    if (c != .object) continue;
+                    const tid = jsonInt(c.object.get("EntityId")) orelse continue;
+                    if (tid <= 0) continue;
+                    const want_state = jsonStr(c.object.get("State")) orelse "";
+                    if (want_state.len == 0 or entityHasStateTag(ctx, tid, want_state)) {
+                        try eids.append(ctx.alloc.arena, tid);
+                    }
+                }
+            }
+        } else {
+            var ids_buf: [32]i32 = undefined;
+            const target_ids = extractNodeTargetEntityIds(&ids_buf, node);
+            for (target_ids) |tid| {
+                try eids.append(ctx.alloc.arena, tid);
+            }
         }
         return .{ .Progress = .{ .EntityStateList = .{ .EntityId = eids } } };
     }
@@ -6286,6 +6493,7 @@ pub fn syncDynamicInteractOptionsForEntity(
     assets: *const Assets,
     conn: *Connection,
     quest_info: QuestInfo,
+    progress_comp: ?*const PlayerProgressComponent,
     alloc: mem.Alloc,
     io: std.Io,
     cfg_id: i64,
@@ -6298,7 +6506,7 @@ pub fn syncDynamicInteractOptionsForEntity(
             try pushDoInteractOptionsForNode(scene, conn, alloc, io, aq.quest_id, node.*, cfg_id);
         }
     }
-    try LevelPlayHelper.syncDynamicInteractOptionsForEntity(scene, assets, conn, quest_info, null, alloc, io, cfg_id);
+    try LevelPlayHelper.syncDynamicInteractOptionsForEntity(scene, assets, conn, quest_info, progress_comp, alloc, io, cfg_id);
 }
 
 fn pushDoInteractOptionsForNode(
@@ -7082,9 +7290,11 @@ fn matchDoInteract(cond: std.json.ObjectMap, entity_id: i64, cfg_id: i32, option
 }
 
 fn matchesHandInEntity(cond: std.json.ObjectMap, entity_id: i64, cfg_id: i32) bool {
-    const hi = cond.get("HandInItems") orelse return false;
-    if (hi != .object) return false;
-    const add_opt = hi.object.get("AddOption") orelse return false;
+    const add_opt = cond.get("AddOption") orelse blk: {
+        const hi = cond.get("HandInItems") orelse return false;
+        if (hi != .object) return false;
+        break :blk hi.object.get("AddOption") orelse return false;
+    };
     if (add_opt != .object) return false;
     const eid = jsonInt(add_opt.object.get("EntityId")) orelse return false;
     return eid == cfg_id or @as(i64, eid) == entity_id;

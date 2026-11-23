@@ -825,6 +825,24 @@ pub fn reviveAndHealFormation(
     }
 }
 
+pub fn maybePushPartyWipeNotify(
+    conn: *Connection,
+    scene: *const Scene,
+    alloc: mem.Alloc,
+    io: std.Io,
+) void {
+    if (scene.formation_info.cur_formation < 0) return;
+    const f_idx: usize = @intCast(scene.formation_info.cur_formation);
+    if (f_idx >= scene.formation_info.formations.len) return;
+    const form = scene.formation_info.formations[f_idx];
+    if (formationLivingStatus(scene, form) == .Dead) {
+        conn.pushBestEffort(alloc.gpa, io, pb.PlayerDeadNotify{
+            .PlayerId = scene.player_id,
+            .IsShowRevive = true,
+        });
+    }
+}
+
 /// Auto-heals damaged or defeated formation characters when the player moves
 /// within 15m of any Resonance Nexus or Resonance Beacon in the current map.
 pub fn healFormationIfNearNexus(

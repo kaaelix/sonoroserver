@@ -84,6 +84,26 @@ pending_killed_removals: std.ArrayListUnmanaged(i64) = .empty,
 dynamic_interact_options: std.ArrayListUnmanaged(DynamicInteractOption) = .empty,
 play_bubbles: std.ArrayListUnmanaged(PlayBubbleRecord) = .empty,
 player_range_states: std.AutoHashMapUnmanaged(i64, RangeTriggerState) = .empty,
+async_flows: std.ArrayListUnmanaged(AsyncFlowEntry) = .empty,
+action_node_next_idx: std.AutoHashMapUnmanaged(u64, usize) = .empty,
+last_server_rollback_quest_id: i32 = 0,
+last_server_rollback_ms: i64 = 0,
+
+pub const AsyncFlowEntry = struct {
+    inc_id: i64,
+    quest_id: i32 = 0,
+    node_id: i32 = 0,
+    bt_type: pb.BtType = .BtTypeQuest,
+    flow_id: i32 = 0,
+    state_id: i32 = 1,
+    owner_entity_id: i64 = 0,
+    flow_list_name: []u8 = &.{},
+
+    pub fn deinit(entry: *AsyncFlowEntry, gpa: Allocator) void {
+        if (entry.flow_list_name.len != 0) gpa.free(entry.flow_list_name);
+        entry.flow_list_name = &.{};
+    }
+};
 
 pub const RangeTriggerState = struct {
     in_range: bool = false,
@@ -464,6 +484,9 @@ pub fn deinit(scene: *Scene, gpa: Allocator, fs: *FileSystem) void {
     for (scene.play_bubbles.items) |*rec| rec.deinit(gpa);
     scene.play_bubbles.deinit(gpa);
     scene.player_range_states.deinit(gpa);
+    for (scene.async_flows.items) |*af| af.deinit(gpa);
+    scene.async_flows.deinit(gpa);
+    scene.action_node_next_idx.deinit(gpa);
     _ = fs;
 }
 
@@ -518,6 +541,72 @@ pub fn hasFlowActionExecuted(scene: *const Scene, action_id: i32) bool {
     return false;
 }
 
+pub fn recordAsyncFlow(
+    scene: *Scene,
+    gpa: Allocator,
+    inc_id: i64,
+    quest_id: i32,
+    node_id: i32,
+    bt_type: pb.BtType,
+    flow_list_name: []const u8,
+    flow_id: i32,
+    state_id: i32,
+    owner_entity_id: i64,
+) !void {
+    if (inc_id == 0) return;
+    while (scene.async_flows.items.len >= 32) {
+        var oldest = scene.async_flows.orderedRemove(0);
+        oldest.deinit(gpa);
+    }
+    const dup_name = try gpa.dupe(u8, flow_list_name);
+    errdefer gpa.free(dup_name);
+    try scene.async_flows.append(gpa, .{
+        .inc_id = inc_id,
+        .quest_id = quest_id,
+        .node_id = node_id,
+        .bt_type = bt_type,
+        .flow_id = flow_id,
+        .state_id = state_id,
+        .owner_entity_id = owner_entity_id,
+        .flow_list_name = dup_name,
+    });
+}
+
+pub fn findAsyncFlow(scene: *Scene, inc_id: i64) ?*AsyncFlowEntry {
+    if (inc_id == 0) return null;
+    for (scene.async_flows.items) |*af| {
+        if (af.inc_id == inc_id) return af;
+    }
+    return null;
+}
+
+pub fn takeAsyncFlow(scene: *Scene, inc_id: i64) ?AsyncFlowEntry {
+    if (inc_id == 0) return null;
+    for (scene.async_flows.items, 0..) |af, i| {
+        if (af.inc_id == inc_id) return scene.async_flows.swapRemove(i);
+    }
+    return null;
+}
+
+pub fn clearActionNodeProgressForOwner(scene: *Scene, owner_id: i32) void {
+    const prefix = @as(u64, @as(u32, @bitCast(owner_id))) << 32;
+    const mask: u64 = 0xFFFF_FFFF_0000_0000;
+    var to_remove: [32]u64 = undefined;
+    var count: usize = 0;
+    var it = scene.action_node_next_idx.keyIterator();
+    while (it.next()) |k| {
+        if ((k.* & mask) == prefix) {
+            if (count < to_remove.len) {
+                to_remove[count] = k.*;
+                count += 1;
+            }
+        }
+    }
+    for (to_remove[0..count]) |k| {
+        _ = scene.action_node_next_idx.remove(k);
+    }
+}
+
 pub fn hasPendingFlowForNode(scene: *const Scene, quest_id: i32, node_id: i32) bool {
     for (scene.pending_flows.items) |queued| {
         if (queued.quest_id == quest_id and queued.node_id == node_id) return true;
@@ -538,7 +627,9 @@ pub fn enqueuePendingFlow(
     if (scene.active_flow_inc_id != 0 and
         scene.active_flow_quest_id == quest_id and
         scene.active_flow_node_id == node_id and
-        quest_id != 0)
+        scene.active_flow_id == flow_id and
+        scene.active_flow_state_id == state_id and
+        std.mem.eql(u8, scene.active_flow_list_name, flow_list_name))
     {
         return;
     }
@@ -1082,6 +1173,18 @@ pub fn removeBtTimer(scene: *Scene, gpa: Allocator, owner_id: i32, inc_id: i64, 
 pub fn clearBtTimers(scene: *Scene, gpa: Allocator) void {
     for (scene.bt_timers.items) |*t| t.deinit(gpa);
     scene.bt_timers.clearRetainingCapacity();
+}
+
+pub fn removeBtTimersForOwner(scene: *Scene, gpa: Allocator, owner_id: i32) void {
+    var i: usize = 0;
+    while (i < scene.bt_timers.items.len) {
+        if (scene.bt_timers.items[i].owner_id == owner_id) {
+            var removed = scene.bt_timers.swapRemove(i);
+            removed.deinit(gpa);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 pub fn nextQuestWakeDelayMs(scene: *const Scene, now_ms: i64) ?i64 {

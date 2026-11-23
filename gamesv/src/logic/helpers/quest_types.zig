@@ -58,6 +58,7 @@ pub const ActionCallbacks = struct {
         node_id: i32,
         obj: std.json.ObjectMap,
         enqueue_if_busy: bool,
+        is_async_override: ?bool,
     ) anyerror!void = null,
     start_flow_state: ?*const fn (
         ctx: QuestContext,

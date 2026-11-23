@@ -24,11 +24,9 @@ public class IpcServer
     {
         var map = new Dictionary<ushort, Func<int, byte[], AkiResult>>
         {
-            // Activity & TowerGuide (SQLite claims backed)
+            // Activity (SQLite claims backed); TowerGuide handled by gamesv tower.zig
             { 16076, ActivityHandler.HandleActivityRequest },
             { 17864, ActivityHandler.HandleActivityUpdateNotify },
-            { 19610, ActivityHandler.HandleTowerGuideInfo },
-            { 16778, ActivityHandler.HandleTowerGuideReward },
 
             // BattlePass Full (SQLite + BinData BattlePassReward.json grants + ExpUpdateNotify push)
             { 22649, BattlePassHandler.HandleBattlePassRequest },

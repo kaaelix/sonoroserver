@@ -77,9 +77,11 @@ pub fn DamageExecuteRequest(
                         role_info.current_hp = cur_hp;
                         events.enqueueBestEffort(.role_info_modified, .{ .role_id = cfg.config_id });
                         if (execute_data.KilledTarget) {
+                            events.enqueueBestEffort(.update_formations, .{});
                             RoleHelper.saveRoleInfo(fs, alloc.arena, role_comp, cfg.config_id) catch |err| {
                                 std.log.scoped(.damage).warn("saveRoleInfo({d}) failed: {t}", .{ cfg.config_id, err });
                             };
+                            RoleHelper.maybePushPartyWipeNotify(qctx.conn, scene, alloc, io);
                         }
                     }
                 }
@@ -225,6 +227,7 @@ fn handleDrownImpl(
     common: ?pb.CombatCommon,
     assets: *const Assets,
     scene: *Scene,
+    conn: *Connection,
     buff_timers: *BuffTimerScheduler,
     role_comp: *PlayerRoleComponent,
     events: *EventQueue,
@@ -260,6 +263,8 @@ fn handleDrownImpl(
         }
         _ = try scene.appendBattleStateNotify(alloc.arena, receive_data_pack);
         persistRoleHp(scene, eid, role_comp, events, fs, alloc, true);
+        events.enqueueBestEffort(.update_formations, .{});
+        RoleHelper.maybePushPartyWipeNotify(conn, scene, alloc, io);
     } else {
         persistRoleHp(scene, eid, role_comp, events, fs, alloc, false);
     }
@@ -313,6 +318,8 @@ fn killEntityDirect(
 
     if (cfg.entity_type == .player and cfg.config_type == .character) {
         persistRoleHp(scene, eid, role_comp, events, fs, alloc, true);
+        events.enqueueBestEffort(.update_formations, .{});
+        RoleHelper.maybePushPartyWipeNotify(qctx.conn, scene, alloc, io);
         QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("killEntityDirectPlayer", err);
     } else if (cfg.entity_type != .player) {
         QuestEngine.onEntityKilled(qctx, eid, null) catch |err| QuestEngine.logHookErr("onEntityKilled", err);
@@ -331,6 +338,7 @@ pub fn DrownRequest(
     txn: *dispatch.CombatRequestTxn(.DrownRequest),
     assets: *const Assets,
     scene: *Scene,
+    conn: *Connection,
     buff_timers: *BuffTimerScheduler,
     role_comp: *PlayerRoleComponent,
     events: *EventQueue,
@@ -338,7 +346,7 @@ pub fn DrownRequest(
     io: std.Io,
     alloc: mem.Alloc,
 ) !void {
-    try handleDrownImpl(txn.common, assets, scene, buff_timers, role_comp, events, fs, txn.receive_data_pack, io, alloc);
+    try handleDrownImpl(txn.common, assets, scene, conn, buff_timers, role_comp, events, fs, txn.receive_data_pack, io, alloc);
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -347,6 +355,7 @@ pub fn DrownPush(
     common: ?pb.CombatCommon,
     assets: *const Assets,
     scene: *Scene,
+    conn: *Connection,
     buff_timers: *BuffTimerScheduler,
     role_comp: *PlayerRoleComponent,
     events: *EventQueue,
@@ -355,7 +364,7 @@ pub fn DrownPush(
     io: std.Io,
     alloc: mem.Alloc,
 ) !void {
-    try handleDrownImpl(common, assets, scene, buff_timers, role_comp, events, fs, receive_data_pack, io, alloc);
+    try handleDrownImpl(common, assets, scene, conn, buff_timers, role_comp, events, fs, receive_data_pack, io, alloc);
 }
 
 pub fn MonsterDrownRequest(

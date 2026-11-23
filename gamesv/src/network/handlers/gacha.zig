@@ -976,18 +976,21 @@ fn maxResonantChainIndex(assets: *const Assets, role_id: i32) i32 {
 
 fn recordUpdatedNormalItem(
     arena: std.mem.Allocator,
+    added_items: *std.ArrayList(pb.NormalItem),
     updated_items: *std.ArrayList(pb.NormalItem),
+    old_count: i32,
     inventory_comp: *const PlayerInventoryComponent,
     item_id: i32,
 ) !void {
     const new_count = inventory_comp.info.normalItemCount(item_id);
-    for (updated_items.items) |*entry| {
+    const target_list = if (old_count <= 0) added_items else updated_items;
+    for (target_list.items) |*entry| {
         if (entry.Id == item_id) {
             entry.Count = new_count;
             return;
         }
     }
-    try updated_items.append(arena, .{
+    try target_list.append(arena, .{
         .Id = item_id,
         .Count = new_count,
         .ExpireTime = 0,
@@ -998,14 +1001,16 @@ fn grantBonusItem(
     alloc: mem.Alloc,
     inventory_comp: *PlayerInventoryComponent,
     reward_list: *std.ArrayList(pb.GachaReward),
+    added_items: *std.ArrayList(pb.NormalItem),
     updated_items: *std.ArrayList(pb.NormalItem),
     item_id: i32,
     count: i32,
 ) !void {
     if (item_id <= 0 or count <= 0) return;
+    const old_count = inventory_comp.info.normalItemCount(item_id);
     try InventoryInfo.addNormalItem(&inventory_comp.info, alloc.gpa, item_id, count);
     try reward_list.append(alloc.arena, .{ .ItemId = item_id, .ItemCount = count });
-    try recordUpdatedNormalItem(alloc.arena, updated_items, inventory_comp, item_id);
+    try recordUpdatedNormalItem(alloc.arena, added_items, updated_items, old_count, inventory_comp, item_id);
 }
 
 fn chooseReward(
@@ -1100,6 +1105,7 @@ pub fn onGachaRequest(
     var results: std.ArrayList(pb.GachaResult) = .empty;
     var added_weapons: std.ArrayList(pb.WeaponItem) = .empty;
     var starter_weapons: std.ArrayList(pb.WeaponItem) = .empty;
+    var added_items: std.ArrayList(pb.NormalItem) = .empty;
     var updated_items: std.ArrayList(pb.NormalItem) = .empty;
     var has_inventory_updates = false;
     var has_new_roles = false;
@@ -1122,11 +1128,11 @@ pub fn onGachaRequest(
 
             const quality = itemQuality(assets, reward_id);
             if (quality >= 5) {
-                try grantBonusItem(alloc, inventory_comp, &gacha_result.ExtraRewards, &updated_items, item_id_afterglow_coral, 15);
+                try grantBonusItem(alloc, inventory_comp, &gacha_result.ExtraRewards, &added_items, &updated_items, item_id_afterglow_coral, 15);
             } else if (quality == 4) {
-                try grantBonusItem(alloc, inventory_comp, &gacha_result.ExtraRewards, &updated_items, item_id_afterglow_coral, 3);
+                try grantBonusItem(alloc, inventory_comp, &gacha_result.ExtraRewards, &added_items, &updated_items, item_id_afterglow_coral, 3);
             } else {
-                try grantBonusItem(alloc, inventory_comp, &gacha_result.ExtraRewards, &updated_items, item_id_oscillated_coral, 15);
+                try grantBonusItem(alloc, inventory_comp, &gacha_result.ExtraRewards, &added_items, &updated_items, item_id_oscillated_coral, 15);
             }
             has_inventory_updates = true;
         } else if (assets.tables.role_info.getDataById(reward_id) != null) {
@@ -1138,15 +1144,15 @@ pub fn onGachaRequest(
 
                 if (existing_role.resonant_chain_group_index + owned_wavebands < max_chain) {
                     if (waveband_opt) |waveband_id| {
-                        try grantBonusItem(alloc, inventory_comp, &gacha_result.TransformRewards, &updated_items, waveband_id, 1);
+                        try grantBonusItem(alloc, inventory_comp, &gacha_result.TransformRewards, &added_items, &updated_items, waveband_id, 1);
                         has_inventory_updates = true;
                     }
                     const dup_coral: i32 = if (is_five_star) 15 else 3;
-                    try grantBonusItem(alloc, inventory_comp, &gacha_result.TransformRewards, &updated_items, item_id_afterglow_coral, dup_coral);
+                    try grantBonusItem(alloc, inventory_comp, &gacha_result.TransformRewards, &added_items, &updated_items, item_id_afterglow_coral, dup_coral);
                     has_inventory_updates = true;
                 } else {
                     const overflow_coral: i32 = if (is_five_star) 45 else 8;
-                    try grantBonusItem(alloc, inventory_comp, &gacha_result.TransformRewards, &updated_items, item_id_afterglow_coral, overflow_coral);
+                    try grantBonusItem(alloc, inventory_comp, &gacha_result.TransformRewards, &added_items, &updated_items, item_id_afterglow_coral, overflow_coral);
                     has_inventory_updates = true;
                 }
             } else {
@@ -1164,8 +1170,9 @@ pub fn onGachaRequest(
                 has_new_roles = true;
             }
         } else {
+            const old_cnt = inventory_comp.info.normalItemCount(reward_id);
             try InventoryInfo.addNormalItem(&inventory_comp.info, alloc.gpa, reward_id, 1);
-            try recordUpdatedNormalItem(alloc.arena, &updated_items, inventory_comp, reward_id);
+            try recordUpdatedNormalItem(alloc.arena, &added_items, &updated_items, old_cnt, inventory_comp, reward_id);
             has_inventory_updates = true;
         }
 
@@ -1192,10 +1199,18 @@ pub fn onGachaRequest(
 
     if (has_inventory_updates) {
         try saveInventoryInfo(alloc, fs, inventory_comp);
-        try txn.conn.push(alloc.gpa, io, pb.NormalItemAddNotify{
-            .NormalItemList = updated_items,
-            .NoTips = false,
-        });
+        if (added_items.items.len > 0) {
+            try txn.conn.push(alloc.gpa, io, pb.NormalItemAddNotify{
+                .NormalItemList = added_items,
+                .NoTips = false,
+            });
+        }
+        if (updated_items.items.len > 0) {
+            try txn.conn.push(alloc.gpa, io, pb.NormalItemUpdateNotify{
+                .NormalItemList = updated_items,
+                .NoTips = false,
+            });
+        }
     }
 
     if (has_new_roles) {

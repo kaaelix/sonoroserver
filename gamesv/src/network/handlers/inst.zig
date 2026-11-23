@@ -140,12 +140,20 @@ pub fn onLevelPlayRewardRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     assets: *const Assets,
+    scene_opt: *?@import("../../logic/Scene.zig"),
     progress_comp: *PlayerProgressComponent,
     reward_ctx: RewardService.RewardContext,
 ) !void {
     const cnt = @max(1, txn.message.ExchangeCount);
+    var resolved_cfg_id: i64 = txn.message.EntityId;
+    if (scene_opt.*) |*scene| {
+        if (scene.findConfigIdByNetId(txn.message.EntityId)) |cid| {
+            resolved_cfg_id = cid;
+        }
+    }
+
     var reward_id: i32 = 0;
-    if (std.math.cast(i32, txn.message.EntityId)) |entity_id32| {
+    if (std.math.cast(i32, resolved_cfg_id)) |entity_id32| {
         const reward_indices = assets.indexes.levelPlayIndicesForRewardEntity(entity_id32);
         const lp_indices = if (reward_indices.len > 0) reward_indices else assets.indexes.levelPlayIndicesForEntity(entity_id32);
         if (lp_indices.len > 0) {
@@ -157,7 +165,7 @@ pub fn onLevelPlayRewardRequest(
     }
 
     var kbuf: [64]u8 = undefined;
-    const k = try std.fmt.bufPrint(&kbuf, "lp:reward_cnt:{d}", .{txn.message.EntityId});
+    const k = try std.fmt.bufPrint(&kbuf, "lp:reward_cnt:{d}", .{resolved_cfg_id});
     _ = try progress_comp.info.addKeyInt(alloc.gpa, k, cnt);
     try progress_comp.save(fs, alloc.arena);
 

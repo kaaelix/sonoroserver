@@ -691,7 +691,9 @@ pub fn Table(comptime T: type, comptime key_field: [:0]const u8) type {
         lazy_get: ?*const fn (*anyopaque, KeyType) ?T = null,
 
         pub fn getDataById(table: @This(), id: KeyType) ?T {
-            if (table.index.get(id)) |i| return table.items[i];
+            if (table.items.len != 0) {
+                if (table.index.get(id)) |i| return table.items[i];
+            }
             if (table.lazy_get) |getter| return getter(table.lazy_ctx.?, id);
             return null;
         }

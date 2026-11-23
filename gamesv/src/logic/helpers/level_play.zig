@@ -629,7 +629,14 @@ fn stepLevelPlayNode(
         return .completed;
     } else if (std.mem.eql(u8, node.node_type, "ParallelSelect") or std.mem.eql(u8, node.node_type, "Parallel")) {
         const is_parallel_all = std.mem.eql(u8, node.node_type, "Parallel");
-        const needed_sel: i32 = @max(1, node.count);
+        var eligible_children: i32 = 0;
+        for (nodes) |child| {
+            if (child.parent_id != node.id) continue;
+            if (!std.mem.eql(u8, child.node_type, "QuestFailed")) {
+                eligible_children += 1;
+            }
+        }
+        const needed_sel: i32 = if (node.count > 0) node.count else @max(@as(i32, 1), eligible_children);
         var finished_count: i32 = 0;
         var failed_count: i32 = 0;
         var total_children: i32 = 0;
@@ -1698,6 +1705,10 @@ pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32, z: f32) !void {
                 if (try QuestInfo.removeIntValue(&ctx.quest_comp.info.progress.entered_level_plays, ctx.alloc.gpa, lpid)) {
                     dirty_entered = true;
                     _ = ctx.scene.sent_lp_bt_trees.remove(lpid);
+                    ctx.scene.lp_timers.cancelQuest(lpid);
+                    ctx.scene.lp_fail_timers.cancelQuest(lpid);
+                    ctx.scene.releaseOccupationsForTree(ctx.alloc.gpa, lpid, lpid);
+                    ctx.scene.removeBtTimersForOwner(ctx.alloc.gpa, lpid);
                     ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LeaveLevelPlayNotify{ .Id = lpid }) catch {};
                     continue;
                 }

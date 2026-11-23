@@ -113,7 +113,8 @@ pub fn executeAction(
         try applyQuestBuffAction(ctx, params, false, true);
     } else if (std.mem.eql(u8, name, "PlayFlow")) {
         if (callbacks.start_flow) |cb| {
-            try cb(ctx, quest_id, node_id, params, true);
+            const act_async = quest_types.jsonBool(act.object.get("Async"));
+            try cb(ctx, quest_id, node_id, params, true, act_async);
         }
     } else if (std.mem.eql(u8, name, "ChangeState")) {
         if (ctx.scene) |scene| {
@@ -1172,7 +1173,7 @@ pub fn transitionToScene(
             const rot = opt_rot orelse .{ 0, 0, 0 };
             try updatePlayerSceneState(ctx, pos, rot);
             ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.TeleportNotify{
-                .MapId = target_dungeon_id,
+                .MapId = ctx.assets.resolveMapConfigId(target_dungeon_id),
                 .Pos = .{ .X = pos[0], .Y = pos[1], .Z = pos[2] },
                 .Rot = .{ .X = rot[0], .Y = rot[1], .Z = rot[2] },
                 .Reason = .Action,
@@ -1418,10 +1419,10 @@ pub fn syncWorldStateOnJoin(ctx: QuestContext) !void {
                 if (!std.mem.startsWith(u8, entry.key, "gravity:")) continue;
                 const config_id = std.fmt.parseInt(i32, entry.key["gravity:".len..], 10) catch continue;
                 if (config_id <= 0 or entry.val < 0 or entry.val > 3) continue;
-                if (scene.findEntityNetIdByConfigId(config_id) != null) {
+                if (scene.findEntityNetIdByConfigId(config_id)) |nid| {
                     ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.GravityFlipUpdateTypeNotify{
                         .NewGravityFlipType = @enumFromInt(entry.val),
-                        .EntityId = config_id,
+                        .EntityId = nid,
                     }) catch {};
                 }
             }
@@ -2136,54 +2137,64 @@ fn applyEnableFunctionAction(ctx: QuestContext, params: std.json.ObjectMap) !voi
 
 fn teleportPlayerFromAction(ctx: QuestContext, params: std.json.ObjectMap, action_id: i32, is_flow_action: bool) void {
     const scene = ctx.scene orelse return;
-    const tp_cfg = params.get("TelePortConfig") orelse return;
-    if (tp_cfg != .object) return;
-    const tp_type = quest_types.jsonInt(tp_cfg.object.get("Type")) orelse 0;
-
     var pos_xyz: ?[3]f32 = null;
     var rot_xyz: [3]f32 = .{ 0, 0, 0 };
 
-    if (tp_type == 0) {
-        if (tp_cfg.object.get("TargetPos")) |tp| {
-            if (tp == .object) {
-                if (parseVectorPos(tp)) |vec| {
-                    pos_xyz = vec;
-                    rot_xyz[2] = quest_types.jsonFloat(tp.object.get("A")) orelse 0;
+    if (params.get("TelePortConfig")) |tp_cfg| {
+        if (tp_cfg != .object) return;
+        const tp_type = quest_types.jsonInt(tp_cfg.object.get("Type")) orelse 0;
+
+        if (tp_type == 0) {
+            if (tp_cfg.object.get("TargetPos")) |tp| {
+                if (tp == .object) {
+                    if (parseVectorPos(tp)) |vec| {
+                        pos_xyz = vec;
+                        rot_xyz[2] = quest_types.jsonFloat(tp.object.get("A")) orelse 0;
+                    }
                 }
             }
-        }
-    } else if (tp_type == 1) {
-        if (tp_cfg.object.get("EntityIds")) |arr| {
-            if (arr == .array and arr.array.items.len > 0) {
-                if (quest_types.jsonInt(arr.array.items[0])) |eid| {
-                    if (ctx.assets.findLevelEntity(scene.instance_id, eid)) |cfg| {
-                        pos_xyz = Assets.AssetIndexes.entityWorldPos(cfg);
-                        rot_xyz = Assets.AssetIndexes.entityWorldRot(cfg);
+        } else if (tp_type == 1) {
+            if (tp_cfg.object.get("EntityIds")) |arr| {
+                if (arr == .array and arr.array.items.len > 0) {
+                    if (quest_types.jsonInt(arr.array.items[0])) |eid| {
+                        if (ctx.assets.findLevelEntity(scene.instance_id, eid)) |cfg| {
+                            pos_xyz = Assets.AssetIndexes.entityWorldPos(cfg);
+                            rot_xyz = Assets.AssetIndexes.entityWorldRot(cfg);
+                        }
+                    }
+                }
+            }
+        } else if (tp_type == 2) {
+            if (quest_types.jsonInt(tp_cfg.object.get("GravityAndPosEntityId"))) |eid| {
+                if (ctx.assets.findLevelEntity(scene.instance_id, eid)) |cfg| {
+                    pos_xyz = Assets.AssetIndexes.entityWorldPos(cfg);
+                    rot_xyz = Assets.AssetIndexes.entityWorldRot(cfg);
+                    const gres = GravityHelper.resolveEntityGravity(cfg, rot_xyz);
+                    if (gres.configured) {
+                        const role_nid = scene.currentRoleEntityId();
+                        if (scene.net_id_map.get(role_nid)) |ridx| {
+                            scene.entities.items(.world_item)[ridx].gravity = .{ .location = gres.dir };
+                        }
                     }
                 }
             }
         }
-    } else if (tp_type == 2) {
-        if (quest_types.jsonInt(tp_cfg.object.get("GravityAndPosEntityId"))) |eid| {
-            if (ctx.assets.findLevelEntity(scene.instance_id, eid)) |cfg| {
-                pos_xyz = Assets.AssetIndexes.entityWorldPos(cfg);
-                rot_xyz = Assets.AssetIndexes.entityWorldRot(cfg);
-                const gres = GravityHelper.resolveEntityGravity(cfg, rot_xyz);
-                if (gres.configured) {
-                    const role_nid = scene.currentRoleEntityId();
-                    if (scene.net_id_map.get(role_nid)) |ridx| {
-                        scene.entities.items(.world_item)[ridx].gravity = .{ .location = gres.dir };
-                    }
-                }
+    } else if (params.get("Pos")) |pos_val| {
+        if (pos_val == .object) {
+            if (parseVectorPos(pos_val)) |vec| {
+                pos_xyz = vec;
+                rot_xyz[2] = quest_types.jsonFloat(pos_val.object.get("A")) orelse 0;
             }
         }
+    } else {
+        return;
     }
 
     const pos = pos_xyz orelse return;
     updatePlayerSceneState(ctx, pos, rot_xyz) catch return;
 
     var notify: pb.TeleportNotify = .{
-        .MapId = scene.instance_id,
+        .MapId = ctx.assets.resolveMapConfigId(scene.instance_id),
         .Pos = .{ .X = pos[0], .Y = pos[1], .Z = pos[2] },
         .Rot = .{ .X = rot_xyz[0], .Y = rot_xyz[1], .Z = rot_xyz[2] },
         .Reason = .Action,
@@ -3942,6 +3953,7 @@ test "executeAction handles RunActions, RandomVar, SheriffUnlockClue, SetWuYinQu
     defer prog.info.deinit(gpa);
     var events: EventQueue = .{ .arena = aalloc };
     var dummy_assets: Assets = undefined;
+    dummy_assets.tables.instance_dungeon = .{ .items = &.{}, .index = .empty };
 
     const ctx: QuestContext = .{
         .assets = &dummy_assets,
@@ -4032,6 +4044,7 @@ test "executeAction handles 3.8.11 RoleTower, RoverRogue, Sheriff, and PhantomFo
     defer prog.info.deinit(gpa);
     var events: EventQueue = .{ .arena = aalloc };
     var dummy_assets: Assets = undefined;
+    dummy_assets.tables.instance_dungeon = .{ .items = &.{}, .index = .empty };
 
     const ctx: QuestContext = .{
         .assets = &dummy_assets,
@@ -4121,6 +4134,7 @@ test "executeAction SetPlayerPos attaches FlowActionCtx when executed inside an 
     defer prog.info.deinit(gpa);
     var events: EventQueue = .{ .arena = aalloc };
     var dummy_assets: Assets = undefined;
+    dummy_assets.tables.instance_dungeon = .{ .items = &.{}, .index = .empty };
 
     var scene: Scene = .{
         .player_id = 1,

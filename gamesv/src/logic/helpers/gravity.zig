@@ -60,16 +60,18 @@ pub fn resolveDirection(direction: BaseInfo.GravityDirection, base_rot: [3]f32) 
 }
 
 pub fn resolveEntityGravity(entity_cfg: *const LevelEntityConfig, base_rot: [3]f32) GravityResult {
-    const base_info = entity_cfg.ComponentsData.BaseInfoComponent orelse return .{ .dir = .{ 0, 0, -1 }, .configured = false };
+    return resolveComponentsGravity(&entity_cfg.ComponentsData, base_rot);
+}
+
+pub fn resolveComponentsGravity(components: anytype, base_rot: [3]f32) GravityResult {
+    const base_info = components.BaseInfoComponent orelse return .{ .dir = .{ 0, 0, -1 }, .configured = false };
     const gravity_config = base_info.GravityConfig orelse return .{ .dir = .{ 0, 0, -1 }, .configured = false };
     const direction = gravity_config.GravityDirection orelse return .{ .dir = .{ 0, 0, -1 }, .configured = false };
     return resolveDirection(direction, base_rot);
 }
 
 fn findHookLockPoint(components: anytype) ?@import("../../data/tables/entity_components/Extra.zig").HookLockPoint {
-    for (components.extra) |entry| {
-        if (entry == .HookLockPoint) return entry.HookLockPoint.*;
-    }
+    if (components.findExtra(.HookLockPoint)) |hlp| return hlp.*;
     return null;
 }
 

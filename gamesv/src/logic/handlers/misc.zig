@@ -80,12 +80,20 @@ pub fn pushData(
         .OpenPkg = open_pkg,
     });
 
-    try conn.push(alloc.gpa, io, pb.BuffItemNotify{});
+    const now_ms = EnergyHelper.nowSeconds(io) * 1000;
+    var buff_cds: std.ArrayList(pb.BuffItem) = .empty;
+    for (progress_comp.info.dynamic.ints) |entry| {
+        if (!std.mem.startsWith(u8, entry.key, "buff_cd:")) continue;
+        if (entry.val <= now_ms) continue;
+        const item_id = std.fmt.parseInt(i32, entry.key["buff_cd:".len..], 10) catch continue;
+        try buff_cds.append(alloc.arena, .{ .ItemId = item_id, .CdTime = entry.val });
+    }
+    try conn.push(alloc.gpa, io, pb.BuffItemNotify{ .ItemBuffList = buff_cds });
 
     try EnergyHelper.syncAndSave(alloc.arena, fs, basic_comp, io);
     try EnergyHelper.pushEnergyNotify(conn, alloc, basic_comp, io);
 
-    const now_sec = EnergyHelper.nowSeconds(io);
+    const now_sec = @divFloor(now_ms, 1000);
     if (try mail_comp.info.pruneExpired(alloc.gpa, now_sec)) {
         try mail_comp.save(alloc.arena, fs);
     }

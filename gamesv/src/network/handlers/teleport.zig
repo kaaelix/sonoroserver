@@ -70,10 +70,12 @@ pub fn onTeleportTransferRequest(
         try RoleHelper.reviveAndHealFormation(txn.conn, scene, role_comp, events, fs, alloc, io);
     }
 
-    const cur_map_id = assets.resolveMapConfigId(scene_comp.last_scene_info.instance_id);
+    const cur_inst_id = scene_comp.last_scene_info.instance_id;
+    const cur_map_id = assets.resolveMapConfigId(cur_inst_id);
+    const target_inst_id = assets.resolveInstanceIdForMap(teleporter.MapId);
     QuestEngine.onPlayerTransferOrLeaveInst(qctx, cur_map_id != 8 and teleporter.MapId == 8) catch |err| QuestEngine.logHookErr("onTeleportTransfer", err);
 
-    if (cur_map_id == teleporter.MapId) {
+    if (cur_inst_id == target_inst_id) {
         const target_pos = [3]f32{ x, y, z };
         if (spawn.has_gravity_config) {
             scene.setCurrentRoleGravity(spawn.gravity);
@@ -93,7 +95,6 @@ pub fn onTeleportTransferRequest(
             .SceneId = "",
             .TransitionOption = .{},
         });
-        const target_inst_id = assets.resolveInstanceIdForMap(teleporter.MapId);
         scene_comp.last_scene_info.instance_id = target_inst_id;
         try scene.saveLastScene(scene_comp, fs, alloc.gpa);
         try events.enqueue(.initial_scene_join, .{

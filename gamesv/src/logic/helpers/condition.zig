@@ -2338,7 +2338,8 @@ fn evalQuestNodeStatus(ctx: EvalContext, qid: i32, nid: i32, st: i32) bool {
     return switch (st) {
         0 => if (aq) |q| !QuestInfo.isNodeActive(q, nid) and !QuestInfo.isNodeFinished(q, nid) else !ctx.quest_comp.info.hasFinishedChildQuest(qid, nid),
         1, 2 => if (aq) |q| QuestInfo.isNodeActive(q, nid) else false,
-        3 => ctx.quest_comp.info.hasFinishedChildQuest(qid, nid),
+        3, 4 => ctx.quest_comp.info.hasFinishedChildQuest(qid, nid) or
+            (if (aq) |q| QuestInfo.isNodeFinished(q, nid) else false),
         else => false,
     };
 }

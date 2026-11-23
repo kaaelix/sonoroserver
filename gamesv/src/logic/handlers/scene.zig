@@ -253,11 +253,14 @@ fn applyStoredWorldEntityOverrides(
             changed = true;
         }
     } else if (assets.findLevelEntity(scene.instance_id, config_id)) |lcfg| {
-        if (lcfg.ComponentsData.GravityFlipComponent) |gfc| {
+        var merged_grav = lcfg.ComponentsData;
+        if (assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+            tpl.ComponentsData.mergeInto(&merged_grav);
+        }
+        if (merged_grav.GravityFlipComponent) |gfc| {
             if (gfc.DefaultGravity) |dg| {
-                if (dg >= 0 and dg <= 3) {
-                    scene.entities.items(.world_item)[index].gravity_flip = dg;
-                }
+                scene.entities.items(.world_item)[index].gravity_flip =
+                    @import("../../data/tables/entity_components/Components.zig").gravityFlipFromDefault(dg);
             }
         }
     }
@@ -267,30 +270,36 @@ fn applyStoredWorldEntityOverrides(
         if (assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
             tpl.ComponentsData.mergeInto(&merged);
         }
-        for (merged.extra) |entry| {
-            switch (entry) {
-                .FanComponent => |fc| {
-                    const fkey_cfg = try std.fmt.allocPrint(alloc.arena, "fan_turns:{d}", .{config_id});
-                    const fkey_net = try std.fmt.allocPrint(alloc.arena, "fan_turns:{d}", .{net_id});
-                    const stored = progressInt(info, fkey_net) orelse progressInt(info, fkey_cfg);
-                    const turns: i32 = if (stored) |s|
-                        std.math.cast(i32, s) orelse 0
-                    else if (fc.InitCircle) |ic|
-                        std.math.cast(i32, ic) orelse 0
-                    else
-                        0;
-                    scene.entities.items(.world_item)[index].fan_turns = turns;
-                },
-                .HookLockPoint => |hlp| {
-                    const hkey_cfg = try std.fmt.allocPrint(alloc.arena, "hook_point:active:{d}", .{config_id});
-                    const hkey_net = try std.fmt.allocPrint(alloc.arena, "hook_point:active:{d}", .{net_id});
-                    const is_active = (progressInt(info, hkey_net) orelse progressInt(info, hkey_cfg) orelse 0) == 1;
-                    const default_disabled = (hlp.DisableAtCreateStage orelse false) or (hlp.Disabled orelse false);
-                    scene.entities.items(.world_item)[index].hook_disabled = if (is_active) false else default_disabled;
-                },
-                else => {},
+        for ([2][]const @import("../../data/tables/entity_components/Extra.zig").Entry{
+            merged.extra,
+            merged.template_extra,
+        }) |extra_slice| {
+            for (extra_slice) |entry| {
+                switch (entry) {
+                    .FanComponent => |fc| {
+                        const fkey_cfg = try std.fmt.allocPrint(alloc.arena, "fan_turns:{d}", .{config_id});
+                        const fkey_net = try std.fmt.allocPrint(alloc.arena, "fan_turns:{d}", .{net_id});
+                        const stored = progressInt(info, fkey_net) orelse progressInt(info, fkey_cfg);
+                        const turns: i32 = if (stored) |s|
+                            std.math.cast(i32, s) orelse 0
+                        else if (fc.InitCircle) |ic|
+                            std.math.cast(i32, ic) orelse 0
+                        else
+                            0;
+                        scene.entities.items(.world_item)[index].fan_turns = turns;
+                    },
+                    .HookLockPoint => |hlp| {
+                        const hkey_cfg = try std.fmt.allocPrint(alloc.arena, "hook_point:active:{d}", .{config_id});
+                        const hkey_net = try std.fmt.allocPrint(alloc.arena, "hook_point:active:{d}", .{net_id});
+                        const is_active = (progressInt(info, hkey_net) orelse progressInt(info, hkey_cfg) orelse 0) == 1;
+                        const default_disabled = (hlp.DisableAtCreateStage orelse false) or (hlp.Disabled orelse false);
+                        scene.entities.items(.world_item)[index].hook_disabled = if (is_active) false else default_disabled;
+                    },
+                    else => {},
+                }
             }
         }
+        scene.entities.items(.world_item)[index].be_controlled_present = merged.TeleControl2 != null;
     }
 
     const pdir_cfg = try std.fmt.allocPrint(alloc.arena, "patrol:dir:{d}", .{config_id});
@@ -381,12 +390,11 @@ fn applyStoredWorldEntityOverrides(
 
     scene.entities.items(.world_item)[index].batch_bullet_cast_present = false;
     if (assets.findLevelEntity(scene.instance_id, config_id)) |lvl_cfg| {
-        for (lvl_cfg.ComponentsData.extra) |entry| {
-            if (entry == .BatchBulletCasterComponent) {
-                scene.entities.items(.world_item)[index].batch_bullet_cast_present = true;
-                break;
-            }
+        var merged_bbc = lvl_cfg.ComponentsData;
+        if (assets.findTemplateConfig(lvl_cfg.BlueprintType)) |tpl| {
+            tpl.ComponentsData.mergeInto(&merged_bbc);
         }
+        scene.entities.items(.world_item)[index].batch_bullet_cast_present = merged_bbc.hasExtra(.BatchBulletCasterComponent);
     }
 
     if (scene.entities.items(.world_item)[index].interact) |*interact| interact.deinit(alloc.gpa);
@@ -915,6 +923,14 @@ pub fn notifyJoinScene(
                 try stale_net_ids.append(alloc.arena, storage.entity_id.net_id);
                 continue;
             }
+        }
+        if (force_hidden_in_aoi) {
+            if (scene.net_id_map.get(storage.entity_id.net_id)) |eidx| {
+                scene.entities.items(.visible)[eidx] = null;
+                scene.entities.items(.actor_visible)[eidx] = null;
+            }
+            storage.visible = null;
+            storage.actor_visible = null;
         }
         var entity = try storage.entityToProto(storage.entity_id.net_id, alloc, assets);
         if (force_hidden_in_aoi) {
@@ -1573,11 +1589,14 @@ fn spawnNearbyWorldEntities(
         for (pool) |cand| {
             if (scene.entities.slice().len >= 240) break;
             const cfg = (assets.getLevelEntityByIdx(@intCast(cand.cfg_idx)) orelse continue).*;
+            const cfg_id32_hint = std.math.cast(i32, cfg.EntityId) orelse 0;
+            const is_qt = QuestEngine.isTargetIdInSet(&active_quest_targets, cfg.EntityId);
+            const exp_shown = cfg_id32_hint > 0 and QuestInfo.containsInt(quest_comp.info.world.shown_entities, cfg_id32_hint);
             const saved_location = if (std.math.cast(i32, cfg.EntityId)) |config_id|
                 storedWorldLocation(progress_comp.info, config_id)
             else
                 null;
-            spawn_cmd.spawnWithLocationAndProgress(
+            const spawned_opt = spawn_cmd.spawnWithLocationAndProgress(
                 events,
                 scene,
                 fs,
@@ -1593,7 +1612,10 @@ fn spawnNearbyWorldEntities(
                 saved_location orelse .{ cand.x, cand.y, cand.z },
                 true,
                 progress_comp.info,
+                !(exp_shown or is_qt),
+                true,
             ) catch continue;
+            const spawned_ent = spawned_opt orelse continue;
 
             if (std.math.cast(i32, cfg.EntityId)) |cfg_id| {
                 if (scene.findEntityNetIdByConfigId(cfg_id)) |net_id| {
@@ -1606,6 +1628,17 @@ fn spawnNearbyWorldEntities(
                         cfg_id,
                         net_id,
                     );
+                    spawn_cmd.publishWorldSpawn(
+                        scene,
+                        fs,
+                        assets,
+                        conn,
+                        alloc,
+                        io,
+                        spawned_ent,
+                        cfg.EntityId,
+                        cfg.MapId,
+                    ) catch continue;
                     pushStoredWorldTransform(
                         scene,
                         conn,
@@ -1631,7 +1664,7 @@ fn spawnNearbyWorldEntities(
                     if (gravity_type) |flip_type| {
                         conn.pushBestEffort(alloc.gpa, io, pb.GravityFlipUpdateTypeNotify{
                             .NewGravityFlipType = flip_type,
-                            .EntityId = cfg_id,
+                            .EntityId = net_id,
                         });
                     }
                     if (scene.net_id_map.get(net_id)) |index| {
@@ -1683,7 +1716,7 @@ fn spawnNearbyWorldEntities(
                         }
                     }
                 }
-                try QuestEngine.syncDynamicInteractOptionsForEntity(scene, assets, conn, quest_comp.info, alloc, io, cfg.EntityId);
+                try QuestEngine.syncDynamicInteractOptionsForEntity(scene, assets, conn, quest_comp.info, progress_comp, alloc, io, cfg.EntityId);
             }
         }
     }

@@ -8,32 +8,49 @@ import sqlite3
 import sys
 import time
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 SPATIAL_CELL_SIZE = 5000.0
 
-SPAWNABLE_ITEM_TYPES = {
-    "AirWallEffectTrigger", "AirPassage", "AnnunciatorCenter", "AnnunciatorWire",
-    "BattleVehicle", "BurstCrystalFoundation", "CableWayHook", "ChallengeInteract",
-    "Collect", "Collect2", "Collect3", "CollectAnimal", "CollectAnimalPart",
-    "CollectWithHook", "CollectWithListener", "ConveyorBelt",
-    "CurveControlDestructible", "DeadeyeHookTrigger", "Destructible",
-    "DestructibleControl", "DestructibleExploreInteractor", "DestructibleWithHook",
-    "Disc", "DungeonEntry", "DungeonEntryWithTrigger", "DynamicPortalCreater",
-    "ExploreSkillGroupInteractor", "ExploreSkillInteractor", "FireBoxLamp",
-    "GameplayInteractGear", "GravityFlip", "HookLockPoint", "HookTreasureBox",
-    "HookWithRange", "InteractGear", "InteractGear2", "InteractGearCanHit",
-    "InteractGearGroup", "InteractGearTrigger", "InteractiveConditionListener",
-    "JigsawItem", "KiteHook", "LevelQteTrigger", "Lift", "Lift2",
-    "MoveNoRenderPortal", "NoRenderPortal", "NoRenderPortalWithInteract",
-    "Portal", "PullingObject", "RangeTriggerTargetGear", "Resurrection",
-    "RollingFireball", "SceneAura", "SequenceLift", "SimpleInteract",
-    "StateSceneItem", "StateTrigger", "TargetGear", "TargetGear2",
-    "TargetGearExploreInteractor", "TargetGearGroup", "TargetGearGroup2",
-    "TargetGearPro", "TargetGearWithConditionListener",
-    "TargetGearWithLevelPrefabPerform", "TargetGearWithVariable",
-    "TeleControl", "TeleControl3", "TeleControl4", "TeleControlGroup",
-    "Teleporter", "TreasureBox", "VehicleSceneItem", "VisionTreasureBox",
-    "WaterSpout",
+NON_SPAWNABLE_ITEM_TYPES = {
+    "AdviseItem",
+    "Audio",
+    "AudioBox",
+    "Chair",
+    "Chair2",
+    "CustomAoiEditor",
+    "DaemonHack",
+    "DollGrabShowcase",
+    "EntityBatchRefresh",
+    "EntityList",
+    "EntityPackage",
+    "ExhibitBase",
+    "FollowDecorationChair",
+    "Furniture",
+    "FurnitureSlot",
+    "LevelPlay",
+    "LevelPlay2",
+    "Monitor",
+    "PerformanceOptimizer",
+    "Position",
+    "RefreshGroup",
+    "RenderSpecifiedRange",
+    "RenderSpecifiedRange2",
+    "SceneItemStateHint",
+    "SceneText",
+    "Slots",
+    "Spline",
+    "SplineFX",
+    "SplineRange",
+    "StreamingSourcePoint",
+    "TimeScheduleManagerEntity",
+    "VarManager",
+    "WuWaGoEntity",
+}
+
+SPAWNABLE_CUSTOM_TYPES = {
+    "ClientTrigger",
+    "EnrichmentArea",
+    "LocationSafety",
 }
 
 TREASURE_OR_DESTRUCTIBLE_TYPES = {
@@ -94,10 +111,12 @@ def compute_spawnable(bp_type: str, bp_map: dict, tpl_reward_flags: dict) -> int
     bp = bp_map.get(bp_type)
     if bp is not None:
         logic, etype = bp
-        if logic in ("Monster", "Animal", "Npc", "Vision", "Vehicle"):
+        if logic in ("Monster", "Animal", "Npc", "Vision", "Vehicle", "SimpleCombat"):
             return 1
+        if logic == "Custom":
+            return 1 if etype in SPAWNABLE_CUSTOM_TYPES else 0
         if logic == "Item":
-            if etype in SPAWNABLE_ITEM_TYPES:
+            if etype not in NON_SPAWNABLE_ITEM_TYPES:
                 return 1
             has_rw_or_tb = tpl_reward_flags.get(bp_type)
             if has_rw_or_tb is not None:

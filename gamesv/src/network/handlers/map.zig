@@ -656,6 +656,7 @@ fn trackRangeArea(
     range_entity_id: i64,
     is_enter: bool,
     is_player_range: bool,
+    trigger_events: bool,
     out_results: *std.ArrayList(pb.MapEntry(i32, pb.ErrorCode)),
     progress_dirty: *bool,
 ) !void {
@@ -688,10 +689,14 @@ fn trackRangeArea(
             if (components.GravityFlipComponent) |gf| {
                 has_gravity_flip = !(gf.Disabled orelse false);
                 if (has_gravity_flip) {
-                    const flip_val: i32 = if (scene.net_id_map.get(range_entity_id)) |ridx|
-                        (scene.entities.items(.world_item)[ridx].gravity_flip orelse gf.DefaultGravity orelse 0)
+                    const default_flip: i32 = if (gf.DefaultGravity) |dg|
+                        @intCast(@import("../../data/tables/entity_components/Components.zig").gravityFlipFromDefault(dg) orelse 0)
                     else
-                        (gf.DefaultGravity orelse 0);
+                        0;
+                    const flip_val: i32 = if (scene.net_id_map.get(range_entity_id)) |ridx|
+                        (scene.entities.items(.world_item)[ridx].gravity_flip orelse default_flip)
+                    else
+                        default_flip;
                     resolved_gravity_dir = switch (flip_val) {
                         0 => .{ 0, 0, 1 },
                         1 => .{ 0, 0, -1 },
@@ -702,7 +707,7 @@ fn trackRangeArea(
                 }
             }
             if (resolved_gravity_dir == null and components.BaseInfoComponent != null) {
-                const gres = GravityHelper.resolveEntityGravity(lcfg, Assets.AssetIndexes.entityWorldRot(lcfg));
+                const gres = GravityHelper.resolveComponentsGravity(&components, Assets.AssetIndexes.entityWorldRot(lcfg));
                 if (gres.configured) {
                     has_gravity_volume = true;
                     resolved_gravity_dir = gres.dir;
@@ -713,19 +718,24 @@ fn trackRangeArea(
             trigger_comp = components.TriggerComponent;
             has_air_passage = std.mem.indexOf(u8, lcfg.BlueprintType, "AirPassage") != null;
             has_roll_block = std.mem.indexOf(u8, lcfg.BlueprintType, "RollBlock") != null;
-            for (components.extra) |entry| {
-                switch (entry) {
-                    .TrampleComponent => |tc| if (!(tc.Disabled orelse false)) {
-                        has_trample = true;
-                    },
-                    .AirPassageComponent => has_air_passage = true,
-                    .RollBlockComponent, .RollBlockFloorComponent, .RollBlockItemComponent => has_roll_block = true,
-                    .ClientTriggerComponent => |ct| {
-                        if (!(ct.Disabled orelse false) and components.SplineComponent != null) {
-                            has_air_passage = true;
-                        }
-                    },
-                    else => {},
+            for ([2][]const @import("../../data/tables/entity_components/Extra.zig").Entry{
+                components.extra,
+                components.template_extra,
+            }) |extra_slice| {
+                for (extra_slice) |entry| {
+                    switch (entry) {
+                        .TrampleComponent => |tc| if (!(tc.Disabled orelse false)) {
+                            has_trample = true;
+                        },
+                        .AirPassageComponent => has_air_passage = true,
+                        .RollBlockComponent, .RollBlockFloorComponent, .RollBlockItemComponent => has_roll_block = true,
+                        .ClientTriggerComponent => |ct| {
+                            if (!(ct.Disabled orelse false) and components.SplineComponent != null) {
+                                has_air_passage = true;
+                            }
+                        },
+                        else => {},
+                    }
                 }
             }
         }
@@ -774,18 +784,22 @@ fn trackRangeArea(
 
     if (trigger_comp) |trig| {
         if (!(trig.Disabled orelse false)) {
-            if (scene_opt.*) |*scene| {
-                if (scene.net_id_map.get(range_entity_id)) |ent_idx| {
-                    if (is_enter) {
-                        scene.entities.items(.world_item)[ent_idx].trigger_count +|= 1;
-                    } else {
-                        scene.entities.items(.world_item)[ent_idx].exit_trigger_count +|= 1;
+            if (trigger_events) {
+                if (scene_opt.*) |*scene| {
+                    if (scene.net_id_map.get(range_entity_id)) |ent_idx| {
+                        if (is_enter) {
+                            scene.entities.items(.world_item)[ent_idx].trigger_count +|= 1;
+                        } else {
+                            scene.entities.items(.world_item)[ent_idx].exit_trigger_count +|= 1;
+                        }
                     }
                 }
             }
             try out_results.append(alloc.arena, .{ .key = 0, .value = .Success });
-            if (try QuestEngine.handleEntityRangeTrigger(quest_ctx, range_entity_id, cfg_id, trig, is_enter)) {
-                progress_dirty.* = true;
+            if (trigger_events) {
+                if (try QuestEngine.handleEntityRangeTrigger(quest_ctx, range_entity_id, cfg_id, trig, is_enter)) {
+                    progress_dirty.* = true;
+                }
             }
         }
     }
@@ -811,7 +825,7 @@ pub fn onPlayerAccessRangeRequest(
     const is_enter = rtype == .RangeEnter or rtype == .RangeInit;
     var results: std.ArrayList(pb.MapEntry(i32, pb.ErrorCode)) = .empty;
     var progress_dirty = false;
-    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, quest_ctx, txn.message.RangeEntityId, is_enter, true, &results, &progress_dirty);
+    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, quest_ctx, txn.message.RangeEntityId, is_enter, true, true, &results, &progress_dirty);
     if (progress_dirty) {
         try progress_comp.save(fs, alloc.arena);
     }
@@ -842,13 +856,43 @@ pub fn onEntityAccessRangeRequest(
     var infos: std.ArrayList(pb.EntityAccessInfo) = .empty;
     var range_results: std.ArrayList(pb.MapEntry(i32, pb.ErrorCode)) = .empty;
     var progress_dirty = false;
-    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, quest_ctx, txn.message.EntityId, is_enter, false, &range_results, &progress_dirty);
+    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, quest_ctx, txn.message.EntityId, is_enter, false, false, &range_results, &progress_dirty);
     const next_val: i64 = if (is_enter) 1 else 0;
     for (txn.message.EntitiesToCheck.items) |eid| {
         const ekey = try std.fmt.allocPrint(alloc.arena, "range:ent:{d}:{d}", .{ txn.message.EntityId, eid });
         if (progress_comp.info.getKeyInt(ekey) != next_val) {
             try progress_comp.info.setKeyInt(alloc.gpa, ekey, next_val);
             progress_dirty = true;
+        }
+        if (scene_opt.*) |*scene| {
+            if (scene.net_id_map.get(txn.message.EntityId)) |ridx| {
+                var wi = &scene.entities.items(.world_item)[ridx];
+                if (is_enter) {
+                    var found = false;
+                    const n_ents = @min(@as(usize, wi.in_range_entity_len), wi.in_range_entity_ids.len);
+                    for (wi.in_range_entity_ids[0..n_ents]) |cur| {
+                        if (cur == eid) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found and wi.in_range_entity_len < wi.in_range_entity_ids.len) {
+                        wi.in_range_entity_ids[wi.in_range_entity_len] = eid;
+                        wi.in_range_entity_len += 1;
+                    }
+                } else {
+                    var i: usize = 0;
+                    while (i < wi.in_range_entity_len) {
+                        if (wi.in_range_entity_ids[i] == eid) {
+                            wi.in_range_entity_len -= 1;
+                            wi.in_range_entity_ids[i] = wi.in_range_entity_ids[wi.in_range_entity_len];
+                            wi.in_range_entity_ids[wi.in_range_entity_len] = 0;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+            }
         }
         try infos.append(alloc.arena, .{
             .EntityId = eid,
@@ -878,7 +922,7 @@ pub fn onInitRangeRequest(
 ) !void {
     var range_results: std.ArrayList(pb.MapEntry(i32, pb.ErrorCode)) = .empty;
     var progress_dirty = false;
-    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, quest_ctx, txn.message.EntityId, txn.message.IsPlayerInRange, true, &range_results, &progress_dirty);
+    try trackRangeArea(alloc, fs, assets, scene_opt, map_comp, quest_ctx, txn.message.EntityId, txn.message.IsPlayerInRange, true, txn.message.IsPlayerInRange, &range_results, &progress_dirty);
     var infos: std.ArrayList(pb.EntityAccessInfo) = .empty;
     for (txn.message.EntitiesToRequest.items) |eid| {
         const ekey = try std.fmt.allocPrint(alloc.arena, "range:ent:{d}:{d}", .{ txn.message.EntityId, eid });

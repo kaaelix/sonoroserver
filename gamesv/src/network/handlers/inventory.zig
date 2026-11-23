@@ -81,6 +81,33 @@ pub fn onItemLockRequest(
     txn.respond(.{ .ErrorCode = .Success });
 }
 
+fn applyItemFuncValueUpdate(
+    conn: anytype,
+    alloc: mem.Alloc,
+    io: std.Io,
+    fs: *FileSystem,
+    echo_comp: *PlayerEchoComponent,
+    weapon_comp: *PlayerWeaponComponent,
+    incr_id: i32,
+    new_func: i32,
+) !pb.ErrorCode {
+    if (echo_comp.echo_map.getPtr(incr_id)) |item| {
+        item.func_value = new_func;
+        try PlayerEchoComponent.saveAll(alloc.gpa, fs, echo_comp.player_id, echo_comp.echo_map);
+    } else if (weapon_comp.weapon_map.getPtr(incr_id)) |weapon| {
+        weapon.func_value = new_func;
+        try PlayerWeaponComponent.saveAll(alloc.gpa, fs, weapon_comp.player_id, weapon_comp.weapon_map);
+    } else {
+        return .ErrPhantomItemNotExist;
+    }
+
+    try conn.push(alloc.gpa, io, pb.ItemFuncValueUpdateNotify{
+        .IncrId = incr_id,
+        .FuncValue = new_func,
+    });
+    return .Success;
+}
+
 pub fn onItemDeprecateRequest(
     txn: *Transaction(pb.ItemDeprecateRequest),
     alloc: mem.Alloc,
@@ -90,22 +117,21 @@ pub fn onItemDeprecateRequest(
     weapon_comp: *PlayerWeaponComponent,
 ) !void {
     const new_func: i32 = if (txn.message.ItemId == 1) 2 else 0;
-    if (echo_comp.echo_map.getPtr(txn.message.IncrId)) |item| {
-        item.func_value = new_func;
-        try PlayerEchoComponent.saveAll(alloc.gpa, fs, echo_comp.player_id, echo_comp.echo_map);
-    } else if (weapon_comp.weapon_map.getPtr(txn.message.IncrId)) |weapon| {
-        weapon.func_value = new_func;
-        try PlayerWeaponComponent.saveAll(alloc.gpa, fs, weapon_comp.player_id, weapon_comp.weapon_map);
-    } else {
-        txn.respond(.{ .ErrorCode = .ErrPhantomItemNotExist });
-        return;
-    }
+    const err = try applyItemFuncValueUpdate(txn.conn, alloc, io, fs, echo_comp, weapon_comp, txn.message.IncrId, new_func);
+    txn.respond(.{ .ErrorCode = err });
+}
 
-    try txn.conn.push(alloc.gpa, io, pb.ItemFuncValueUpdateNotify{
-        .IncrId = txn.message.IncrId,
-        .FuncValue = new_func,
-    });
-    txn.respond(.{ .ErrorCode = .Success });
+pub fn onItemDisuseRequest(
+    txn: *Transaction(pb.ItemDisuseRequest),
+    alloc: mem.Alloc,
+    io: std.Io,
+    fs: *FileSystem,
+    echo_comp: *PlayerEchoComponent,
+    weapon_comp: *PlayerWeaponComponent,
+) !void {
+    const new_func: i32 = if (txn.message.Oper == 1) 2 else 0;
+    const err = try applyItemFuncValueUpdate(txn.conn, alloc, io, fs, echo_comp, weapon_comp, txn.message.IncrId, new_func);
+    txn.respond(.{ .ErrCode = err });
 }
 
 fn findGiftPackage(assets: *const Assets, item_cfg: Assets.DataTables.ItemInfo) ?GiftPackage {
