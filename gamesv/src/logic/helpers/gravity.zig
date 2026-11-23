@@ -8,6 +8,23 @@ pub const GravityResult = struct {
     configured: bool,
 };
 
+pub fn rotateLocalOffsetUe(local: [3]f32, rot_deg: [3]f32) [3]f32 {
+    const to_rad = std.math.pi / 180.0;
+    const sr = @sin(rot_deg[0] * to_rad);
+    const cr = @cos(rot_deg[0] * to_rad);
+    const sp = @sin(rot_deg[1] * to_rad);
+    const cp = @cos(rot_deg[1] * to_rad);
+    const sy = @sin(rot_deg[2] * to_rad);
+    const cy = @cos(rot_deg[2] * to_rad);
+
+    // UE FRotationMatrix::MakeFromRotator(Pitch=rot_deg[1], Yaw=rot_deg[2], Roll=rot_deg[0]):
+    return .{
+        local[0] * (cp * cy) + local[1] * (sr * sp * cy - cr * sy) + local[2] * (-(cr * sp * cy + sr * sy)),
+        local[0] * (cp * sy) + local[1] * (sr * sp * sy + cr * cy) + local[2] * (cy * sr - cr * sp * sy),
+        local[0] * sp + local[1] * (-sr * cp) + local[2] * (cr * cp),
+    };
+}
+
 pub fn resolveDirection(direction: BaseInfo.GravityDirection, base_rot: [3]f32) GravityResult {
     if (direction.Direction) |v| {
         return .{ .dir = .{ v.X, v.Y, v.Z }, .configured = true };

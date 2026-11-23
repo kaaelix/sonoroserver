@@ -105,6 +105,7 @@ pub fn onChangeDataLayerFinishRequest(
     try progress_comp.info.setKeyInt(alloc.gpa, key, 1);
     try progress_comp.save(fs, alloc.arena);
     if (qctx.scene != null) {
+        QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onChangeDataLayerFinish", err);
         QuestEngine.onSceneLoadingFinish(qctx) catch |err| QuestEngine.logHookErr("onSceneLoadingFinish", err);
     }
     txn.respond(.{ .ErrorCode = .Success });

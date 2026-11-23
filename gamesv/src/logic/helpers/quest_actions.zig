@@ -21,6 +21,7 @@ const activity_handler = @import("../../network/handlers/activity.zig");
 const map_handler = @import("../../network/handlers/map.zig");
 const spline_state = @import("spline_state.zig");
 const MoraleHelper = @import("morale.zig");
+const GravityHelper = @import("gravity.zig");
 
 const log = std.log.scoped(.quest_actions);
 
@@ -461,12 +462,16 @@ pub fn executeAction(
         if (quest_types.jsonInt(params.get("ReviveId"))) |rid| {
             try recordProgressInt(ctx, "region:revive_id", rid, false);
         }
-    } else if (std.mem.eql(u8, name, "SetBattleState") or std.mem.eql(u8, name, "ExecBattleAction") or std.mem.eql(u8, name, "ExecAlertSystemAction")) {
-        if (ctx.scene) |scene| {
-            scene.forceBattleState(true);
-        }
-    } else if (std.mem.eql(u8, name, "ModifySceneItemAttributeTag") or std.mem.eql(u8, name, "SetElementalBoxToTarget") or std.mem.eql(u8, name, "ChangeElementalBoxState")) {
+    } else if (std.mem.eql(u8, name, "SetBattleState")) {
+        try applySetBattleStateAction(ctx, params);
+    } else if (std.mem.eql(u8, name, "ExecBattleAction")) {
+        try applyExecBattleAction(ctx, params);
+    } else if (std.mem.eql(u8, name, "ExecAlertSystemAction")) {
+        try applyExecAlertSystemAction(ctx, params);
+    } else if (std.mem.eql(u8, name, "ModifySceneItemAttributeTag")) {
         try applyModifySceneTagAction(ctx, params);
+    } else if (std.mem.eql(u8, name, "SetElementalBoxToTarget") or std.mem.eql(u8, name, "ChangeElementalBoxState")) {
+        try applyElementalBoxAction(ctx, name, params);
     } else if (std.mem.eql(u8, name, "SetEntityClientVisibleSave") or std.mem.eql(u8, name, "SetEntityClientVisible")) {
         const vis = quest_types.jsonBool(params.get("Visible")) orelse true;
         try applyEntityVisibilityList(ctx, params.get("EntityIds"), vis);
@@ -489,12 +494,18 @@ pub fn executeAction(
         try recordProgressInt(ctx, "motor:cruise", 0, false);
     } else if (std.mem.eql(u8, name, "SetTeleControl")) {
         if (params.get("Config")) |cfg| {
-            if (cfg == .object and std.mem.eql(u8, quest_types.jsonStr(cfg.object.get("Type")) orelse "", "SetResetPosition")) {
-                if (quest_types.jsonInt(cfg.object.get("EntityId"))) |eid| {
-                    if (quest_types.jsonInt(cfg.object.get("PositionEntityId"))) |pos_eid| {
-                        const k = try std.fmt.allocPrint(ctx.alloc.arena, "tele_reset:{d}", .{eid});
-                        try recordProgressInt(ctx, k, pos_eid, false);
+            if (cfg == .object) {
+                const ty = quest_types.jsonStr(cfg.object.get("Type")) orelse "";
+                if (std.mem.eql(u8, ty, "SetResetPosition")) {
+                    if (quest_types.jsonInt(cfg.object.get("EntityId"))) |eid| {
+                        if (quest_types.jsonInt(cfg.object.get("PositionEntityId"))) |pos_eid| {
+                            const k = try std.fmt.allocPrint(ctx.alloc.arena, "tele_reset:{d}", .{eid});
+                            try recordProgressInt(ctx, k, pos_eid, false);
+                        }
                     }
+                } else if (quest_types.jsonInt(cfg.object.get("EntityId"))) |eid| {
+                    const k = try std.fmt.allocPrint(ctx.alloc.arena, "tele_control:{d}", .{eid});
+                    try recordProgressInt(ctx, k, 1, false);
                 }
             }
         }
@@ -532,25 +543,22 @@ pub fn executeAction(
     } else if (std.mem.eql(u8, name, "VehicleEnter") or std.mem.eql(u8, name, "VehicleExitPlayer") or std.mem.eql(u8, name, "VehicleExitNpc") or std.mem.eql(u8, name, "VehicleTeleport") or std.mem.eql(u8, name, "TeleportToAndEnterVehicle") or std.mem.eql(u8, name, "VehicleMoveWithPathLine") or std.mem.eql(u8, name, "StopNewMoveWithSpline")) {
         try applyVehicleAction(ctx, name, params);
     } else if (std.mem.eql(u8, name, "EnableHostility") or std.mem.eql(u8, name, "EnableAI") or std.mem.eql(u8, name, "OverrideAiBehaviorTree")) {
-        try applyEntityVisibilityList(ctx, params.get("EntityIds"), true);
+        try applyAiControlAction(ctx, name, params);
     } else if (std.mem.eql(u8, name, "ManualOccupations") or std.mem.eql(u8, name, "ForceOccupations")) {
-        try recordProgressInt(ctx, "world:occupation", 1, false);
+        try applyOccupationAction(ctx, params);
     } else if (std.mem.eql(u8, name, "SetNpcGroupPerform")) {
-        if (params.get("PerformType")) |pt| {
-            if (pt == .object) {
-                const pt_type = quest_types.jsonStr(pt.object.get("Type")) orelse "";
-                if (std.mem.eql(u8, pt_type, "SupportedWalking")) {
-                    try recordProgressInt(ctx, "npc:supported_walking", 1, false);
-                } else if (std.mem.eql(u8, pt_type, "CancelSupportedWalking")) {
-                    try recordProgressInt(ctx, "npc:supported_walking", 0, false);
-                }
-            }
-        }
+        try applySetNpcGroupPerform(ctx, params);
     } else if (std.mem.eql(u8, name, "RemoveNpcGroupPerform")) {
+        if (quest_types.jsonStr(params.get("Key"))) |key| {
+            const k = try std.fmt.allocPrint(ctx.alloc.arena, "npc:group_perform:{s}", .{key});
+            try recordProgressInt(ctx, k, 0, false);
+        }
         try recordProgressInt(ctx, "npc:supported_walking", 0, false);
     } else if (std.mem.eql(u8, name, "PlayBubble")) {
         const guid = quest_types.jsonStr(act.object.get("ActionGuid")) orelse "";
         try applyAddPlayBubble(ctx, params, guid);
+    } else {
+        log.debug("unhandled quest action: {s}", .{name});
     }
 }
 
@@ -1670,25 +1678,25 @@ fn collectConfigIdsInRangeEntity(
     const scene = ctx.scene orelse return;
     const cfg = ctx.assets.findLevelEntity(scene.instance_id, range_cfg_id) orelse return;
     const center = Assets.AssetIndexes.entityWorldPos(cfg) orelse return;
+    const rot = Assets.AssetIndexes.entityWorldRot(cfg);
 
-    var radius: f32 = 3000;
+    var shape: @import("../../data/tables/entity_components/Range.zig").ShapeConfig = .{ .Radius = 3000 };
     var comps = cfg.ComponentsData;
     if (ctx.assets.findTemplateConfig(cfg.BlueprintType)) |tpl| {
         tpl.ComponentsData.mergeInto(&comps);
     }
     if (comps.RangeComponent) |rc| {
-        if (rc.Shape) |shape| {
-            if (shape.Radius) |r| radius = r;
-        }
+        if (rc.Shape) |sh| shape = sh;
     }
 
-    var net_ids: std.ArrayListUnmanaged(i64) = .empty;
-    defer net_ids.deinit(ctx.alloc.gpa);
-    try scene.collectEntitiesInRadius(ctx.alloc.gpa, center, radius, only_monsters_and_chests, &net_ids);
-    for (net_ids.items) |nid| {
-        const idx = scene.net_id_map.get(nid) orelse continue;
-        const cid = scene.entities.items(.config)[idx].config_id;
-        if (cid > 0 and !QuestInfo.containsInt(out.items, cid)) try out.append(ctx.alloc.arena, cid);
+    const slice = scene.entities.slice();
+    for (slice.items(.config), slice.items(.position)) |ent_cfg, pos_opt| {
+        if (only_monsters_and_chests and ent_cfg.entity_type != .monster and ent_cfg.entity_type != .scene_item) continue;
+        const cid = ent_cfg.config_id;
+        if (cid <= 0) continue;
+        const pos = if (pos_opt) |p| p.location else continue;
+        if (!ConditionEvaluator.isPosInsideRangeShape(pos, center, rot, shape, 3000.0, 0.0)) continue;
+        if (!QuestInfo.containsInt(out.items, cid)) try out.append(ctx.alloc.arena, cid);
     }
 }
 
@@ -1725,16 +1733,28 @@ fn applyStopSceneItemMove(ctx: QuestContext, params: std.json.ObjectMap) !void {
 
 fn applyResetPlayerPosPresentation(ctx: QuestContext, params: std.json.ObjectMap) !void {
     const scene = ctx.scene orelse return;
+    if (params.get("Presentation")) |pres| {
+        if (pres == .object) {
+            const cues = try quest_types.parseIntList(ctx.alloc.arena, pres.object.get("GamePlayCues"));
+            for (cues) |cue_id| {
+                ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.GameplayCueNotify{
+                    .GameplayCueId = cue_id,
+                }) catch {};
+            }
+        }
+    }
     const rpc = params.get("ResetPosConfig") orelse return;
     if (rpc != .object) return;
     if (!std.mem.eql(u8, quest_types.jsonStr(rpc.object.get("Type")) orelse "", "PosEntity")) return;
     const eid = quest_types.jsonInt(rpc.object.get("Entity")) orelse return;
     const cfg = ctx.assets.findLevelEntity(scene.instance_id, eid) orelse return;
     const pos = Assets.AssetIndexes.entityWorldPos(cfg) orelse return;
-    try updatePlayerSceneState(ctx, pos, null);
+    const rot = Assets.AssetIndexes.entityWorldRot(cfg);
+    try updatePlayerSceneState(ctx, pos, rot);
     ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.TeleportNotify{
         .MapId = scene.instance_id,
         .Pos = .{ .X = pos[0], .Y = pos[1], .Z = pos[2] },
+        .Rot = .{ .X = rot[0], .Y = rot[1], .Z = rot[2] },
         .Reason = .Action,
     }) catch {};
 }
@@ -2048,14 +2068,40 @@ fn applyEnableSystemAction(ctx: QuestContext, params: std.json.ObjectMap) !void 
 
 fn applyEnableFunctionAction(ctx: QuestContext, params: std.json.ObjectMap) !void {
     const ty = quest_types.jsonStr(params.get("Type")) orelse return;
-    if (std.mem.eql(u8, ty, "InteractiveItems") or std.mem.eql(u8, ty, "MotorRadioUI")) {
+    if (std.mem.eql(u8, ty, "InteractiveItems")) {
+        const enable = quest_types.jsonBool(params.get("Enable")) orelse true;
+        try recordProgressInt(ctx, "func:interactive_items", @intFromBool(enable), false);
+        return;
+    }
+    if (std.mem.eql(u8, ty, "MotorRadioUI")) {
+        const enable = if (params.get("DisplayMode")) |dm|
+            (dm == .object and std.mem.eql(u8, quest_types.jsonStr(dm.object.get("Type")) orelse "", "EnableAll"))
+        else
+            (quest_types.jsonBool(params.get("Enable")) orelse true);
+        try recordProgressInt(ctx, "func:motor_radio_ui", @intFromBool(enable), false);
+        return;
+    }
+    if (std.mem.eql(u8, ty, "TeleportDungeon")) {
+        const enable = quest_types.jsonBool(params.get("Enable")) orelse true;
+        const dlist = try quest_types.parseIntList(ctx.alloc.arena, params.get("DungeonList"));
+        if (dlist.len > 0) {
+            for (dlist) |did| {
+                const key = try std.fmt.allocPrint(ctx.alloc.arena, "func:tp_dungeon:{d}", .{did});
+                try recordProgressInt(ctx, key, @intFromBool(enable), false);
+            }
+        } else {
+            try recordProgressInt(ctx, "func:tp_dungeon_all", @intFromBool(enable), false);
+        }
         return;
     }
     if (quest_types.jsonInt(params.get("FunctionId"))) |fid| {
-        if (quest_types.jsonBool(params.get("Enable")) orelse true) {
-            if (try ctx.quest_comp.info.unlockSystem(ctx.alloc.gpa, fid)) {
-                try pushFuncOpen(ctx);
-            }
+        const enable = quest_types.jsonBool(params.get("Enable")) orelse true;
+        const changed = if (enable)
+            try ctx.quest_comp.info.unlockSystem(ctx.alloc.gpa, fid)
+        else
+            try QuestInfo.removeIntValue(&ctx.quest_comp.info.unlocked_systems, ctx.alloc.gpa, fid);
+        if (changed) {
+            try pushFuncOpen(ctx);
         }
     }
 }
@@ -2067,14 +2113,14 @@ fn teleportPlayerFromAction(ctx: QuestContext, params: std.json.ObjectMap, actio
     const tp_type = quest_types.jsonInt(tp_cfg.object.get("Type")) orelse 0;
 
     var pos_xyz: ?[3]f32 = null;
-    var yaw: f32 = 0;
+    var rot_xyz: [3]f32 = .{ 0, 0, 0 };
 
     if (tp_type == 0) {
         if (tp_cfg.object.get("TargetPos")) |tp| {
             if (tp == .object) {
                 if (parseVectorPos(tp)) |vec| {
                     pos_xyz = vec;
-                    yaw = quest_types.jsonFloat(tp.object.get("A")) orelse 0;
+                    rot_xyz[2] = quest_types.jsonFloat(tp.object.get("A")) orelse 0;
                 }
             }
         }
@@ -2084,6 +2130,7 @@ fn teleportPlayerFromAction(ctx: QuestContext, params: std.json.ObjectMap, actio
                 if (quest_types.jsonInt(arr.array.items[0])) |eid| {
                     if (ctx.assets.findLevelEntity(scene.instance_id, eid)) |cfg| {
                         pos_xyz = Assets.AssetIndexes.entityWorldPos(cfg);
+                        rot_xyz = Assets.AssetIndexes.entityWorldRot(cfg);
                     }
                 }
             }
@@ -2092,17 +2139,25 @@ fn teleportPlayerFromAction(ctx: QuestContext, params: std.json.ObjectMap, actio
         if (quest_types.jsonInt(tp_cfg.object.get("GravityAndPosEntityId"))) |eid| {
             if (ctx.assets.findLevelEntity(scene.instance_id, eid)) |cfg| {
                 pos_xyz = Assets.AssetIndexes.entityWorldPos(cfg);
+                rot_xyz = Assets.AssetIndexes.entityWorldRot(cfg);
+                const gres = GravityHelper.resolveEntityGravity(cfg, rot_xyz);
+                if (gres.configured) {
+                    const role_nid = scene.currentRoleEntityId();
+                    if (scene.net_id_map.get(role_nid)) |ridx| {
+                        scene.entities.items(.world_item)[ridx].gravity = .{ .location = gres.dir };
+                    }
+                }
             }
         }
     }
 
     const pos = pos_xyz orelse return;
-    updatePlayerSceneState(ctx, pos, .{ 0, 0, yaw }) catch return;
+    updatePlayerSceneState(ctx, pos, rot_xyz) catch return;
 
     var notify: pb.TeleportNotify = .{
         .MapId = scene.instance_id,
         .Pos = .{ .X = pos[0], .Y = pos[1], .Z = pos[2] },
-        .Rot = .{ .X = 0, .Y = 0, .Z = yaw },
+        .Rot = .{ .X = rot_xyz[0], .Y = rot_xyz[1], .Z = rot_xyz[2] },
         .Reason = .Action,
     };
     if (is_flow_action and action_id > 0 and scene.active_flow_list_name.len != 0) {
@@ -2847,18 +2902,374 @@ fn applyChangeOtherState(
     }
 }
 
+fn wakeEntityFsm(scene: *Scene, gpa: std.mem.Allocator, cfg_id: i32, reason: Scene.Entity.FsmComponent.WakeMask) void {
+    const net_id = scene.findEntityNetIdByConfigId(cfg_id) orelse return;
+    scene.markFsmDirty(gpa, net_id, reason) catch {};
+}
+
+fn applyEntityGameplayTagChange(
+    ctx: QuestContext,
+    scene: *Scene,
+    net_id: i64,
+    tag_ids: []const i32,
+    is_add: bool,
+) !void {
+    const idx = scene.net_id_map.get(net_id) orelse return;
+    if (tag_ids.len == 0) return;
+
+    var notify: pb.EntityCommonTagNotify = .{ .Id = net_id };
+    const tag_slot = &scene.entities.items(.tag)[idx];
+    for (tag_ids) |tid| {
+        if (tid == 0) continue;
+        if (is_add) {
+            if (tag_slot.*) |*tags| {
+                try tags.addCommonTag(ctx.alloc.gpa, tid);
+                try tags.setGameplayTagCount(ctx.alloc.gpa, tid, 1);
+            } else {
+                var new_tags = Scene.Entity.TagComponent{};
+                try new_tags.addCommonTag(ctx.alloc.gpa, tid);
+                try new_tags.setGameplayTagCount(ctx.alloc.gpa, tid, 1);
+                tag_slot.* = new_tags;
+            }
+        } else if (tag_slot.*) |*tags| {
+            _ = tags.removeCommonTag(ctx.alloc.gpa, tid);
+            try tags.removeGameplayTag(ctx.alloc.gpa, tid);
+        }
+        try notify.Tags.append(ctx.alloc.arena, .{ .TagId = tid, .RemoveTagIds = is_add });
+    }
+    if (notify.Tags.items.len > 0) {
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, notify) catch {};
+    }
+    scene.markFsmDirty(ctx.alloc.gpa, net_id, Scene.Entity.FsmComponent.WakeReason.tag) catch {};
+}
+
+fn applySetBattleStateAction(ctx: QuestContext, params: std.json.ObjectMap) !void {
+    const scene = ctx.scene orelse return;
+    if (params.get("StateOption")) |so| {
+        if (so == .object) {
+            const st_type = quest_types.jsonStr(so.object.get("Type")) orelse "";
+            if (std.mem.eql(u8, st_type, "SetBattleTag")) {
+                if (so.object.get("SetTags")) |arr| {
+                    if (arr == .array) {
+                        for (arr.array.items) |item| {
+                            if (item != .object) continue;
+                            const cfg_id = std.math.cast(i32, quest_types.jsonInt(item.object.get("EntityId")) orelse 0) orelse continue;
+                            if (cfg_id <= 0) continue;
+                            const set_type = quest_types.jsonStr(item.object.get("SetType")) orelse "Add";
+                            const is_add = !std.mem.eql(u8, set_type, "Remove");
+                            const tag_name = quest_types.jsonStr(item.object.get("GameplayTag")) orelse continue;
+                            const tid = gameplay_tags.idFromName(&ctx.assets.tables.gameplay_tag_remap, tag_name) catch continue;
+                            if (is_add) ensureQuestEntitySpawned(ctx, cfg_id);
+                            if (scene.findEntityNetIdByConfigId(cfg_id)) |net_id| {
+                                try applyEntityGameplayTagChange(ctx, scene, net_id, &.{tid}, is_add);
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    if (quest_types.jsonBool(params.get("InBattle")) orelse quest_types.jsonBool(params.get("IsInBattle"))) |in_battle| {
+        scene.forceBattleState(in_battle);
+    } else {
+        scene.forceBattleState(true);
+    }
+}
+
+fn applyExecBattleAction(ctx: QuestContext, params: std.json.ObjectMap) !void {
+    const scene = ctx.scene orelse return;
+    const bo = params.get("BattleOption") orelse {
+        scene.forceBattleState(true);
+        return;
+    };
+    if (bo != .object) return;
+    const btype = quest_types.jsonStr(bo.object.get("Type")) orelse return;
+    if (std.mem.eql(u8, btype, "SetBattleTags")) {
+        if (bo.object.get("Configs")) |cfgs| {
+            if (cfgs == .array) {
+                for (cfgs.array.items) |entry| {
+                    if (entry != .object) continue;
+                    const cfg_id = std.math.cast(i32, quest_types.jsonInt(entry.object.get("EntityId")) orelse 0) orelse continue;
+                    const tid = std.math.cast(i32, quest_types.jsonInt(entry.object.get("TagConfigId")) orelse 0) orelse continue;
+                    if (cfg_id <= 0 or tid == 0) continue;
+                    ensureQuestEntitySpawned(ctx, cfg_id);
+                    if (scene.findEntityNetIdByConfigId(cfg_id)) |net_id| {
+                        try applyEntityGameplayTagChange(ctx, scene, net_id, &.{tid}, true);
+                    }
+                }
+            }
+        }
+    } else if (std.mem.eql(u8, btype, "SetMonsterMoveTarget")) {
+        const target_eid = std.math.cast(i32, quest_types.jsonInt(bo.object.get("TargetEntityId")) orelse 0) orelse 0;
+        var target_pos: ?[3]f32 = null;
+        if (target_eid > 0) {
+            if (scene.findEntityNetIdByConfigId(target_eid)) |tnid| {
+                if (scene.net_id_map.get(tnid)) |tidx| {
+                    if (scene.entities.items(.position)[tidx]) |tp| target_pos = tp.location;
+                }
+            }
+            if (target_pos == null) {
+                if (ctx.assets.findLevelEntity(scene.instance_id, target_eid)) |lcfg| {
+                    target_pos = Assets.AssetIndexes.entityWorldPos(lcfg);
+                }
+            }
+        }
+        const mids = try quest_types.parseIntList(ctx.alloc.arena, bo.object.get("MonsterEntityIds"));
+        for (mids) |mid| {
+            if (mid <= 0) continue;
+            ensureQuestEntitySpawned(ctx, mid);
+            if (target_pos) |pos| {
+                if (scene.findEntityNetIdByConfigId(mid)) |mnid| {
+                    try persistQuestEntityPosition(ctx, mid, mnid, pos);
+                    try pushEntityMoved(ctx, mnid, pos, null);
+                }
+            }
+            wakeEntityFsm(scene, ctx.alloc.gpa, mid, Scene.Entity.FsmComponent.WakeReason.event);
+        }
+    } else if (std.mem.eql(u8, btype, "SendBattleEvents")) {
+        if (bo.object.get("Configs")) |cfgs| {
+            if (cfgs == .array) {
+                for (cfgs.array.items) |entry| {
+                    if (entry != .object) continue;
+                    const cfg_id = std.math.cast(i32, quest_types.jsonInt(entry.object.get("EntityId")) orelse 0) orelse continue;
+                    if (cfg_id > 0) wakeEntityFsm(scene, ctx.alloc.gpa, cfg_id, Scene.Entity.FsmComponent.WakeReason.event);
+                }
+            }
+        }
+    }
+}
+
+fn applyExecAlertSystemAction(ctx: QuestContext, params: std.json.ObjectMap) !void {
+    const opt = params.get("Option") orelse return;
+    if (opt != .object) return;
+    const atype = quest_types.jsonStr(opt.object.get("Type")) orelse return;
+    const area_id = std.math.cast(i32, quest_types.jsonInt(opt.object.get("AreaId")) orelse 0) orelse return;
+    if (area_id <= 0) return;
+
+    const k_enable = try std.fmt.allocPrint(ctx.alloc.arena, "alert_enable:{d}", .{area_id});
+    const k_ui = try std.fmt.allocPrint(ctx.alloc.arena, "alert_ui:{d}", .{area_id});
+    const k_vis = try std.fmt.allocPrint(ctx.alloc.arena, "alert_vis:{d}", .{area_id});
+    const k_val = try std.fmt.allocPrint(ctx.alloc.arena, "alert_val:{d}", .{area_id});
+
+    var remove_ids: std.ArrayList(i32) = .empty;
+    var areas: std.ArrayList(pb.AlertArea) = .empty;
+
+    if (std.mem.eql(u8, atype, "EnableAlertArea")) {
+        const enable = quest_types.jsonBool(opt.object.get("IsEnable")) orelse true;
+        try recordProgressInt(ctx, k_enable, @intFromBool(enable), false);
+        if (!enable) {
+            try remove_ids.append(ctx.alloc.arena, area_id);
+        } else {
+            try areas.append(ctx.alloc.arena, .{
+                .AreaId = area_id,
+                .AlertValue = @floatFromInt(if (ctx.progress_comp) |pc| pc.info.getKeyInt(k_val) else 0),
+                .EnableUi = if (ctx.progress_comp) |pc| pc.info.getKeyInt(k_ui) != 0 else false,
+                .VisibleUi = if (ctx.progress_comp) |pc| pc.info.getKeyInt(k_vis) != 0 else false,
+            });
+        }
+    } else if (std.mem.eql(u8, atype, "EnableAlertUi")) {
+        const enable = quest_types.jsonBool(opt.object.get("IsEnable")) orelse true;
+        try recordProgressInt(ctx, k_ui, @intFromBool(enable), false);
+        try areas.append(ctx.alloc.arena, .{
+            .AreaId = area_id,
+            .AlertValue = @floatFromInt(if (ctx.progress_comp) |pc| pc.info.getKeyInt(k_val) else 0),
+            .EnableUi = enable,
+            .VisibleUi = if (ctx.progress_comp) |pc| pc.info.getKeyInt(k_vis) != 0 else enable,
+        });
+    } else if (std.mem.eql(u8, atype, "SetAlertUiVisible")) {
+        const vis = quest_types.jsonBool(opt.object.get("IsVisible")) orelse true;
+        try recordProgressInt(ctx, k_vis, @intFromBool(vis), false);
+        try areas.append(ctx.alloc.arena, .{
+            .AreaId = area_id,
+            .AlertValue = @floatFromInt(if (ctx.progress_comp) |pc| pc.info.getKeyInt(k_val) else 0),
+            .EnableUi = if (ctx.progress_comp) |pc| pc.info.getKeyInt(k_ui) != 0 else true,
+            .VisibleUi = vis,
+        });
+    } else if (std.mem.eql(u8, atype, "ModifyAlertValue")) {
+        const val = quest_types.jsonInt(opt.object.get("AlertValue")) orelse 0;
+        try recordProgressInt(ctx, k_val, val, false);
+        try areas.append(ctx.alloc.arena, .{
+            .AreaId = area_id,
+            .AlertValue = @floatFromInt(val),
+            .EnableUi = if (ctx.progress_comp) |pc| pc.info.getKeyInt(k_ui) != 0 else true,
+            .VisibleUi = if (ctx.progress_comp) |pc| pc.info.getKeyInt(k_vis) != 0 else true,
+        });
+    }
+    if (areas.items.len > 0 or remove_ids.items.len > 0) {
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.AlertAreaNotify{
+            .AlertAreas = areas,
+            .RemoveAreaIds = remove_ids,
+        }) catch {};
+    }
+}
+
+fn applyElementalBoxAction(ctx: QuestContext, name: []const u8, params: std.json.ObjectMap) !void {
+    const target = params.get("Target") orelse return;
+    if (target != .object) return;
+    const ttype = quest_types.jsonStr(target.object.get("Type")) orelse "";
+
+    if (std.mem.eql(u8, name, "SetElementalBoxToTarget")) {
+        const box_id = quest_types.jsonInt(params.get("ElementalBoxId")) orelse return;
+        const k = if (std.mem.eql(u8, ttype, "Target")) blk: {
+            const eid = quest_types.jsonInt(target.object.get("EntityId")) orelse return;
+            break :blk try std.fmt.allocPrint(ctx.alloc.arena, "elemental_box:ent:{d}", .{eid});
+        } else try std.fmt.allocPrint(ctx.alloc.arena, "elemental_box:player", .{});
+        try recordProgressInt(ctx, k, box_id, false);
+    } else if (std.mem.eql(u8, name, "ChangeElementalBoxState")) {
+        const state_str = quest_types.jsonStr(params.get("State")) orelse return;
+        if (std.mem.eql(u8, ttype, "TargetBoxId")) {
+            const box_id = std.math.cast(i32, quest_types.jsonInt(target.object.get("TargetBoxId")) orelse 0) orelse return;
+            if (box_id <= 0) return;
+            try ctx.quest_comp.info.setEntityState(ctx.alloc.gpa, box_id, state_str);
+            try ctx.quest_comp.save(ctx.fs, ctx.alloc.arena);
+            if (ctx.scene) |scene| {
+                if (scene.findEntityNetIdByConfigId(box_id)) |nid| {
+                    if (try scene.updateEntityStateTag(ctx.alloc.gpa, &ctx.assets.tables.gameplay_tag_remap, nid, state_str)) |upd| {
+                        try emitEntityStateTags(ctx, nid, upd);
+                    }
+                }
+            }
+        } else {
+            const box_id = if (ctx.progress_comp) |pc| pc.info.getKeyInt("elemental_box:player") else 0;
+            const k = try std.fmt.allocPrint(ctx.alloc.arena, "elemental_box:state:{d}", .{box_id});
+            try recordProgressInt(ctx, k, 1, false);
+            if (ctx.quest_comp.info.setVarStr(ctx.alloc.gpa, "elemental_box_state", state_str)) |_| {} else |_| {}
+        }
+    }
+}
+
+fn applyAiControlAction(ctx: QuestContext, name: []const u8, params: std.json.ObjectMap) !void {
+    const ids = try quest_types.parseIntList(ctx.alloc.arena, params.get("EntityIds"));
+    for (ids) |cfg_id| {
+        if (cfg_id <= 0) continue;
+        if (std.mem.eql(u8, name, "EnableHostility")) {
+            const en = quest_types.jsonBool(params.get("IsEnable")) orelse true;
+            const k = try std.fmt.allocPrint(ctx.alloc.arena, "hostility:{d}", .{cfg_id});
+            try recordProgressInt(ctx, k, @intFromBool(en), false);
+            if (ctx.scene) |scene| wakeEntityFsm(scene, ctx.alloc.gpa, cfg_id, Scene.Entity.FsmComponent.WakeReason.hate);
+        } else if (std.mem.eql(u8, name, "EnableAI")) {
+            const en = quest_types.jsonBool(params.get("IsEnable")) orelse true;
+            const k = try std.fmt.allocPrint(ctx.alloc.arena, "ai_enabled:{d}", .{cfg_id});
+            try recordProgressInt(ctx, k, @intFromBool(en), false);
+            if (ctx.scene) |scene| {
+                if (scene.findEntityNetIdByConfigId(cfg_id)) |nid| {
+                    if (!en) {
+                        scene.setBattleEntityActive(ctx.alloc.gpa, nid, false) catch {};
+                    }
+                    scene.markFsmDirty(ctx.alloc.gpa, nid, Scene.Entity.FsmComponent.WakeReason.initial) catch {};
+                }
+            }
+        } else if (std.mem.eql(u8, name, "OverrideAiBehaviorTree")) {
+            const bt_id = quest_types.jsonInt(params.get("BehaviorTree")) orelse 0;
+            const bkey = quest_types.jsonStr(params.get("Key")) orelse "default";
+            const k1 = try std.fmt.allocPrint(ctx.alloc.arena, "ai_bt:{d}:{s}", .{ cfg_id, bkey });
+            const k2 = try std.fmt.allocPrint(ctx.alloc.arena, "ai_bt_cur:{d}", .{cfg_id});
+            try recordProgressInt(ctx, k1, bt_id, false);
+            try recordProgressInt(ctx, k2, bt_id, false);
+            if (ctx.scene) |scene| wakeEntityFsm(scene, ctx.alloc.gpa, cfg_id, Scene.Entity.FsmComponent.WakeReason.blackboard);
+        }
+    }
+}
+
+fn applyOccupationAction(ctx: QuestContext, params: std.json.ObjectMap) !void {
+    const otype = quest_types.jsonStr(params.get("OccupationType")) orelse "Request";
+    const is_req = !std.mem.eql(u8, otype, "Release");
+    if (params.get("Occupations")) |arr| {
+        if (arr == .array) {
+            for (arr.array.items) |item| {
+                const occ_name = quest_types.jsonStr(item) orelse continue;
+                const k = try std.fmt.allocPrint(ctx.alloc.arena, "occ:{s}", .{occ_name});
+                try recordProgressInt(ctx, k, @intFromBool(is_req), false);
+            }
+        }
+    }
+    try recordProgressInt(ctx, "world:occupation", @intFromBool(is_req), false);
+}
+
+fn applySetNpcGroupPerform(ctx: QuestContext, params: std.json.ObjectMap) !void {
+    const pkey = quest_types.jsonStr(params.get("Key")) orelse "";
+    const pt = params.get("PerformType") orelse return;
+    if (pt != .object) return;
+
+    if (pkey.len > 0) {
+        const k = try std.fmt.allocPrint(ctx.alloc.arena, "npc:group_perform:{s}", .{pkey});
+        try recordProgressInt(ctx, k, 1, false);
+    }
+
+    if (pt.object.get("Type")) |tv| {
+        switch (tv) {
+            .string => |pt_type| {
+                if (std.mem.eql(u8, pt_type, "SupportedWalking")) {
+                    try recordProgressInt(ctx, "npc:supported_walking", 1, false);
+                } else if (std.mem.eql(u8, pt_type, "CancelSupportedWalking")) {
+                    try recordProgressInt(ctx, "npc:supported_walking", 0, false);
+                }
+            },
+            .integer => |pt_id| {
+                if (pt_id == 0) {
+                    if (ctx.scene) |scene| {
+                        const role_id = scene.currentRoleEntityId();
+                        if (role_id > 0) {
+                            const k = try std.fmt.allocPrint(ctx.alloc.arena, "hold_hand:{d}", .{role_id});
+                            try recordProgressInt(ctx, k, 1, false);
+                        }
+                    }
+                } else if (pt_id == 5 or pt_id == 6) {
+                    try recordProgressInt(ctx, "npc:supported_walking", 1, false);
+                }
+            },
+            else => {},
+        }
+    }
+}
+
 fn applyModifySceneTagAction(ctx: QuestContext, params: std.json.ObjectMap) !void {
     const scene = ctx.scene orelse return;
     const ids = try quest_types.parseIntList(ctx.alloc.arena, params.get("EntityIds"));
     const tags = try quest_types.parseIntList(ctx.alloc.arena, params.get("PerformanceTag"));
     if (tags.len == 0) return;
+    const is_add = quest_types.jsonBool(params.get("IsAddTag")) orelse true;
     for (ids) |cfg_id| {
+        if (is_add) ensureQuestEntitySpawned(ctx, cfg_id);
         if (scene.findEntityNetIdByConfigId(cfg_id)) |net_id| {
-            if (try scene.updateEntityStateTagId(ctx.alloc.gpa, net_id, tags[0])) |upd| {
-                try emitEntityStateTags(ctx, net_id, upd);
+            try applyEntityGameplayTagChange(ctx, scene, net_id, tags, is_add);
+            if (is_add) {
+                if (try scene.updateEntityStateTagId(ctx.alloc.gpa, net_id, tags[0])) |upd| {
+                    try emitEntityStateTags(ctx, net_id, upd);
+                }
+            } else if (scene.net_id_map.get(net_id)) |idx| {
+                if (scene.entities.items(.state_tag)[idx]) |st| {
+                    for (tags) |t| {
+                        if (st.state_tag_id == t) {
+                            _ = try scene.updateEntityStateTagId(ctx.alloc.gpa, net_id, 0);
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+fn resolveQuestSplineEndPos(assets: *const Assets, instance_id: i32, spline_cfg_id: i64) ?[3]f32 {
+    const lcfg = assets.findLevelEntity(instance_id, spline_cfg_id) orelse return null;
+    const base = Assets.AssetIndexes.entityWorldPos(lcfg) orelse .{ 0, 0, 0 };
+    const rot = Assets.AssetIndexes.entityWorldRot(lcfg);
+    var components = lcfg.ComponentsData;
+    if (assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+        tpl.ComponentsData.mergeInto(&components);
+    }
+    const spline = components.SplineComponent orelse return null;
+    const opt = spline.Option orelse return null;
+    if (opt != .object) return null;
+    const pts_val = opt.object.get("Points") orelse return null;
+    if (pts_val != .array or pts_val.array.items.len == 0) return null;
+    const last = pts_val.array.items[pts_val.array.items.len - 1];
+    if (last != .object) return null;
+    const pos_val = last.object.get("Position") orelse return null;
+    const off = GravityHelper.rotateLocalOffsetUe(parseVectorPos(pos_val) orelse return null, rot);
+    return .{ base[0] + off[0], base[1] + off[1], base[2] + off[2] };
 }
 
 fn applyServerMoveAction(ctx: QuestContext, name: []const u8, params: std.json.ObjectMap) !void {
@@ -2868,10 +3279,21 @@ fn applyServerMoveAction(ctx: QuestContext, name: []const u8, params: std.json.O
         const mc = params.get("MoveConfig") orelse return;
         if (mc != .object) return;
         const pos = parseVectorPos(mc.object.get("Point")) orelse return;
+        const move_time = quest_types.jsonFloat(mc.object.get("Time")) orelse 0;
         ensureQuestEntitySpawned(ctx, cfg_id);
         if (scene.findEntityNetIdByConfigId(cfg_id)) |net_id| {
             try persistQuestEntityPosition(ctx, cfg_id, net_id, pos);
-            try pushEntityMoved(ctx, net_id, pos, null);
+            if (move_time > 0) {
+                ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.SceneItemMoveTargetNotify{
+                    .MoveInfo = .{
+                        .EntityId = net_id,
+                        .Location = .{ .X = pos[0], .Y = pos[1], .Z = pos[2] },
+                        .MoveTime = move_time,
+                    },
+                }) catch {};
+            } else {
+                try pushEntityMoved(ctx, net_id, pos, null);
+            }
         }
     } else if (std.mem.eql(u8, name, "NpcMoveToPoint")) {
         const cfg_id = parseQuestEntityId(params.get("Target") orelse params.get("EntityId")) orelse return;
@@ -2935,9 +3357,7 @@ fn applyServerMoveAction(ctx: QuestContext, name: []const u8, params: std.json.O
                     );
                     try progress.save(ctx.fs, ctx.alloc.arena);
                 }
-                // The LevelEvent on the connected client starts this action
-                // locally. EntityMoveSplineComponentPb carries server state
-                // to clients when the entity is spawned again.
+                pushSplineStatus(ctx, net_id, .Moving, spline_config_id, null, move_spline_config);
             }
         }
     } else if (std.mem.eql(u8, name, "PlayerMoveToPoint")) {
@@ -2954,6 +3374,8 @@ fn applyServerMoveAction(ctx: QuestContext, name: []const u8, params: std.json.O
             const loc = quest_types.jsonInt(params.get("Location")) orelse 0;
             const k = try std.fmt.allocPrint(ctx.alloc.arena, "lift_target:{d}", .{cfg_id});
             try recordProgressInt(ctx, k, loc, false);
+            const ek = try std.fmt.allocPrint(ctx.alloc.arena, "elevator:{d}", .{cfg_id});
+            try recordProgressInt(ctx, ek, loc, false);
             if (scene.findEntityNetIdByConfigId(cfg_id)) |net_id| {
                 if (scene.net_id_map.get(net_id)) |index| {
                     scene.entities.items(.world_item)[index].lift = .{ .location = std.math.cast(i32, loc) orelse 0 };
@@ -3005,10 +3427,16 @@ fn persistQuestEntityPosition(ctx: QuestContext, config_id: i32, net_id: i64, po
 fn applyVehicleAction(ctx: QuestContext, name: []const u8, params: std.json.ObjectMap) !void {
     if (std.mem.eql(u8, name, "VehicleEnter") or std.mem.eql(u8, name, "TeleportToAndEnterVehicle")) {
         const seat: i32 = @intCast(quest_types.jsonInt(params.get("Seat")) orelse 0);
+        const is_teleport_enter = std.mem.eql(u8, name, "TeleportToAndEnterVehicle");
+        const vt_vid: ?i32 = if (params.get("VehicleTarget")) |vt| blk: {
+            if (vt != .object) break :blk null;
+            break :blk quest_types.jsonInt(vt.object.get("VehicleId"));
+        } else null;
+
         if (params.get("EnteringTarget")) |et| {
             if (et == .object) {
                 const target_ty = quest_types.jsonStr(et.object.get("Type")) orelse "Player";
-                if (quest_types.jsonInt(et.object.get("TargetVehicle"))) |vid| {
+                if (quest_types.jsonInt(et.object.get("TargetVehicle")) orelse vt_vid) |vid| {
                     ensureQuestEntitySpawned(ctx, vid);
                     if (std.mem.eql(u8, target_ty, "Npc")) {
                         if (quest_types.jsonInt(et.object.get("TargetNpc"))) |npc_cfg| {
@@ -3022,6 +3450,12 @@ fn applyVehicleAction(ctx: QuestContext, name: []const u8, params: std.json.Obje
                                 if (npc_nid != null and veh_nid != null) {
                                     if (scene.net_id_map.get(veh_nid.?)) |vehicle_index| {
                                         if (scene.entities.items(.vehicle)[vehicle_index]) |*vehicle| vehicle.occupied = true;
+                                    }
+                                    if (scene.net_id_map.get(npc_nid.?)) |npc_idx| {
+                                        scene.entities.items(.npc_drive_vehicle)[npc_idx] = .{
+                                            .vehicle_entity_id = veh_nid.?,
+                                            .seat = seat,
+                                        };
                                     }
                                     ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.VehicleUpdateEntityNotify{
                                         .EntityId = npc_nid.?,
@@ -3042,6 +3476,17 @@ fn applyVehicleAction(ctx: QuestContext, name: []const u8, params: std.json.Obje
                             if (scene.findEntityNetIdByConfigId(veh_cid)) |veh_nid| {
                                 if (scene.net_id_map.get(veh_nid)) |vidx| {
                                     if (scene.entities.items(.vehicle)[vidx]) |*veh| veh.occupied = true;
+                                    if (is_teleport_enter) {
+                                        if (scene.entities.items(.position)[vidx]) |vp| {
+                                            try updatePlayerSceneState(ctx, vp.location, vp.rotation);
+                                            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.TeleportNotify{
+                                                .MapId = scene.instance_id,
+                                                .Pos = .{ .X = vp.location[0], .Y = vp.location[1], .Z = vp.location[2] },
+                                                .Rot = .{ .X = vp.rotation[0], .Y = vp.rotation[1], .Z = vp.rotation[2] },
+                                                .Reason = .Action,
+                                            }) catch {};
+                                        }
+                                    }
                                 }
                                 ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.VehicleUpdateNotify{
                                     .EntityId = veh_nid,
@@ -3055,7 +3500,7 @@ fn applyVehicleAction(ctx: QuestContext, name: []const u8, params: std.json.Obje
                 }
             }
         }
-        if (quest_types.jsonInt(params.get("VehicleEntityId")) orelse quest_types.jsonInt(params.get("TargetVehicle"))) |vid| {
+        if (quest_types.jsonInt(params.get("VehicleEntityId")) orelse quest_types.jsonInt(params.get("TargetVehicle")) orelse vt_vid) |vid| {
             ensureQuestEntitySpawned(ctx, vid);
             try recordProgressInt(ctx, "vehicle:cur", vid, false);
             try recordProgressInt(ctx, "vehicle:seat", seat, false);
@@ -3065,6 +3510,17 @@ fn applyVehicleAction(ctx: QuestContext, name: []const u8, params: std.json.Obje
                     if (scene.findEntityNetIdByConfigId(veh_cid)) |veh_nid| {
                         if (scene.net_id_map.get(veh_nid)) |vidx| {
                             if (scene.entities.items(.vehicle)[vidx]) |*veh| veh.occupied = true;
+                            if (is_teleport_enter) {
+                                if (scene.entities.items(.position)[vidx]) |vp| {
+                                    try updatePlayerSceneState(ctx, vp.location, vp.rotation);
+                                    ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.TeleportNotify{
+                                        .MapId = scene.instance_id,
+                                        .Pos = .{ .X = vp.location[0], .Y = vp.location[1], .Z = vp.location[2] },
+                                        .Rot = .{ .X = vp.rotation[0], .Y = vp.rotation[1], .Z = vp.rotation[2] },
+                                        .Reason = .Action,
+                                    }) catch {};
+                                }
+                            }
                         }
                         ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.VehicleUpdateNotify{
                             .EntityId = veh_nid,
@@ -3081,15 +3537,49 @@ fn applyVehicleAction(ctx: QuestContext, name: []const u8, params: std.json.Obje
                     ensureQuestEntitySpawned(ctx, vid);
                     try recordProgressInt(ctx, "vehicle:cur", vid, false);
                     try recordProgressInt(ctx, "vehicle:seat", seat, false);
+                    if (ctx.scene) |scene| {
+                        if (scene.findEntityNetIdByConfigId(@intCast(vid))) |veh_nid| {
+                            if (scene.net_id_map.get(veh_nid)) |vidx| {
+                                if (scene.entities.items(.vehicle)[vidx]) |*veh| veh.occupied = true;
+                                if (is_teleport_enter) {
+                                    if (scene.entities.items(.position)[vidx]) |vp| {
+                                        try updatePlayerSceneState(ctx, vp.location, vp.rotation);
+                                        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.TeleportNotify{
+                                            .MapId = scene.instance_id,
+                                            .Pos = .{ .X = vp.location[0], .Y = vp.location[1], .Z = vp.location[2] },
+                                            .Rot = .{ .X = vp.rotation[0], .Y = vp.rotation[1], .Z = vp.rotation[2] },
+                                            .Reason = .Action,
+                                        }) catch {};
+                                    }
+                                }
+                            }
+                            ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.VehicleUpdateNotify{
+                                .EntityId = veh_nid,
+                                .PlayerId = ctx.basic_comp.player_id,
+                                .SeatId = seat,
+                            }) catch {};
+                        }
+                    }
                 } else if (std.mem.eql(u8, tv_type, "FishingBoat")) {
                     try recordProgressInt(ctx, "fish:boat_active", 1, false);
                     if (ctx.scene) |scene| {
                         const slice = scene.entities.slice();
-                        for (slice.items(.entity_id), slice.items(.config), slice.items(.vehicle)) |nid, cfg, *veh_opt| {
+                        for (slice.items(.entity_id), slice.items(.config), slice.items(.vehicle), slice.items(.position)) |nid, cfg, *veh_opt, pos_opt| {
                             if (veh_opt.*) |*veh| {
                                 veh.occupied = true;
                                 try recordProgressInt(ctx, "vehicle:cur", cfg.config_id, false);
                                 try recordProgressInt(ctx, "vehicle:seat", seat, false);
+                                if (is_teleport_enter) {
+                                    if (pos_opt) |vp| {
+                                        try updatePlayerSceneState(ctx, vp.location, vp.rotation);
+                                        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.TeleportNotify{
+                                            .MapId = scene.instance_id,
+                                            .Pos = .{ .X = vp.location[0], .Y = vp.location[1], .Z = vp.location[2] },
+                                            .Rot = .{ .X = vp.rotation[0], .Y = vp.rotation[1], .Z = vp.rotation[2] },
+                                            .Reason = .Action,
+                                        }) catch {};
+                                    }
+                                }
                                 ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.VehicleUpdateNotify{
                                     .EntityId = nid.net_id,
                                     .PlayerId = ctx.basic_comp.player_id,
@@ -3132,6 +3622,9 @@ fn applyVehicleAction(ctx: QuestContext, name: []const u8, params: std.json.Obje
                 const npc_cid = npc_id;
                 if (npc_cid > 0) {
                     if (scene.findEntityNetIdByConfigId(npc_cid)) |npc_nid| {
+                        if (scene.net_id_map.get(npc_nid)) |npc_idx| {
+                            scene.entities.items(.npc_drive_vehicle)[npc_idx] = null;
+                        }
                         ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.VehicleUpdateEntityNotify{
                             .EntityId = npc_nid,
                             .VehicleCreatureId = 0,
@@ -3199,9 +3692,9 @@ fn applyVehicleAction(ctx: QuestContext, name: []const u8, params: std.json.Obje
         ensureQuestEntitySpawned(ctx, vehicle_cfg_id);
         if (ctx.scene) |scene| {
             if (scene.findEntityNetIdByConfigId(vehicle_cfg_id)) |net_id| {
+                const spline_config_id = std.math.cast(i32, spline_id) orelse return;
                 if (scene.net_id_map.get(net_id)) |index| {
                     if (is_entering) {
-                        const spline_config_id = std.math.cast(i32, spline_id) orelse return;
                         scene.entities.items(.world_item)[index].move_spline = .{
                             .move_status = .Moving,
                             .spline_entity_id = spline_config_id,
@@ -3210,35 +3703,67 @@ fn applyVehicleAction(ctx: QuestContext, name: []const u8, params: std.json.Obje
                         scene.entities.items(.world_item)[index].move_spline = null;
                     }
                 }
+                pushSplineStatus(ctx, net_id, if (is_entering) .Moving else .Stop, spline_config_id, null, null);
             }
         }
     } else if (std.mem.eql(u8, name, "StopNewMoveWithSpline")) {
         const stop_target = params.get("StopTarget") orelse return;
         if (stop_target != .object) return;
         const stop_type = quest_types.jsonStr(stop_target.object.get("Type")) orelse return;
-        if (!std.mem.eql(u8, stop_type, "Vehicle")) return;
-        const target = stop_target.object.get("TargetVehicle") orelse return;
-        if (target != .object) return;
-        const target_type = quest_types.jsonStr(target.object.get("Type")) orelse return;
-        const vehicle_config_id: i64 = if (std.mem.eql(u8, target_type, "Appointed")) blk: {
-            break :blk quest_types.jsonInt(target.object.get("VehicleId")) orelse 0;
-        } else if (std.mem.eql(u8, target_type, "Current")) blk: {
-            const progress = ctx.progress_comp orelse return;
-            break :blk progress.info.getKeyInt("vehicle:cur");
-        } else 0;
-        const vehicle_cfg_id = std.math.cast(i32, vehicle_config_id) orelse return;
-        if (vehicle_cfg_id <= 0) return;
-        const vehicle_key = try std.fmt.allocPrint(ctx.alloc.arena, "vehicle:spline:{d}", .{vehicle_cfg_id});
-        const active_key = try std.fmt.allocPrint(ctx.alloc.arena, "vehicle:spline_active:{d}", .{vehicle_cfg_id});
-        const quest_active_key = try std.fmt.allocPrint(ctx.alloc.arena, "quest_spline_active:{d}", .{vehicle_cfg_id});
-        const item_active_key = try std.fmt.allocPrint(ctx.alloc.arena, "scene_item_spline_active:{d}", .{vehicle_cfg_id});
-        const spline_id = std.math.cast(i32, if (ctx.progress_comp) |progress| progress.info.getKeyInt(vehicle_key) else 0) orelse 0;
+
+        var target_cfg_id: i32 = 0;
+        if (std.mem.eql(u8, stop_type, "Vehicle")) {
+            const target = stop_target.object.get("TargetVehicle") orelse return;
+            if (target != .object) return;
+            const target_type = quest_types.jsonStr(target.object.get("Type")) orelse return;
+            const vehicle_config_id: i64 = if (std.mem.eql(u8, target_type, "Appointed")) blk: {
+                break :blk quest_types.jsonInt(target.object.get("VehicleId")) orelse 0;
+            } else if (std.mem.eql(u8, target_type, "Current")) blk: {
+                const progress = ctx.progress_comp orelse return;
+                break :blk progress.info.getKeyInt("vehicle:cur");
+            } else 0;
+            target_cfg_id = std.math.cast(i32, vehicle_config_id) orelse return;
+        } else if (std.mem.eql(u8, stop_type, "SceneItem") or std.mem.eql(u8, stop_type, "Entity")) {
+            target_cfg_id = std.math.cast(i32, quest_types.jsonInt(stop_target.object.get("EntityId")) orelse 0) orelse return;
+        }
+        if (target_cfg_id <= 0) return;
+
+        const vehicle_key = try std.fmt.allocPrint(ctx.alloc.arena, "vehicle:spline:{d}", .{target_cfg_id});
+        const quest_spline_key = try std.fmt.allocPrint(ctx.alloc.arena, "quest_spline:{d}", .{target_cfg_id});
+        const item_spline_key = try std.fmt.allocPrint(ctx.alloc.arena, "scene_item_spline:{d}", .{target_cfg_id});
+        const active_key = try std.fmt.allocPrint(ctx.alloc.arena, "vehicle:spline_active:{d}", .{target_cfg_id});
+        const quest_active_key = try std.fmt.allocPrint(ctx.alloc.arena, "quest_spline_active:{d}", .{target_cfg_id});
+        const item_active_key = try std.fmt.allocPrint(ctx.alloc.arena, "scene_item_spline_active:{d}", .{target_cfg_id});
+        var spline_id: i32 = 0;
+        if (ctx.progress_comp) |progress| {
+            const vsp = progress.info.getKeyInt(vehicle_key);
+            const qsp = progress.info.getKeyInt(quest_spline_key);
+            const isp = progress.info.getKeyInt(item_spline_key);
+            spline_id = std.math.cast(i32, if (vsp != 0) vsp else if (qsp != 0) qsp else isp) orelse 0;
+        }
         try recordProgressInt(ctx, active_key, 0, false);
         try recordProgressInt(ctx, quest_active_key, 0, false);
         try recordProgressInt(ctx, item_active_key, 0, false);
+        const stop_at_end = if (params.get("StopType")) |st|
+            (st == .object and std.mem.eql(u8, quest_types.jsonStr(st.object.get("Type")) orelse "", "StopAtEndPoint"))
+        else
+            false;
         if (ctx.scene) |scene| {
-            if (scene.findEntityNetIdByConfigId(vehicle_cfg_id)) |net_id| {
-                if (scene.net_id_map.get(net_id)) |index| scene.entities.items(.world_item)[index].move_spline = null;
+            if (scene.findEntityNetIdByConfigId(target_cfg_id)) |net_id| {
+                if (scene.net_id_map.get(net_id)) |index| {
+                    if (spline_id == 0) {
+                        if (scene.entities.items(.world_item)[index].move_spline) |ms| {
+                            spline_id = ms.spline_entity_id;
+                        }
+                    }
+                    scene.entities.items(.world_item)[index].move_spline = null;
+                }
+                if (stop_at_end and spline_id > 0) {
+                    if (resolveQuestSplineEndPos(ctx.assets, scene.instance_id, spline_id)) |end_pos| {
+                        try persistQuestEntityPosition(ctx, target_cfg_id, net_id, end_pos);
+                        try pushEntityMoved(ctx, net_id, end_pos, null);
+                    }
+                }
                 pushSplineStatus(ctx, net_id, .Stop, spline_id, null, null);
             }
         }

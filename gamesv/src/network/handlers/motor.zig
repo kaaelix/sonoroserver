@@ -19,6 +19,7 @@ const entity_proto = @import("../../logic/helpers/entity_proto.zig");
 const PlayerProgressComponent = @import("../../logic/component/player/PlayerProgressComponent.zig");
 const ConsumeHelper = @import("../../logic/helpers/consume.zig");
 const RewardService = @import("../../logic/helpers/reward.zig");
+const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
 
 fn intList(arena: std.mem.Allocator, items: []const i32) !std.ArrayList(i32) {
     var list: std.ArrayList(i32) = .empty;
@@ -636,10 +637,14 @@ pub fn onMotorCreateRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
-    try progress_comp.info.setKeyInt(alloc.gpa, "motor:created", if (txn.message.IsCreate) 1 else 0);
+    const val: i64 = if (txn.message.IsCreate) 1 else 0;
+    try progress_comp.info.setKeyInt(alloc.gpa, "motor:created", val);
+    try progress_comp.info.setKeyInt(alloc.gpa, "motor:summoned", val);
     try progress_comp.save(fs, alloc.arena);
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onSendMovieModeRideSharingRequest(

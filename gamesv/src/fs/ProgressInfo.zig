@@ -441,6 +441,20 @@ pub fn markClaim(info: *ProgressInfo, gpa: Allocator, key: []const u8) !bool {
     return true;
 }
 
+pub fn removeClaim(info: *ProgressInfo, gpa: Allocator, key: []const u8) bool {
+    for (info.dynamic.claims, 0..) |existing, idx| {
+        if (!std.mem.eql(u8, existing, key)) continue;
+        gpa.free(existing);
+        const len = info.dynamic.claims.len;
+        if (idx + 1 < len) {
+            info.dynamic.claims[idx] = info.dynamic.claims[len - 1];
+        }
+        info.dynamic.claims = gpa.realloc(info.dynamic.claims, len - 1) catch info.dynamic.claims[0 .. len - 1];
+        return true;
+    }
+    return false;
+}
+
 pub fn countClaimsPrefix(info: ProgressInfo, prefix: []const u8) i32 {
     var count: i32 = 0;
     for (info.dynamic.claims) |existing| {

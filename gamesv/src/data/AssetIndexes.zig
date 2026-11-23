@@ -327,6 +327,15 @@ pub fn entityWorldRot(cfg: *const DataTables.LevelEntityConfig) [3]f32 {
     return .{ r, p, y };
 }
 
+pub fn entityWorldScale(cfg: *const DataTables.LevelEntityConfig) [3]f32 {
+    if (!cfg.IsScaleEnabled or cfg.Transform.len < 3) return .{ 1, 1, 1 };
+    const raw = cfg.Transform[2];
+    const sx = if (std.math.isFinite(raw.X) and raw.X > 0) raw.X / 100.0 else 1.0;
+    const sy = if (std.math.isFinite(raw.Y) and raw.Y > 0) raw.Y / 100.0 else 1.0;
+    const sz = if (std.math.isFinite(raw.Z) and raw.Z > 0) raw.Z / 100.0 else 1.0;
+    return .{ sx, sy, sz };
+}
+
 pub fn isSpawnableBlueprint(bp: []const u8) bool {
     return std.mem.indexOf(u8, bp, "Monster") != null or
         std.mem.indexOf(u8, bp, "Animal") != null or
@@ -761,15 +770,15 @@ test "indexes level entities by map pair, id spans, and spatial grid" {
     try testing.expectEqualSlices(u32, &.{}, indexes.levelEntityIndicesById(9999));
 
     const pos0 = entityWorldPos(&parsed.value[0]).?;
-    try testing.expectApproxEqAbs(@as(f32, 100.0), pos0[0], 0.001);
-    try testing.expectApproxEqAbs(@as(f32, 200.0), pos0[1], 0.001);
-    try testing.expectApproxEqAbs(@as(f32, 50.0), pos0[2], 0.001);
-    try testing.expect(entityWorldPos(&parsed.value[2]) == null);
+    try testing.expectApproxEqAbs(@as(f32, 2.0), pos0[0], 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 4.0), pos0[1], 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), pos0[2], 0.001);
+    try testing.expect(entityWorldPos(&parsed.value[2]) != null);
 
-    // Zero-scale Monster (idx 2) and non-spawnable Item_Chest (idx 3) are excluded from spawnables.
-    try testing.expectEqualSlices(u32, &.{ 0, 4 }, indexes.spawnableIndicesForMap(8));
+    // Non-spawnable Item_Chest (idx 3) is excluded from spawnables.
+    try testing.expectEqualSlices(u32, &.{ 0, 2, 4 }, indexes.spawnableIndicesForMap(8));
     try testing.expectEqualSlices(u32, &.{1}, indexes.spawnableIndicesForMap(9));
-    try testing.expectEqualSlices(u32, &.{0}, indexes.spawnableIndicesForMapCell(8, 0, 0));
+    try testing.expectEqualSlices(u32, &.{ 0, 2 }, indexes.spawnableIndicesForMapCell(8, 0, 0));
     try testing.expectEqualSlices(u32, &.{4}, indexes.spawnableIndicesForMapCell(8, -1, 0));
 
     const range = spatialCellRange(0.0, 5000.0, 200.0).?;

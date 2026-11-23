@@ -18,6 +18,7 @@ const PlayerProgressComponent = @import("../component/player/PlayerProgressCompo
 const ProgressInfo = @import("../../fs/ProgressInfo.zig");
 const CalabashHelper = @import("calabash.zig");
 const MoraleHelper = @import("morale.zig");
+const GravityHelper = @import("gravity.zig");
 const Range = @import("../../data/tables/entity_components/Range.zig");
 const Scene = @import("../Scene.zig");
 
@@ -1054,16 +1055,11 @@ fn evalSingleProvideCondition(ctx: EvalContext, cond_item: std.json.Value) bool 
                 }
                 return true;
             } else if (std.mem.eql(u8, ctype, "Gender")) {
-                const gval = obj.get("Gender") orelse return true;
-                if (gval == .string) {
-                    if (std.mem.eql(u8, gval.string, "男")) return ctx.basic_comp.info.attributes.sex == 1;
-                    if (std.mem.eql(u8, gval.string, "女")) return ctx.basic_comp.info.attributes.sex == 0;
-                }
-                return true;
+                return evalPlayerGender(ctx, obj.get("Gender"));
             } else if (std.mem.eql(u8, ctype, "SystemState")) {
                 return evalSystemStateProvideCondition(ctx, obj);
             } else if (std.mem.eql(u8, ctype, "OpenDate")) {
-                return true;
+                return evalOpenDateCondition(ctx, obj);
             }
             return evalSingleInlineCondition(ctx, cond_item);
         },
@@ -1188,13 +1184,9 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
         const cur: i32 = if (isActivityOpen(ctx, aid)) 2 else 0;
         return compareInts(cur, want, cmp);
     } else if (std.mem.eql(u8, ct, "CheckPlayerGender")) {
-        const g = if (obj.get("Gender")) |v| switch (v) {
-            .string => |s| s,
-            else => return true,
-        } else return true;
-        if (std.mem.eql(u8, g, "男")) return ctx.basic_comp.info.attributes.sex == 1;
-        if (std.mem.eql(u8, g, "女")) return ctx.basic_comp.info.attributes.sex == 0;
-        return true;
+        return evalPlayerGender(ctx, obj.get("Gender"));
+    } else if (std.mem.eql(u8, ct, "OpenDate")) {
+        return evalOpenDateCondition(ctx, obj);
     } else if (std.mem.eql(u8, ct, "CheckPlayerMoraleLevelRange")) {
         const min_level = jsonInt(obj.get("MinMoraleLevel")) orelse return false;
         const max_level = jsonInt(obj.get("MaxMoraleLevel")) orelse return false;
@@ -1522,17 +1514,33 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
         return if (is_ne) !matched else matched;
     } else if (std.mem.eql(u8, ct, "UsingVehicle")) {
         const want_used = if (obj.get("CheckIsBeingUsed")) |v| if (v == .bool) v.bool else true else true;
-        const target_vid = jsonInt(obj.get("TargetVehicle")) orelse 0;
+        var target_vid: i64 = jsonInt(obj.get("TargetVehicle")) orelse 0;
+        if (target_vid == 0) {
+            if (obj.get("TargetVehicle")) |tv| {
+                if (tv == .object) {
+                    target_vid = jsonInt(tv.object.get("VehicleId")) orelse (jsonInt(tv.object.get("EntityId")) orelse 0);
+                }
+            }
+        }
+        const want_seat = jsonInt(obj.get("Seat")) orelse 999;
         const cur_vid: i64 = if (ctx.progress_comp) |pc| pc.info.getKeyInt("vehicle:cur") else 0;
         var is_used = if (target_vid > 0) cur_vid == target_vid else cur_vid > 0;
+        if (is_used and want_seat >= 0 and want_seat != 999) {
+            if (ctx.progress_comp) |pc| {
+                const cur_seat = pc.info.getKeyInt("vehicle:seat");
+                if (cur_seat >= 0 and cur_seat != want_seat) is_used = false;
+            }
+        }
         if (!is_used) {
             if (ctx.scene) |sc| {
                 const slice = sc.entities.slice();
                 for (slice.items(.config), slice.items(.vehicle)) |cfg, veh_opt| {
                     if (veh_opt) |veh| {
                         if (veh.occupied and (target_vid <= 0 or cfg.config_id == target_vid)) {
-                            is_used = true;
-                            break;
+                            if (want_seat < 0 or want_seat == 999 or cur_vid != cfg.config_id) {
+                                is_used = true;
+                                break;
+                            }
                         }
                     }
                 }
@@ -1541,17 +1549,30 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
         return is_used == want_used;
     } else if (std.mem.eql(u8, ct, "PlayerInVehicle")) {
         const want_in = if (obj.get("CheckType")) |v| if (v == .bool) v.bool else true else true;
+        const want_vtype = getParamStr(obj, "VehicleType") orelse "";
         const cur_vid: i64 = if (ctx.progress_comp) |pc| pc.info.getKeyInt("vehicle:cur") else 0;
-        var in_veh = cur_vid > 0;
+        var in_veh = cur_vid > 0 and matchesVehicleType(ctx, cur_vid, want_vtype);
         if (!in_veh) {
             if (ctx.scene) |sc| {
-                for (sc.entities.items(.vehicle)) |veh_opt| {
+                const slice = sc.entities.slice();
+                for (slice.items(.config), slice.items(.vehicle)) |cfg, veh_opt| {
                     if (veh_opt) |veh| {
-                        if (veh.occupied) {
+                        if (veh.occupied and matchesVehicleType(ctx, cfg.config_id, want_vtype)) {
                             in_veh = true;
                             break;
                         }
                     }
+                }
+            }
+        }
+        if (!in_veh and want_vtype.len > 0) {
+            if (std.mem.eql(u8, want_vtype, "FishingBoat")) {
+                if (ctx.progress_comp) |pc| {
+                    if (pc.info.getKeyInt("fish:boat_active") != 0) in_veh = true;
+                }
+            } else if (std.mem.eql(u8, want_vtype, "Motorcycle")) {
+                if (ctx.progress_comp) |pc| {
+                    if (pc.info.getKeyInt("motor:riding") != 0) in_veh = true;
                 }
             }
         }
@@ -1663,50 +1684,40 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
             .bool => |b| b,
             else => return false,
         } else true;
-        const cmp = if (obj.get("Compare")) |v| switch (v) {
-            .string => |s| s,
-            else => "Eq",
-        } else "Eq";
+        const cmp_opt = getParamStr(obj, "Compare");
+        const cmp = cmp_opt orelse "Eq";
         const scene = ctx.scene orelse return false;
-        const entity_id = if (std.mem.eql(u8, ct, "CheckEntityHasBuff")) blk: {
-            const target = obj.get("Target") orelse return false;
-            if (target != .object) return false;
-            const target_type = if (target.object.get("Type")) |v| switch (v) {
-                .string => |s| s,
-                else => return false,
-            } else return false;
-            if (!std.mem.eql(u8, target_type, "Monster")) return false;
-            const config_id = jsonInt(target.object.get("MonsterEntityId")) orelse return false;
-            break :blk scene.findEntityNetIdByConfigId(config_id) orelse return false;
-        } else scene.currentRoleEntityId();
+        const entity_id = if (std.mem.eql(u8, ct, "CheckEntityHasBuff"))
+            (resolveTargetNetId(scene, obj.get("Target")) orelse return false)
+        else
+            scene.currentRoleEntityId();
         const entity_index = scene.net_id_map.get(entity_id) orelse return false;
         if (entity_index >= scene.entities.len) return false;
         const has_buff = if (scene.entities.items(.buffs)[entity_index]) |buffs|
             buffs.hasBuffId(@intCast(buff_id))
         else
             false;
-        if (!std.mem.eql(u8, ct, "CheckEntityHasBuff")) {
+        if (!std.mem.eql(u8, ct, "CheckEntityHasBuff") or cmp_opt != null) {
             return compareInts(if (has_buff) 1 else 0, if (want_has_buff) 1 else 0, cmp);
         }
         return has_buff == want_has_buff;
     } else if (std.mem.eql(u8, ct, "CheckGameplayTag")) {
-        const tag_name = if (obj.get("GameplayTag")) |v| switch (v) {
-            .string => |s| s,
-            else => return false,
-        } else return false;
-        const cmp = if (obj.get("Compare")) |v| switch (v) {
-            .string => |s| s,
-            else => "Eq",
-        } else "Eq";
+        const tag_name = getParamStr(obj, "GameplayTag") orelse return false;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
         if (!std.mem.eql(u8, cmp, "Eq") and !std.mem.eql(u8, cmp, "Ne")) return false;
         const scene = ctx.scene orelse return false;
-        const role_id = scene.currentRoleEntityId();
-        const entity_index = scene.net_id_map.get(role_id) orelse return false;
+        const entity_id = if (obj.get("Target") != null)
+            (resolveTargetNetId(scene, obj.get("Target")) orelse return false)
+        else
+            scene.currentRoleEntityId();
+        const entity_index = scene.net_id_map.get(entity_id) orelse return false;
         if (entity_index >= scene.entities.len) return false;
-        const tag_component = scene.entities.items(.tag)[entity_index] orelse return false;
         const assets = ctx.assets orelse return false;
         const tag_id = gameplay_tags.idFromName(&assets.tables.gameplay_tag_remap, tag_name) catch return false;
-        const has_tag = tag_component.hasTag(&assets.tables.gameplay_tag_parent, tag_id);
+        const has_tag = if (scene.entities.items(.tag)[entity_index]) |tag_component|
+            tag_component.hasTag(&assets.tables.gameplay_tag_parent, tag_id)
+        else
+            false;
         return if (std.mem.eql(u8, cmp, "Eq")) has_tag else !has_tag;
     } else if (std.mem.eql(u8, ct, "CheckCertainFishingItemCount")) {
         const item_id = jsonInt(obj.get("Id")) orelse return false;
@@ -1819,69 +1830,55 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
         const option = obj.get("Option") orelse return false;
         if (option != .object) return false;
         const target_type = getParamStr(option.object, "Type") orelse return false;
-        const target_option = getParamStr(option.object, "Option") orelse return false;
-        if (!std.mem.eql(u8, target_type, "Player") or !std.mem.eql(u8, target_option, "AnyRole")) return false;
         const attributes = option.object.get("AttributeTypes") orelse return false;
         if (attributes != .array or attributes.array.items.len == 0) return false;
         const scene = ctx.scene orelse return false;
-        const formation_idx = std.math.cast(usize, scene.formation_info.cur_formation) orelse return false;
-        if (formation_idx >= scene.formation_info.formations.len) return false;
-        const formation = scene.formation_info.formations[formation_idx];
-        for (formation.roles) |maybe_role| {
-            const role = maybe_role orelse continue;
-            if (role.entity_id <= 0) continue;
-            const entity_idx = scene.net_id_map.get(role.entity_id) orelse continue;
-            if (entity_idx >= scene.entities.len) continue;
-            const attr = scene.entities.items(.attribute)[entity_idx] orelse continue;
-            var matches = true;
-            for (attributes.array.items) |attribute_condition| {
-                if (attribute_condition != .object) {
-                    matches = false;
-                    break;
-                }
-                const attribute_type = getParamStr(attribute_condition.object, "Type") orelse {
-                    matches = false;
-                    break;
-                };
-                if (!std.mem.eql(u8, attribute_type, "Health")) {
-                    matches = false;
-                    break;
-                }
-                const cmp = getParamStr(attribute_condition.object, "Compare") orelse {
-                    matches = false;
-                    break;
-                };
-                const value = attribute_condition.object.get("Value") orelse {
-                    matches = false;
-                    break;
-                };
-                const target_value: f64 = switch (value) {
-                    .integer => |v| @floatFromInt(v),
-                    .float => |v| v,
-                    else => {
-                        matches = false;
-                        break;
-                    },
-                };
-                const life_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.Life));
-                const max_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.LifeMax));
-                const current_life = attr.attributes[life_idx].current;
-                const max_life = attr.attributes[max_idx].current;
-                if (max_life <= 0 or !compareFloats(@as(f64, @floatFromInt(current_life)) / @as(f64, @floatFromInt(max_life)) * 100.0, target_value, cmp)) {
-                    matches = false;
-                    break;
-                }
+
+        if (std.mem.eql(u8, target_type, "Player")) {
+            const target_option = getParamStr(option.object, "Option") orelse "AnyRole";
+            if (std.mem.eql(u8, target_option, "CurRole") or std.mem.eql(u8, target_option, "Team")) {
+                const role_eid = scene.currentRoleEntityId();
+                const entity_idx = scene.net_id_map.get(role_eid) orelse return false;
+                return evalEntityAttributeConditionList(ctx, scene, entity_idx, attributes.array.items);
             }
-            if (matches) return true;
+            const formation_idx = std.math.cast(usize, scene.formation_info.cur_formation) orelse return false;
+            if (formation_idx >= scene.formation_info.formations.len) return false;
+            const formation = scene.formation_info.formations[formation_idx];
+            if (std.mem.eql(u8, target_option, "SpecifyRole")) {
+                const slot_idx = std.math.cast(usize, jsonInt(option.object.get("Index")) orelse 0) orelse return false;
+                if (slot_idx >= formation.roles.len) return false;
+                const role = formation.roles[slot_idx] orelse return false;
+                if (role.entity_id <= 0) return false;
+                const entity_idx = scene.net_id_map.get(role.entity_id) orelse return false;
+                return evalEntityAttributeConditionList(ctx, scene, entity_idx, attributes.array.items);
+            }
+            if (!std.mem.eql(u8, target_option, "AnyRole")) return false;
+            for (formation.roles) |maybe_role| {
+                const role = maybe_role orelse continue;
+                if (role.entity_id <= 0) continue;
+                const entity_idx = scene.net_id_map.get(role.entity_id) orelse continue;
+                if (evalEntityAttributeConditionList(ctx, scene, entity_idx, attributes.array.items)) return true;
+            }
+            return false;
         }
-        return false;
+        const net_id = resolveTargetNetId(scene, option) orelse return false;
+        const entity_idx = scene.net_id_map.get(net_id) orelse return false;
+        return evalEntityAttributeConditionList(ctx, scene, entity_idx, attributes.array.items);
     } else if (std.mem.eql(u8, ct, "CheckBvbChallengeState")) {
         const challenge_id = jsonInt(obj.get("ChallengeId")) orelse return false;
         const state = jsonInt(obj.get("ChallengeState")) orelse return false;
-        // Client enum: Default=0, Failed=1, Succeed=2. QuestEngine records
-        // completed BvB challenges only after successful completion.
-        if (state != 2) return false;
-        return containsInt(ctx.quest_comp.info.progress.completed_bvb, challenge_id);
+        const succeeded = containsInt(ctx.quest_comp.info.progress.completed_bvb, challenge_id);
+        if (state == 2) return succeeded;
+        var failed = false;
+        if (ctx.progress_comp) |pc| {
+            var kbuf: [48]u8 = undefined;
+            if (std.fmt.bufPrint(&kbuf, "bvb:state:{d}", .{challenge_id})) |k| {
+                failed = pc.info.getKeyInt(k) == 1;
+            } else |_| {}
+        }
+        if (state == 1) return !succeeded and failed;
+        if (state == 0) return !succeeded and !failed;
+        return false;
     } else if (std.mem.eql(u8, ct, "RangeSphere")) {
         const center_val = obj.get("Center") orelse return false;
         if (center_val != .object) return false;
@@ -1897,12 +1894,21 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
         return dx * dx + dy * dy + dz * dz <= radius * radius;
     } else if (std.mem.eql(u8, ct, "CheckDirection")) {
         const scene = ctx.scene orelse return false;
-        const dir_val = obj.get("Direction") orelse return true;
-        if (dir_val != .object) return true;
-        const target_yaw = jsonFloatVal(dir_val.object.get("Z")) orelse return true;
+        const dir_val = obj.get("Direction") orelse return false;
+        if (dir_val != .object) return false;
+        const target_yaw: f32 = if (dir_val.object.get("Z")) |zv|
+            (jsonFloatVal(zv) orelse return false)
+        else
+            0.0;
         const interval = jsonFloatVal(obj.get("AngleInterval")) orelse 60.0;
+        if (interval <= 0) return false;
         if (interval >= 180.0) return true;
-        const cur_yaw: f32 = if (scene.instance.players.len > 0) scene.instance.players[0].rotation[2] else return false;
+        var cur_yaw: f32 = if (scene.instance.players.len > 0) scene.instance.players[0].rotation[2] else return false;
+        if (obj.get("Target")) |target_val| {
+            const net_id = resolveTargetNetId(scene, target_val) orelse return false;
+            const idx = scene.net_id_map.get(net_id) orelse return false;
+            if (scene.entities.items(.position)[idx]) |pos| cur_yaw = pos.rotation[2];
+        }
         var diff = @mod(cur_yaw - target_yaw + 180.0, 360.0);
         if (diff < 0) diff += 360.0;
         diff = @abs(diff - 180.0);
@@ -2231,16 +2237,34 @@ fn isPosInsideRangeShapeDepth(
     const dy = local[1];
     const dz = local[2];
     const has_box_size = shape.Size != null and ((shape.Size.?.X orelse 0) > 0 or (shape.Size.?.Y orelse 0) > 0 or (shape.Size.?.Z orelse 0) > 0);
-    if (std.mem.eql(u8, stype, "Box") or (stype.len == 0 and has_box_size)) {
+    const is_box_like = std.mem.eql(u8, stype, "Box") or
+        std.mem.eql(u8, stype, "TransportBox") or
+        ((stype.len == 0 or std.mem.eql(u8, stype, "Volume") or std.mem.eql(u8, stype, "ActorCollision") or std.mem.eql(u8, stype, "ActorRefVolume")) and has_box_size);
+    if (is_box_like) {
         const sz = shape.Size orelse return false;
-        const sx = @max(sz.X orelse 0, 100.0);
-        const sy = @max(sz.Y orelse 0, 100.0);
-        const sz_v = @max(sz.Z orelse 0, 100.0);
+        const sx = if ((sz.X orelse 0) > 0) sz.X.? else 100.0;
+        const sy = if ((sz.Y orelse 0) > 0) sz.Y.? else 100.0;
+        const sz_v = if ((sz.Z orelse 0) > 0) sz.Z.? else 100.0;
         return @abs(dx) <= sx and @abs(dy) <= sy and @abs(dz) <= sz_v;
     }
 
     const r = @max(shape.Radius orelse default_radius, min_sphere_radius);
-    if (std.mem.eql(u8, stype, "Cylinder") or std.mem.eql(u8, stype, "HollowCylinder")) {
+    if (std.mem.eql(u8, stype, "Cone")) {
+        const dist_sq = dx * dx + dy * dy + dz * dz;
+        const max_r = if (shape.Height) |h| (if (h > 0) @max(r, h) else r) else r;
+        if (dist_sq > max_r * max_r) return false;
+        if (shape.Angle) |ang_deg| {
+            const dist = @sqrt(dist_sq);
+            if (dist > 0.001) {
+                const cos_half = @cos(@min(ang_deg * 0.5, 180.0) * (std.math.pi / 180.0));
+                if ((dx / dist) < cos_half) return false;
+            }
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, stype, "Cylinder") or std.mem.eql(u8, stype, "HollowCylinder") or
+        ((std.mem.eql(u8, stype, "Volume") or std.mem.eql(u8, stype, "ActorCollision") or std.mem.eql(u8, stype, "ActorRefVolume")) and shape.Height != null))
+    {
         const xy_sq = dx * dx + dy * dy;
         const half_h: f32 = if (shape.Height) |h| (if (h > 0) h * 0.5 else @max(r, 1500.0)) else @max(r, 1500.0);
         if (xy_sq > r * r or @abs(dz) > half_h) return false;
@@ -2549,45 +2573,200 @@ fn currentFormationRoleId(ctx: EvalContext, index: i32) ?i32 {
     return role.role_id;
 }
 
+fn evalPlayerGender(ctx: EvalContext, gval_opt: ?std.json.Value) bool {
+    const gval = gval_opt orelse return true;
+    const g = switch (gval) {
+        .string => |s| s,
+        else => return true,
+    };
+    if (std.mem.eql(u8, g, "男") or std.mem.eql(u8, g, "Male")) return ctx.basic_comp.info.attributes.sex == 1;
+    if (std.mem.eql(u8, g, "女") or std.mem.eql(u8, g, "Female")) return ctx.basic_comp.info.attributes.sex == 0;
+    return false;
+}
+
+fn evalOpenDateCondition(ctx: EvalContext, obj: std.json.ObjectMap) bool {
+    const date_id = jsonInt(obj.get("DateId")) orelse 0;
+    if (date_id > 0) {
+        if (ctx.progress_comp) |pc| {
+            var kbuf: [48]u8 = undefined;
+            if (std.fmt.bufPrint(&kbuf, "open_date:{d}", .{date_id})) |k| {
+                if (pc.info.getKeyInt(k) < 0) return false;
+            } else |_| {}
+        }
+    }
+    return true;
+}
+
+fn containsCaseInsensitive(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+fn matchesVehicleType(ctx: EvalContext, cfg_id: i64, want_vtype: []const u8) bool {
+    if (want_vtype.len == 0) return true;
+    if (ctx.assets) |assets| {
+        const map_id: i32 = if (ctx.scene) |sc| sc.instance_id else 8;
+        if (assets.findLevelEntity(map_id, cfg_id)) |cfg| {
+            if (containsCaseInsensitive(cfg.BlueprintType, want_vtype)) return true;
+            if (std.mem.eql(u8, want_vtype, "Motorcycle") and containsCaseInsensitive(cfg.BlueprintType, "Motor")) return true;
+            if (std.mem.eql(u8, want_vtype, "FishingBoat") and
+                (containsCaseInsensitive(cfg.BlueprintType, "Fishing") or containsCaseInsensitive(cfg.BlueprintType, "Boat"))) return true;
+            if (std.mem.eql(u8, want_vtype, "Gongduola") and containsCaseInsensitive(cfg.BlueprintType, "Gondola")) return true;
+        }
+    }
+    if (std.mem.eql(u8, want_vtype, "FishingBoat")) {
+        if (ctx.progress_comp) |pc| return pc.info.getKeyInt("fish:boat_active") != 0;
+    }
+    if (std.mem.eql(u8, want_vtype, "Motorcycle")) {
+        if (ctx.progress_comp) |pc| {
+            return pc.info.getKeyInt("motor:riding") != 0 or pc.info.getKeyInt("motor:summoned") != 0;
+        }
+    }
+    return false;
+}
+
+fn resolveTargetNetId(scene: *const Scene, target_val_opt: ?std.json.Value) ?i64 {
+    const target = target_val_opt orelse return null;
+    if (target != .object) return null;
+    const target_type = getParamStr(target.object, "Type") orelse return null;
+    if (std.mem.eql(u8, target_type, "Player")) {
+        const eid = scene.currentRoleEntityId();
+        return if (eid > 0) eid else null;
+    }
+    if (std.mem.eql(u8, target_type, "OnlinePlayer")) {
+        const eid = scene.currentRoleEntityId();
+        return if (eid > 0) eid else null;
+    }
+    if (std.mem.eql(u8, target_type, "Monster")) {
+        const cfg_id = jsonInt(target.object.get("MonsterEntityId")) orelse (jsonInt(target.object.get("EntityId")) orelse return null);
+        return scene.findEntityNetIdByConfigId(cfg_id);
+    }
+    if (std.mem.eql(u8, target_type, "Entity") or
+        std.mem.eql(u8, target_type, "Target") or
+        std.mem.eql(u8, target_type, "Npc") or
+        std.mem.eql(u8, target_type, "SceneItem"))
+    {
+        const cfg_id = jsonInt(target.object.get("EntityId")) orelse (jsonInt(target.object.get("NpcEntityId")) orelse return null);
+        return scene.findEntityNetIdByConfigId(cfg_id);
+    }
+    return null;
+}
+
+fn evalEntityAttributeConditionList(
+    ctx: EvalContext,
+    scene: *const Scene,
+    entity_idx: usize,
+    items: []const std.json.Value,
+) bool {
+    if (entity_idx >= scene.entities.len) return false;
+    const attr = scene.entities.items(.attribute)[entity_idx] orelse return false;
+    const buffs_opt = scene.entities.items(.buffs)[entity_idx];
+
+    for (items) |attribute_condition| {
+        if (attribute_condition != .object) return false;
+        const attribute_type = getParamStr(attribute_condition.object, "Type") orelse return false;
+        const cmp = getParamStr(attribute_condition.object, "Compare") orelse return false;
+        const value = attribute_condition.object.get("Value") orelse return false;
+        const target_value: f64 = switch (value) {
+            .integer => |v| @floatFromInt(v),
+            .float => |v| v,
+            else => return false,
+        };
+        const life_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.Life));
+        const max_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.LifeMax));
+        const max_life = attr.attributes[max_idx].current;
+
+        const actual_val: f64 = if (std.mem.eql(u8, attribute_type, "Health")) blk: {
+            if (max_life <= 0) return false;
+            break :blk @as(f64, @floatFromInt(attr.attributes[life_idx].current)) / @as(f64, @floatFromInt(max_life)) * 100.0;
+        } else if (std.mem.eql(u8, attribute_type, "Energy")) blk: {
+            const e_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.Energy));
+            const emax_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.EnergyMax));
+            const cur_e = attr.attributes[e_idx].current;
+            const max_e = attr.attributes[emax_idx].current;
+            break :blk if (max_e > 0) @as(f64, @floatFromInt(cur_e)) / @as(f64, @floatFromInt(max_e)) * 100.0 else @as(f64, @floatFromInt(cur_e));
+        } else if (std.mem.eql(u8, attribute_type, "Shield")) blk: {
+            var total_shield: i64 = 0;
+            if (buffs_opt) |b| {
+                for (b.shields) |entry| total_shield += entry.current;
+            }
+            break :blk if (max_life > 0) @as(f64, @floatFromInt(total_shield)) / @as(f64, @floatFromInt(max_life)) * 100.0 else @as(f64, @floatFromInt(total_shield));
+        } else if (std.mem.eql(u8, attribute_type, "StabilityPoint") or std.mem.eql(u8, attribute_type, "Tough")) blk: {
+            const t_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.Tough));
+            const tmax_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.ToughMax));
+            const cur_t = attr.attributes[t_idx].current;
+            const max_t = attr.attributes[tmax_idx].current;
+            if (max_t > 0) break :blk @as(f64, @floatFromInt(cur_t)) / @as(f64, @floatFromInt(max_t)) * 100.0;
+            if (ctx.progress_comp) |pc| {
+                const st = pc.info.getKeyInt("team:stability");
+                if (st > 0) break :blk @as(f64, @floatFromInt(st));
+            }
+            return false;
+        } else return false;
+
+        if (!compareFloats(actual_val, target_value, cmp)) return false;
+    }
+    return true;
+}
+
 fn evalEntityGravityDirection(ctx: EvalContext, obj: std.json.ObjectMap) bool {
-    // QuestNodeData uses the online host as the target and one of the six
-    // world axes as the expected direction. This reads the server entity's
-    // configured gravity; runtime gravity changes made only by the client
-    // are not mirrored into the server scene yet.
-    const target = obj.get("Target") orelse return false;
-    if (target != .object or !jsonHasType(target.object, "OnlinePlayer")) return false;
-    const target_option = target.object.get("OnlinePlayerConditionTargetOption") orelse return false;
-    if (target_option != .object or !jsonHasType(target_option.object, "Host")) return false;
-
-    const direction = obj.get("GravityDirection") orelse return false;
-    if (direction != .object or !jsonHasType(direction.object, "WorldAxis")) return false;
-    const axis = getParamStr(direction.object, "WorldAxis") orelse return false;
-    const expected: [3]f32 = if (std.mem.eql(u8, axis, "PositiveX"))
-        .{ 1, 0, 0 }
-    else if (std.mem.eql(u8, axis, "NegativeX"))
-        .{ -1, 0, 0 }
-    else if (std.mem.eql(u8, axis, "PositiveY"))
-        .{ 0, 1, 0 }
-    else if (std.mem.eql(u8, axis, "NegativeY"))
-        .{ 0, -1, 0 }
-    else if (std.mem.eql(u8, axis, "PositiveZ"))
-        .{ 0, 0, 1 }
-    else if (std.mem.eql(u8, axis, "NegativeZ"))
-        .{ 0, 0, -1 }
-    else
-        return false;
-
     const scene = ctx.scene orelse return false;
-    const entity_id = scene.currentRoleEntityId();
+    const entity_id = if (obj.get("Target")) |target| blk: {
+        if (target != .object) return false;
+        const ty = getParamStr(target.object, "Type") orelse return false;
+        if (std.mem.eql(u8, ty, "OnlinePlayer")) {
+            const opt = target.object.get("OnlinePlayerConditionTargetOption") orelse return false;
+            if (opt != .object) return false;
+            const opt_ty = getParamStr(opt.object, "Type") orelse return false;
+            if (!std.mem.eql(u8, opt_ty, "Host") and !std.mem.eql(u8, opt_ty, "Participator")) return false;
+            break :blk scene.currentRoleEntityId();
+        }
+        break :blk resolveTargetNetId(scene, target) orelse return false;
+    } else scene.currentRoleEntityId();
     if (entity_id <= 0) return false;
     const entity_index = scene.net_id_map.get(entity_id) orelse return false;
     if (entity_index >= scene.entities.len) return false;
-    // Client gravity components default to world down when no custom gravity
-    // is configured; EntityPb serialization uses the same default.
+
+    const ent_rot: [3]f32 = if (scene.entities.items(.position)[entity_index]) |p| p.rotation else .{ 0, 0, 0 };
+    const direction = obj.get("GravityDirection") orelse return false;
+    if (direction != .object) return false;
+    const dir_type = getParamStr(direction.object, "Type") orelse return false;
+
+    const expected: [3]f32 = if (std.mem.eql(u8, dir_type, "WorldAxis")) blk: {
+        const axis = getParamStr(direction.object, "WorldAxis") orelse return false;
+        const res = GravityHelper.resolveDirection(.{ .Type = "WorldAxis", .WorldAxis = axis }, ent_rot);
+        if (!res.configured) return false;
+        break :blk res.dir;
+    } else if (std.mem.eql(u8, dir_type, "SelfRotation")) blk: {
+        const res = GravityHelper.resolveDirection(.{ .Type = "SelfRotation" }, ent_rot);
+        break :blk res.dir;
+    } else if (std.mem.eql(u8, dir_type, "Vector") or std.mem.eql(u8, dir_type, "VectorInfo") or std.mem.eql(u8, dir_type, "Direction")) blk: {
+        const vec_val = direction.object.get("Direction") orelse direction.object.get("Vector") orelse direction.object.get("VectorInfo") orelse return false;
+        if (vec_val != .object) return false;
+        const vx = jsonFloatVal(vec_val.object.get("X")) orelse 0;
+        const vy = jsonFloatVal(vec_val.object.get("Y")) orelse 0;
+        const vz = jsonFloatVal(vec_val.object.get("Z")) orelse 0;
+        const len = @sqrt(vx * vx + vy * vy + vz * vz);
+        if (len <= 0.0001) return false;
+        break :blk .{ vx / len, vy / len, vz / len };
+    } else return false;
+
     const actual: [3]f32 = if (scene.entities.items(.world_item)[entity_index].gravity) |gravity|
         gravity.location
-    else
-        .{ 0, 0, -1 };
+    else if (ctx.assets) |assets| blk: {
+        const cfg_id = scene.entities.items(.config)[entity_index].config_id;
+        if (assets.findLevelEntity(scene.instance_id, cfg_id)) |lcfg| {
+            const gres = GravityHelper.resolveEntityGravity(lcfg, ent_rot);
+            if (gres.configured) break :blk gres.dir;
+        }
+        break :blk .{ 0, 0, -1 };
+    } else .{ 0, 0, -1 };
+
     var matches = true;
     for (actual, expected) |actual_component, expected_component| {
         const rounded_actual = @round(actual_component * 1000.0) / 1000.0;
@@ -2724,6 +2903,8 @@ fn evalPlayerSkillReady(ctx: EvalContext, obj: std.json.ObjectMap) bool {
     const slice = scene.entities.slice();
     if (std.mem.eql(u8, skill_type, "UltimateSkill")) {
         const attr = slice.items(.attribute)[idx] orelse return false;
+        const life_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.Life));
+        if (attr.attributes[life_idx].current <= 0) return false;
         const energy_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.Energy));
         const max_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.EnergyMax));
         const cur = attr.attributes[energy_idx].current;
@@ -2733,9 +2914,20 @@ fn evalPlayerSkillReady(ctx: EvalContext, obj: std.json.ObjectMap) bool {
     if (std.mem.eql(u8, skill_type, "ESkill")) {
         const attr = slice.items(.attribute)[idx] orelse return true;
         const life_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.Life));
-        return attr.attributes[life_idx].current > 0;
+        if (attr.attributes[life_idx].current <= 0) return false;
+        if (ctx.progress_comp) |pc| {
+            var kbuf: [48]u8 = undefined;
+            if (std.fmt.bufPrint(&kbuf, "skill_cd:e:{d}", .{role_net_id})) |k| {
+                if (pc.info.getKeyInt(k) > 0) return false;
+            } else |_| {}
+        }
+        return true;
     }
     if (std.mem.eql(u8, skill_type, "VisionSkill")) {
+        if (slice.items(.attribute)[idx]) |attr| {
+            const life_idx: usize = @intCast(@intFromEnum(pb.EAttributeType.Life));
+            if (attr.attributes[life_idx].current <= 0) return false;
+        }
         if (slice.items(.vision_skills)[idx]) |vs| {
             if (vs.vision_skills.len > 0) return true;
         }

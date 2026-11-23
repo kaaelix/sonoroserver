@@ -10,8 +10,10 @@ const PlayerProgressComponent = @import("../../logic/component/player/PlayerProg
 const Assets = @import("../../data/Assets.zig");
 const EnergyHelper = @import("../../logic/helpers/energy.zig");
 const PlayerID = @import("../../logic/PlayerID.zig");
+const Scene = @import("../../logic/Scene.zig");
 const QuestInfo = @import("../../fs/QuestInfo.zig");
 const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
+const attributes_helper = @import("../../logic/helpers/attributes.zig");
 
 const res_log = std.log.scoped(.quest_resource);
 
@@ -243,10 +245,21 @@ pub fn onEntityPatrolStartRequest(
     txn: *Transaction(pb.EntityPatrolStartRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     progress_comp: *PlayerProgressComponent,
 ) !void {
+    const dir_val: i64 = if (txn.message.Dir) 1 else 0;
     const key = try std.fmt.allocPrint(alloc.arena, "patrol:dir:{d}", .{txn.message.EntityId});
-    try progress_comp.info.setKeyInt(alloc.gpa, key, if (txn.message.Dir) 1 else 0);
+    try progress_comp.info.setKeyInt(alloc.gpa, key, dir_val);
+    if (scene_opt.*) |*scene| {
+        if (scene.findConfigIdByNetId(txn.message.EntityId)) |cfg_id| {
+            const cfg_key = try std.fmt.allocPrint(alloc.arena, "patrol:dir:{d}", .{cfg_id});
+            try progress_comp.info.setKeyInt(alloc.gpa, cfg_key, dir_val);
+        }
+        if (scene.net_id_map.get(txn.message.EntityId)) |idx| {
+            scene.entities.items(.world_item)[idx].patrol_dir = txn.message.Dir;
+        }
+    }
     try progress_comp.save(fs, alloc.arena);
     txn.respond(.{ .Code = .Success });
 }
@@ -254,12 +267,50 @@ pub fn onEntityPatrolStartRequest(
 pub fn onLandingDamageRequest(
     txn: *Transaction(pb.LandingDamageRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     _ = try progress_comp.info.addKeyInt(alloc.gpa, "combat:fall_dmg_cnt", 1);
     try progress_comp.save(fs, alloc.arena);
+
+    const speed = @abs(txn.message.SpeedZ);
+    if (speed > 1200.0 or txn.message.TimeExceeding > 0) {
+        if (scene_opt.*) |*scene| {
+            const target_nid = if (txn.message.EntityId > 0) txn.message.EntityId else scene.currentRoleEntityId();
+            if (scene.net_id_map.get(target_nid)) |idx| {
+                if (scene.entities.items(.attribute)[idx]) |*attr| {
+                    const life_idx = @intFromEnum(pb.EAttributeType.Life);
+                    const max_idx = @intFromEnum(pb.EAttributeType.LifeMax);
+                    const cur_hp = attr.attributes[life_idx].current;
+                    const max_hp = attr.attributes[max_idx].current;
+                    if (cur_hp > 0 and max_hp > 0) {
+                        const raw_ratio = if (speed > 1200.0)
+                            (speed - 1200.0) / 2500.0
+                        else
+                            @as(f32, @floatFromInt(@min(txn.message.TimeExceeding, 10))) * 0.08;
+                        const clamped_ratio = std.math.clamp(raw_ratio, 0.05, 0.90);
+                        const dmg: i32 = @max(1, @as(i32, @intFromFloat(@as(f32, @floatFromInt(max_hp)) * clamped_ratio)));
+                        const next_hp = @max(1, cur_hp - dmg);
+                        _ = attributes_helper.set_life_unconditional(attr, next_hp);
+                        var changed: std.ArrayList(pb.EAttributeType) = .empty;
+                        try changed.append(alloc.arena, .Life);
+                        var cpack: std.ArrayList(pb.CombatReceiveData) = .empty;
+                        try attributes_helper.generate_attr_messages(&cpack, target_nid, attr, &changed, alloc, io);
+                        if (cpack.items.len > 0) {
+                            try txn.conn.push(alloc.gpa, io, pb.CombatReceivePackNotify{ .Data = cpack });
+                        }
+                        scene.markFsmDirty(alloc.gpa, target_nid, Scene.Entity.FsmComponent.WakeReason.attribute) catch {};
+                    }
+                }
+            }
+        }
+    }
+
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onSceneBlockChangePush(_: *Transaction(pb.SceneBlockChangePush)) !void {}

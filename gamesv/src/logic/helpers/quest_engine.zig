@@ -46,6 +46,7 @@ pub const emitEntityStateTagUpdate = QuestActions.emitEntityStateTagUpdate;
 pub const entityDataLayersActive = QuestActions.entityDataLayersActive;
 pub const syncPersistedVehicleNpcLinks = QuestActions.syncPersistedVehicleNpcLinks;
 pub const updatePlayerSceneState = QuestActions.updatePlayerSceneState;
+pub const leaveCurrentDungeon = QuestActions.leaveCurrentDungeon;
 pub const executeActionList = QuestActions.executeActionList;
 
 const StepResult = enum {
@@ -1438,6 +1439,9 @@ pub fn onLevelSequenceMarkReached(ctx: QuestContext, entity_config_id: i32, mark
     if (try advanceMatchingChildNodes(ctx, Match{ .entity_id = entity_config_id, .mark = mark }, Check.run)) {
         try finalizeProgression(ctx);
     }
+    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+        try LevelPlayHelper.onLevelSequenceMarkReached(lp_ctx, entity_config_id, mark);
+    }
 }
 
 pub fn onLevelPlayCompleted(ctx: QuestContext, level_play_id: i32) !void {
@@ -1818,6 +1822,10 @@ pub fn onBtGiveUp(ctx: QuestContext, owner_id: i32, tree_inc_id: i64, node_id: i
         }) catch {};
         try rollbackQuestToNode(ctx, quest_id, node_id, .GiveUpFail, false);
         try finalizeProgression(ctx);
+    } else if (quest_id > 0 and QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, quest_id)) {
+        if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+            try LevelPlayHelper.onBtRollback(lp_ctx, quest_id, node_id, .GiveUpFail);
+        }
     }
 }
 
@@ -1829,6 +1837,10 @@ pub fn onBtRollback(ctx: QuestContext, owner_id: i32, tree_inc_id: i64, _: i32) 
     if (quest_id > 0 and ctx.quest_comp.info.hasActiveQuest(quest_id)) {
         try rollbackQuestToNode(ctx, quest_id, 0, .DefaultFail, true);
         try finalizeProgression(ctx);
+    } else if (quest_id > 0 and QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, quest_id)) {
+        if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+            try LevelPlayHelper.onBtRollback(lp_ctx, quest_id, 0, .DefaultFail);
+        }
     }
 }
 
@@ -1849,6 +1861,10 @@ pub fn onForcedOccupation(ctx: QuestContext, tree_inc_id: i64) !void {
     if (target_owner > 0 and ctx.quest_comp.info.hasActiveQuest(target_owner)) {
         try advanceQuestTree(ctx, target_owner, true);
         try finalizeProgression(ctx);
+    } else if (target_owner > 0 and QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, target_owner)) {
+        if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+            try LevelPlayHelper.stepEnteredTreeById(lp_ctx, target_owner);
+        }
     }
 }
 
@@ -2258,21 +2274,26 @@ pub fn onBtTimerEnd(ctx: QuestContext, owner_id: i32, inc_id: i64, timer_type: [
         _ = scene.removeBtTimer(ctx.alloc.gpa, owner_id, inc_id, timer_type);
     }
     if (owner_id > 0) {
-        const aq = ctx.quest_comp.info.findActiveQuest(owner_id) orelse return;
-        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, owner_id) catch return;
-        const node_ids = try ctx.alloc.arena.dupe(i32, aq.active_nodes);
-        var progressed = false;
-        for (node_ids) |nid| {
-            const node = findNodeById(nodes, nid) orelse continue;
-            if (!std.mem.eql(u8, node.node_type, "ChildQuest")) continue;
-            const cond = getChildCondition(node.data) orelse continue;
-            const ctype = jsonStr(cond.get("Type")) orelse continue;
-            if (!std.mem.eql(u8, ctype, "Timer") and !std.mem.eql(u8, ctype, "WaitTime")) continue;
-            try completeChildQuest(ctx, owner_id, nodes, node.*);
-            progressed = true;
-            break;
+        if (ctx.quest_comp.info.findActiveQuest(owner_id)) |aq| {
+            const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, owner_id) catch return;
+            const node_ids = try ctx.alloc.arena.dupe(i32, aq.active_nodes);
+            var progressed = false;
+            for (node_ids) |nid| {
+                const node = findNodeById(nodes, nid) orelse continue;
+                if (!std.mem.eql(u8, node.node_type, "ChildQuest")) continue;
+                const cond = getChildCondition(node.data) orelse continue;
+                const ctype = jsonStr(cond.get("Type")) orelse continue;
+                if (!std.mem.eql(u8, ctype, "Timer") and !std.mem.eql(u8, ctype, "WaitTime")) continue;
+                try completeChildQuest(ctx, owner_id, nodes, node.*);
+                progressed = true;
+                break;
+            }
+            if (progressed) try finalizeProgression(ctx);
+        } else if (QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, owner_id)) {
+            if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+                _ = try LevelPlayHelper.onBtTimerEnd(lp_ctx, owner_id);
+            }
         }
-        if (progressed) try finalizeProgression(ctx);
     }
 }
 
@@ -2743,6 +2764,11 @@ pub fn onConditionStateChanged(ctx: QuestContext) !void {
     if (try checkActiveQuestFailedMonitors(ctx, null)) {
         cond_prog = true;
     }
+    if (refresh_loop_depth == 0) {
+        if (try stepPendingControlNodes(ctx)) {
+            cond_prog = true;
+        }
+    }
     if (cond_prog or quest_added) {
         try finalizeProgression(ctx);
     }
@@ -3050,6 +3076,37 @@ fn recheckPendingConditionsPass(ctx: QuestContext) !bool {
     return try advanceMatchingChildNodes(ctx, {}, Check.run);
 }
 
+fn stepPendingControlNodes(ctx: QuestContext) !bool {
+    const active_snapshot = try snapshotActiveQuestIds(ctx);
+    var progressed = false;
+    for (active_snapshot) |qid| {
+        const aq = ctx.quest_comp.info.findActiveQuest(qid) orelse continue;
+        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, qid) catch continue;
+        var has_control = false;
+        for (nodes) |n| {
+            if (QuestInfo.isNodeFinished(aq, n.id)) continue;
+            if (std.mem.eql(u8, n.node_type, "Condition") or
+                std.mem.eql(u8, n.node_type, "ConditionSelector") or
+                std.mem.eql(u8, n.node_type, "Repeater") or
+                std.mem.eql(u8, n.node_type, "Parallel") or
+                std.mem.eql(u8, n.node_type, "ParallelSelect"))
+            {
+                has_control = true;
+                break;
+            }
+        }
+        if (has_control) {
+            try advanceQuestTree(ctx, qid, true);
+            progressed = true;
+        }
+    }
+    return progressed;
+}
+
+pub fn recheckAndStepActiveTrees(ctx: QuestContext) !void {
+    try onConditionStateChanged(ctx);
+}
+
 fn refreshDailyQuests(ctx: QuestContext, push_updates: bool) !bool {
     if (!ctx.quest_comp.info.hasFinishedQuest(prologue_quest_id)) return false;
 
@@ -3321,8 +3378,9 @@ fn stepNode(
         if (any_child and node.parent_id != 0) return .failed;
         try finishNonChildNode(ctx, quest_id, node, push_updates);
         return .completed;
-    } else if (std.mem.eql(u8, node.node_type, "ParallelSelect")) {
-        const needed: i32 = @max(1, node.count);
+    } else if (std.mem.eql(u8, node.node_type, "ParallelSelect") or std.mem.eql(u8, node.node_type, "Parallel")) {
+        const is_parallel_all = std.mem.eql(u8, node.node_type, "Parallel");
+        const needed_sel: i32 = @max(1, node.count);
         var finished_count: i32 = 0;
         var failed_count: i32 = 0;
         var total_children: i32 = 0;
@@ -3345,7 +3403,7 @@ fn stepNode(
                 },
                 .completed => {
                     finished_count += 1;
-                    if (finished_count >= needed) break;
+                    if (!is_parallel_all and finished_count >= needed_sel) break;
                 },
                 .failed => {
                     failed_count += 1;
@@ -3355,13 +3413,24 @@ fn stepNode(
         }
         if (any_ended or !ctx.quest_comp.info.hasActiveQuest(quest_id)) return .quest_ended;
 
+        const needed: i32 = if (is_parallel_all) total_children else needed_sel;
+        if (is_parallel_all and failed_count > 0) return .failed;
         if (finished_count >= needed) {
-            try deactivateSubtree(ctx, quest_id, nodes, node.id, push_updates);
+            if (!is_parallel_all) {
+                try deactivateSubtree(ctx, quest_id, nodes, node.id, push_updates);
+            }
             try finishNonChildNode(ctx, quest_id, node, push_updates);
             return .completed;
         }
-        if (node.parent_id != 0 and total_children > 0 and (total_children - failed_count) < needed) {
+        if (!is_parallel_all and node.parent_id != 0 and total_children > 0 and (total_children - failed_count) < needed) {
             return .failed;
+        }
+        return .running;
+    } else if (std.mem.eql(u8, node.node_type, "AlwaysPending")) {
+        for (nodes) |child| {
+            if (child.parent_id != node.id) continue;
+            const res = try stepNode(ctx, quest_id, nodes, child, push_updates, steps);
+            if (res == .quest_ended) return .quest_ended;
         }
         return .running;
     } else if (std.mem.eql(u8, node.node_type, "AlwaysFalse")) {
@@ -3462,7 +3531,6 @@ fn stepNode(
         }
         return if (wait_true) .running else .failed;
     } else if (std.mem.eql(u8, node.node_type, "ConditionSelector")) {
-        var selected_child_id: ?i32 = null;
         if (node.data == .object) {
             if (node.data.object.get("Slots")) |slots_val| {
                 if (slots_val == .array) {
@@ -3473,23 +3541,21 @@ fn stepNode(
                         else
                             true;
                         if (!pass) continue;
-                        if (slot.object.get("Node")) |sn| {
-                            if (sn == .object) {
-                                selected_child_id = jsonInt(sn.object.get("Id"));
-                                break;
-                            }
+                        const sn = slot.object.get("Node") orelse continue;
+                        if (sn != .object) continue;
+                        const cid = jsonInt(sn.object.get("Id")) orelse continue;
+                        const cnode = findNodeById(nodes, cid) orelse continue;
+                        const res = try stepNode(ctx, quest_id, nodes, cnode.*, push_updates, steps);
+                        switch (res) {
+                            .completed => {
+                                try finishNonChildNode(ctx, quest_id, node, push_updates);
+                                return .completed;
+                            },
+                            .running, .quest_ended => return res,
+                            .failed => continue,
                         }
                     }
                 }
-            }
-        }
-        if (selected_child_id) |cid| {
-            if (findNodeById(nodes, cid)) |cnode| {
-                const res = try stepNode(ctx, quest_id, nodes, cnode.*, push_updates, steps);
-                if (res == .completed) {
-                    try finishNonChildNode(ctx, quest_id, node, push_updates);
-                }
-                return res;
             }
         }
         return .running;
@@ -3514,14 +3580,16 @@ fn stepNode(
                     child_completed = true;
                     break;
                 }
-                if (res == .failed) return .running;
                 return .running;
             }
-            if (!any_child or !child_completed) break;
+            if (!any_child) {
+                try finishNonChildNode(ctx, quest_id, node, push_updates);
+                return .completed;
+            }
+            if (!child_completed) return .running;
+            try resetQuestSubtreeFinishedNodes(ctx, quest_id, nodes, node.id);
         }
-        if (steps.* >= max_steps_per_advance) return .running;
-        try finishNonChildNode(ctx, quest_id, node, push_updates);
-        return .completed;
+        return .running;
     } else if (std.mem.eql(u8, node.node_type, "ChildQuest")) {
         return try stepChildQuest(ctx, quest_id, nodes, node, push_updates);
     }
@@ -4451,12 +4519,15 @@ fn resolveSceneOrAssetEntityPos3D(ctx: QuestContext, cfg_id: i32) ?[3]f32 {
     return null;
 }
 
-fn extendFailTimersOnKill(ctx: QuestContext) !bool {
-    const scene = ctx.scene orelse return false;
+fn extendFailTimersOnKillInQueue(
+    ctx: QuestContext,
+    timers: *Scene.QuestTimerQueue,
+    store: LazyNodeStore,
+) !bool {
     var extended = false;
-    const items = try ctx.alloc.arena.dupe(@TypeOf(scene.fail_timers.heap.items[0]), scene.fail_timers.heap.items);
+    const items = try ctx.alloc.arena.dupe(@TypeOf(timers.heap.items[0]), timers.heap.items);
     for (items) |entry| {
-        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, entry.quest_id) catch continue;
+        const nodes = store.getOwnerNodes(ctx.io, entry.quest_id) catch continue;
         const node = findNodeById(nodes, entry.node_id) orelse continue;
         if (node.data != .object) continue;
         const fc_val = node.data.object.get("FailedCondition") orelse continue;
@@ -4468,7 +4539,7 @@ fn extendFailTimersOnKill(ctx: QuestContext) !bool {
         const add_secs = jsonFloat(mc.object.get("NormalAddTime")) orelse 0;
         if (add_secs <= 0) continue;
         const new_due = entry.due_ms + @as(i64, @intFromFloat(@round(@as(f64, add_secs) * 1000.0)));
-        try scene.fail_timers.upsert(ctx.alloc.gpa, .{
+        try timers.upsert(ctx.alloc.gpa, .{
             .quest_id = entry.quest_id,
             .node_id = entry.node_id,
             .due_ms = new_due,
@@ -4478,12 +4549,26 @@ fn extendFailTimersOnKill(ctx: QuestContext) !bool {
     return extended;
 }
 
-fn extendFailTimersOnEntityState(ctx: QuestContext, entity_config_id: i32, state_name: []const u8) !bool {
+fn extendFailTimersOnKill(ctx: QuestContext) !bool {
     const scene = ctx.scene orelse return false;
+    var extended = try extendFailTimersOnKillInQueue(ctx, &scene.fail_timers, ctx.assets.quest_nodes);
+    if (try extendFailTimersOnKillInQueue(ctx, &scene.lp_fail_timers, ctx.assets.level_play_nodes)) {
+        extended = true;
+    }
+    return extended;
+}
+
+fn extendFailTimersOnEntityStateInQueue(
+    ctx: QuestContext,
+    timers: *Scene.QuestTimerQueue,
+    store: LazyNodeStore,
+    entity_config_id: i32,
+    state_name: []const u8,
+) !bool {
     var extended = false;
-    const items = try ctx.alloc.arena.dupe(@TypeOf(scene.fail_timers.heap.items[0]), scene.fail_timers.heap.items);
+    const items = try ctx.alloc.arena.dupe(@TypeOf(timers.heap.items[0]), timers.heap.items);
     for (items) |entry| {
-        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, entry.quest_id) catch continue;
+        const nodes = store.getOwnerNodes(ctx.io, entry.quest_id) catch continue;
         const node = findNodeById(nodes, entry.node_id) orelse continue;
         if (node.data != .object) continue;
         const fc_val = node.data.object.get("FailedCondition") orelse continue;
@@ -4505,11 +4590,20 @@ fn extendFailTimersOnEntityState(ctx: QuestContext, entity_config_id: i32, state
         }
         if (add_secs <= 0) continue;
         const new_due = entry.due_ms + @as(i64, @intFromFloat(@round(@as(f64, add_secs) * 1000.0)));
-        try scene.fail_timers.upsert(ctx.alloc.gpa, .{
+        try timers.upsert(ctx.alloc.gpa, .{
             .quest_id = entry.quest_id,
             .node_id = entry.node_id,
             .due_ms = new_due,
         });
+        extended = true;
+    }
+    return extended;
+}
+
+fn extendFailTimersOnEntityState(ctx: QuestContext, entity_config_id: i32, state_name: []const u8) !bool {
+    const scene = ctx.scene orelse return false;
+    var extended = try extendFailTimersOnEntityStateInQueue(ctx, &scene.fail_timers, ctx.assets.quest_nodes, entity_config_id, state_name);
+    if (try extendFailTimersOnEntityStateInQueue(ctx, &scene.lp_fail_timers, ctx.assets.level_play_nodes, entity_config_id, state_name)) {
         extended = true;
     }
     return extended;
@@ -4712,6 +4806,21 @@ fn succeedQuest(ctx: QuestContext, quest_id: i32) anyerror!void {
     _ = try recheckPendingConditions(ctx);
     if (quest_transition_depth <= 1 and refresh_loop_depth == 0) {
         try QuestActions.pushFuncOpen(ctx);
+    }
+}
+
+fn resetQuestSubtreeFinishedNodes(
+    ctx: QuestContext,
+    quest_id: i32,
+    nodes: []const LazyNodeStore.NodeEntry,
+    parent_id: i32,
+) !void {
+    const aq_ptr = ctx.quest_comp.info.findActiveQuestPtr(quest_id) orelse return;
+    for (nodes) |n| {
+        if (n.parent_id != parent_id) continue;
+        _ = try QuestInfo.removeIntValue(&aq_ptr.finished_nodes, ctx.alloc.gpa, n.id);
+        _ = try QuestInfo.markNodeInactive(aq_ptr, ctx.alloc.gpa, n.id);
+        try resetQuestSubtreeFinishedNodes(ctx, quest_id, nodes, n.id);
     }
 }
 

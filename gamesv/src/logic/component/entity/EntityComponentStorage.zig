@@ -37,6 +37,12 @@ pub const WorldItemState = struct {
     hack_target_present: bool = false,
     pulling_foundation_present: bool = false,
     spirit_gear_present: bool = false,
+    be_controlled_player_id: ?i64 = null,
+    be_controlled_show: bool = false,
+    npc_spline_id: i32 = 0,
+    npc_spawn_id: i32 = 0,
+    hold_hand_target_id: ?i64 = null,
+    hold_hand_type: i32 = 0,
 };
 
 entity_id: struct { net_id: i64 },
@@ -439,12 +445,58 @@ pub fn entityToProto(
         });
     }
 
+    if (storage.world_item.be_controlled_player_id != null or storage.world_item.be_controlled_show) {
+        try entity.ComponentPbs.append(alloc.arena, .{
+            .ComponentPb = .{ .BeControlledComponentPb = .{
+                .PlayerEntityId = storage.world_item.be_controlled_player_id orelse 0,
+                .IsShow = storage.world_item.be_controlled_show,
+            } },
+        });
+    }
+
+    if (storage.config.entity_type == .npc and (storage.world_item.npc_spline_id != 0 or storage.world_item.npc_spawn_id != 0)) {
+        try entity.ComponentPbs.append(alloc.arena, .{
+            .ComponentPb = .{ .NpcPb = .{
+                .SplineEntityId = storage.world_item.npc_spline_id,
+                .SpawnEntityId = storage.world_item.npc_spawn_id,
+            } },
+        });
+    }
+
+    if (storage.world_item.hold_hand_target_id) |target_eid| {
+        try entity.ComponentPbs.append(alloc.arena, .{
+            .ComponentPb = .{ .HoldHandComponentPb = .{
+                .TargetEntityId = target_eid,
+                .HandType = storage.world_item.hold_hand_type,
+                .IsFollow = true,
+            } },
+        });
+    }
+
     if (storage.attribute) |attr_comp| {
         try entity.ComponentPbs.append(alloc.arena, .{
             .ComponentPb = .{ .AttributeComponent = try attr_comp.toProto(alloc) },
         });
+        var shield_list: std.ArrayList(pb.ShieldInfoPb) = .empty;
+        var shield_total: i32 = 0;
+        if (storage.buffs) |buffs| {
+            for (buffs.shields) |sh| {
+                if (sh.current <= 0) continue;
+                shield_total +|= sh.current;
+                try shield_list.append(alloc.arena, .{
+                    .Handle = sh.handle_id,
+                    .ConfigId = std.math.cast(i32, sh.shield_id) orelse 0,
+                    .ShieldValue = sh.current,
+                    .Priority = sh.priority,
+                    .IsValid = true,
+                });
+            }
+        }
         try entity.ComponentPbs.append(alloc.arena, .{
-            .ComponentPb = .{ .ShieldComponentPb = .{} },
+            .ComponentPb = .{ .ShieldComponentPb = .{
+                .ShieldInfoPbList = shield_list,
+                .ShieldValueTotal = shield_total,
+            } },
         });
     }
 

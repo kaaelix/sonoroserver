@@ -327,11 +327,28 @@ pub fn onUpdateSceneItemBlackboardRequest(
 pub fn onEntityAdsorbRequest(
     txn: *Transaction(pb.EntityAdsorbRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistClaimKey(alloc, fs, pc, "wp:adsorb", txn.message.EntityId);
+    if (scene_opt.*) |*scene| {
+        if (scene.instance.players.len > 0) {
+            const ppos = scene.instance.players[0].location;
+            if (try persistWorldEntityTransform(scene, fs, alloc, pc, txn.message.EntityId, ppos, null)) {
+                try pc.save(fs, alloc.arena);
+                var samples: std.ArrayList(pb.MoveReplaySample) = .empty;
+                try samples.append(alloc.arena, .{ .Location = .{ .X = ppos[0], .Y = ppos[1], .Z = ppos[2] } });
+                var moving: std.ArrayList(pb.MovingEntityData) = .empty;
+                try moving.append(alloc.arena, .{ .EntityId = txn.message.EntityId, .Originator = txn.message.EntityId, .MoveInfos = samples, .ForcePush = true });
+                txn.conn.pushBestEffort(alloc.gpa, io, pb.MovePackageNotify{ .MovingEntities = moving });
+            }
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onEntityBattleInfoRequest(
@@ -417,10 +434,32 @@ pub fn onEntityCameraAlertRequest(
 pub fn onEntityPatrolAddTagRequest(
     txn: *Transaction(pb.EntityPatrolAddTagRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
 ) !void {
     try persistIntKey(alloc, fs, pc, "patrol:tag", txn.message.EntityId, txn.message.TagId);
+    if (scene_opt.*) |*scene| {
+        if (scene.net_id_map.get(txn.message.EntityId)) |idx| {
+            const tag_slot = &scene.entities.items(.tag)[idx];
+            if (txn.message.TagId != 0) {
+                if (tag_slot.*) |*tags| {
+                    try tags.addCommonTag(alloc.gpa, txn.message.TagId);
+                    try tags.setGameplayTagCount(alloc.gpa, txn.message.TagId, 1);
+                } else {
+                    var new_tags = Scene.Entity.TagComponent{};
+                    try new_tags.addCommonTag(alloc.gpa, txn.message.TagId);
+                    try new_tags.setGameplayTagCount(alloc.gpa, txn.message.TagId, 1);
+                    tag_slot.* = new_tags;
+                }
+                var notify: pb.EntityCommonTagNotify = .{ .Id = txn.message.EntityId };
+                try notify.Tags.append(alloc.arena, .{ .TagId = txn.message.TagId, .RemoveTagIds = true });
+                txn.conn.pushBestEffort(alloc.gpa, io, notify);
+                scene.markFsmDirty(alloc.gpa, txn.message.EntityId, Scene.Entity.FsmComponent.WakeReason.tag) catch {};
+            }
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -428,9 +467,19 @@ pub fn onEntityPatrolChangeDirRequest(
     txn: *Transaction(pb.EntityPatrolChangeDirRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
 ) !void {
-    try persistIntKey(alloc, fs, pc, "patrol:dir", txn.message.EntityId, if (txn.message.Dir) 1 else 0);
+    const dir_val: i64 = if (txn.message.Dir) 1 else 0;
+    try persistIntKey(alloc, fs, pc, "patrol:dir", txn.message.EntityId, dir_val);
+    if (scene_opt.*) |*scene| {
+        if (scene.findConfigIdByNetId(txn.message.EntityId)) |cfg_id| {
+            try persistIntKey(alloc, fs, pc, "patrol:dir", cfg_id, dir_val);
+        }
+        if (scene.net_id_map.get(txn.message.EntityId)) |idx| {
+            scene.entities.items(.world_item)[idx].patrol_dir = txn.message.Dir;
+        }
+    }
     txn.respond(.{ .Code = .Success });
 }
 
@@ -578,13 +627,17 @@ fn resolveElevatorStayPos(assets: *const Assets, instance_id: i32, config_id: i3
     else
         return null;
     if (floors[idx] != .object) return base;
-    const off = readJsonPos3Offsets(floors[idx].object);
+    const off = GravityHelper.rotateLocalOffsetUe(
+        readJsonPos3Offsets(floors[idx].object),
+        Assets.AssetIndexes.entityWorldRot(lcfg),
+    );
     return .{ base[0] + off[0], base[1] + off[1], base[2] + off[2] };
 }
 
 fn resolveSplineEndpointPos(assets: *const Assets, instance_id: i32, spline_cfg_id: i64) ?[3]f32 {
     const lcfg = assets.findLevelEntity(instance_id, spline_cfg_id) orelse return null;
     const base = Assets.AssetIndexes.entityWorldPos(lcfg) orelse .{ 0, 0, 0 };
+    const rot = Assets.AssetIndexes.entityWorldRot(lcfg);
     var components = lcfg.ComponentsData;
     if (assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
         tpl.ComponentsData.mergeInto(&components);
@@ -598,7 +651,7 @@ fn resolveSplineEndpointPos(assets: *const Assets, instance_id: i32, spline_cfg_
     if (last != .object) return null;
     const pos_val = last.object.get("Position") orelse return null;
     if (pos_val != .object) return null;
-    const off = readJsonPos3Offsets(pos_val.object);
+    const off = GravityHelper.rotateLocalOffsetUe(readJsonPos3Offsets(pos_val.object), rot);
     return .{ base[0] + off[0], base[1] + off[1], base[2] + off[2] };
 }
 
@@ -653,10 +706,26 @@ pub fn onProgressBarFinishRequest(
 pub fn onSetInitTagRequest(
     txn: *Transaction(pb.SetInitTagRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    assets: *const Assets,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
 ) !void {
     try persistClaimKey(alloc, fs, pc, "init_tag", txn.message.EntityId);
+    if (scene_opt.*) |*scene| {
+        const net_id_opt: ?i64 = if (scene.net_id_map.contains(txn.message.EntityId))
+            txn.message.EntityId
+        else if (std.math.cast(i32, txn.message.EntityId)) |cid|
+            scene.findEntityNetIdByConfigId(cid)
+        else
+            null;
+        if (net_id_opt) |nid| {
+            if (try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, nid, "关卡.Common.状态.常态")) |upd| {
+                try QuestEngine.emitEntityStateTagUpdate(txn.conn, alloc.gpa, alloc.arena, io, nid, upd);
+            }
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
 }
 
@@ -697,13 +766,36 @@ pub fn onSetFanNumberOfTurnsRequest(
 pub fn onSetFanStateRequest(
     txn: *Transaction(pb.SetFanStateRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    assets: *const Assets,
+    scene_opt: *?Scene,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const key = try std.fmt.allocPrint(alloc.arena, "fan_state:{d}", .{txn.message.FanEntityId});
     try progress_comp.info.setKeyInt(alloc.gpa, key, txn.message.IsActive);
+    if (scene_opt.*) |*scene| {
+        const net_id_opt: ?i64 = if (scene.net_id_map.contains(txn.message.FanEntityId))
+            txn.message.FanEntityId
+        else if (std.math.cast(i32, txn.message.FanEntityId)) |cid|
+            scene.findEntityNetIdByConfigId(cid)
+        else
+            null;
+        if (net_id_opt) |nid| {
+            if (scene.findConfigIdByNetId(nid)) |cfg_id| {
+                const ckey = try std.fmt.allocPrint(alloc.arena, "fan_state:{d}", .{cfg_id});
+                try progress_comp.info.setKeyInt(alloc.gpa, ckey, txn.message.IsActive);
+            }
+            const state_name: []const u8 = if (txn.message.IsActive != 0) "关卡.Common.状态.激活" else "关卡.Common.状态.常态";
+            if (try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, nid, state_name)) |upd| {
+                try QuestEngine.emitEntityStateTagUpdate(txn.conn, alloc.gpa, alloc.arena, io, nid, upd);
+            }
+        }
+    }
     try progress_comp.save(fs, alloc.arena);
     txn.respond(.{ .ErrCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onElevatorStateChangeRequest(
@@ -731,8 +823,13 @@ pub fn onElevatorStateChangeRequest(
     if (resolveElevatorStayPos(assets, scene.instance_id, config_id, txn.message.TagState)) |new_pos| {
         _ = try persistWorldEntityTransform(scene, fs, alloc, progress_comp, txn.message.EntityId, new_pos, null);
     }
+    if (scene.net_id_map.get(txn.message.EntityId)) |idx| {
+        scene.entities.items(.world_item)[idx].lift = .{ .location = txn.message.TagState };
+    }
     const key = try std.fmt.allocPrint(alloc.arena, "elevator:{d}", .{config_id});
     try progress_comp.info.setKeyInt(alloc.gpa, key, txn.message.TagState);
+    const lift_key = try std.fmt.allocPrint(alloc.arena, "lift_target:{d}", .{config_id});
+    try progress_comp.info.setKeyInt(alloc.gpa, lift_key, txn.message.TagState);
     try progress_comp.save(fs, alloc.arena);
     QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onElevatorStateChange", err);
     txn.conn.pushBestEffort(alloc.gpa, io, pb.ElevatorMoveNotify{
@@ -1456,10 +1553,18 @@ pub fn onConnectorCanConnectRequest(
     txn: *Transaction(pb.ConnectorCanConnectRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistIntKey(alloc, fs, pc, "connector:can", txn.message.EntityId, if (txn.message.IsEnter) 1 else 0);
+    if (scene_opt.*) |*scene| {
+        if (scene.net_id_map.get(txn.message.EntityId)) |idx| {
+            scene.entities.items(.world_item)[idx].connector_initiated = txn.message.IsEnter;
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onConnectorConnectEntityRequest(
@@ -1484,20 +1589,44 @@ pub fn onBeControlledRequest(
     txn: *Transaction(pb.BeControlledRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
-    try persistIntKey(alloc, fs, pc, "be_ctrl:active", txn.message.EntityId, if (txn.message.IsControl) 1 else 0);
+    const ctrl_val: i64 = if (txn.message.IsControl) 1 else 0;
+    try persistIntKey(alloc, fs, pc, "be_ctrl:active", txn.message.EntityId, ctrl_val);
+    if (scene_opt.*) |*scene| {
+        if (scene.findConfigIdByNetId(txn.message.EntityId)) |cfg_id| {
+            try persistIntKey(alloc, fs, pc, "be_ctrl:active", cfg_id, ctrl_val);
+        }
+        if (scene.net_id_map.get(txn.message.EntityId)) |idx| {
+            scene.entities.items(.world_item)[idx].be_controlled_player_id = if (txn.message.IsControl) scene.currentRoleEntityId() else null;
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onBeControlledShowRequest(
     txn: *Transaction(pb.BeControlledShowRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
-    try persistIntKey(alloc, fs, pc, "be_ctrl:show", txn.message.EntityId, if (txn.message.IsShow) 1 else 0);
+    const show_val: i64 = if (txn.message.IsShow) 1 else 0;
+    try persistIntKey(alloc, fs, pc, "be_ctrl:show", txn.message.EntityId, show_val);
+    if (scene_opt.*) |*scene| {
+        if (scene.findConfigIdByNetId(txn.message.EntityId)) |cfg_id| {
+            try persistIntKey(alloc, fs, pc, "be_ctrl:show", cfg_id, show_val);
+        }
+        if (scene.net_id_map.get(txn.message.EntityId)) |idx| {
+            scene.entities.items(.world_item)[idx].be_controlled_show = txn.message.IsShow;
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onBeControlledEntityHoverRequest(
@@ -1593,30 +1722,77 @@ pub fn onAttachEntityRequest(
     txn: *Transaction(pb.AttachEntityRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistClaimKey(alloc, fs, pc, "attach_ent", txn.message.EntityId);
+    if (scene_opt.*) |*scene| {
+        if (txn.message.RelatePos) |pos| {
+            if (finiteVec3(.{ pos.X, pos.Y, pos.Z })) {
+                const rot = txn.message.RelateRot orelse pb.Rotator{};
+                if (finiteVec3(.{ rot.Roll, rot.Pitch, rot.Yaw })) {
+                    _ = try persistWorldEntityTransform(scene, fs, alloc, pc, txn.message.EntityId, .{ pos.X, pos.Y, pos.Z }, rot);
+                }
+            }
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onHoldHandRequest(
     txn: *Transaction(pb.HoldHandRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
-    try persistIntKey(alloc, fs, pc, "hold_hand", txn.message.EntityId, if (txn.message.IsHold) 1 else 0);
+    const hold_val: i64 = if (txn.message.IsHold) 1 else 0;
+    try persistIntKey(alloc, fs, pc, "hold_hand", txn.message.EntityId, hold_val);
+    if (scene_opt.*) |*scene| {
+        const role_id = scene.currentRoleEntityId();
+        if (role_id > 0) {
+            try persistIntKey(alloc, fs, pc, "hold_hand", role_id, hold_val);
+            if (scene.net_id_map.get(role_id)) |ridx| {
+                scene.entities.items(.world_item)[ridx].hold_hand_target_id = if (txn.message.IsHold) txn.message.TargetEntityId else null;
+                scene.entities.items(.world_item)[ridx].hold_hand_type = txn.message.HandType;
+            }
+        }
+        if (!txn.message.IsHold) {
+            txn.conn.pushBestEffort(alloc.gpa, io, pb.StopHoldHandNotify{
+                .EntityId = txn.message.EntityId,
+                .ActionType = txn.message.ActionType,
+                .TargetEntityId = txn.message.TargetEntityId,
+            });
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onSitChairRequest(
     txn: *Transaction(pb.SitChairRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistIntKey(alloc, fs, pc, "sit_chair", txn.message.EntityId, if (txn.message.IsSitDown) 1 else 0);
+    if (txn.message.IsSitDown) {
+        if (scene_opt.*) |*scene| {
+            if (scene.net_id_map.get(txn.message.EntityId)) |idx| {
+                if (scene.entities.items(.position)[idx]) |chair_pos| {
+                    try QuestEngine.updatePlayerSceneState(qctx, chair_pos.location, chair_pos.rotation);
+                }
+            }
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onSneakRequest(
@@ -2340,10 +2516,23 @@ pub fn onVehiclePlatformGetOnRequest(
     txn: *Transaction(pb.VehiclePlatformGetOnRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
-    try persistIntKey(alloc, fs, pc, "vehicle:platform", txn.message.EntityId, if (txn.message.IsGetOn) 1 else 0);
+    const on_val: i64 = if (txn.message.IsGetOn) 1 else 0;
+    try persistIntKey(alloc, fs, pc, "vehicle:platform", txn.message.EntityId, on_val);
+    if (scene_opt.*) |*scene| {
+        const cfg_id = scene.findConfigIdByNetId(txn.message.EntityId) orelse 0;
+        if (txn.message.IsGetOn and cfg_id > 0) {
+            try pc.info.setKeyInt(alloc.gpa, "vehicle:cur", cfg_id);
+        } else if (!txn.message.IsGetOn and cfg_id > 0 and pc.info.getKeyInt("vehicle:cur") == cfg_id) {
+            try pc.info.setKeyInt(alloc.gpa, "vehicle:cur", 0);
+        }
+        try pc.save(fs, alloc.arena);
+    }
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onWeatherControlInfoRequest(
@@ -2508,21 +2697,62 @@ pub fn onPassPortalRequest(
 pub fn onAwakeDynamicPortalRequest(
     txn: *Transaction(pb.AwakeDynamicPortalRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    assets: *const Assets,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistIntKey(alloc, fs, pc, "dyn_portal:awake", txn.message.EntityId, if (txn.message.IsAwake) 1 else 0);
+    if (scene_opt.*) |*scene| {
+        const net_id_opt: ?i64 = if (scene.net_id_map.contains(txn.message.EntityId))
+            txn.message.EntityId
+        else if (std.math.cast(i32, txn.message.EntityId)) |cid|
+            scene.findEntityNetIdByConfigId(cid)
+        else
+            null;
+        if (net_id_opt) |nid| {
+            const state_name: []const u8 = if (txn.message.IsAwake) "关卡.Common.状态.激活" else "关卡.Common.状态.常态";
+            if (try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, nid, state_name)) |upd| {
+                try QuestEngine.emitEntityStateTagUpdate(txn.conn, alloc.gpa, alloc.arena, io, nid, upd);
+            }
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onInstEntityTeleportRequest(
     txn: *Transaction(pb.InstEntityTeleportRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    assets: *const Assets,
+    scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistIntKey(alloc, fs, pc, "inst:ent_tp", txn.message.InstId, txn.message.EntityConfigId);
+    if (scene_opt.*) |scene| {
+        const target_map = if (txn.message.InstId > 0) txn.message.InstId else scene.instance_id;
+        if (target_map == scene.instance_id and txn.message.EntityConfigId > 0) {
+            if (assets.findLevelEntity(target_map, txn.message.EntityConfigId)) |cfg| {
+                if (Assets.AssetIndexes.entityWorldPos(cfg)) |pos| {
+                    const rot = Assets.AssetIndexes.entityWorldRot(cfg);
+                    try QuestEngine.updatePlayerSceneState(qctx, pos, rot);
+                    txn.conn.pushBestEffort(alloc.gpa, io, pb.TeleportNotify{
+                        .MapId = scene.instance_id,
+                        .Pos = .{ .X = pos[0], .Y = pos[1], .Z = pos[2] },
+                        .Rot = .{ .X = rot[0], .Y = rot[1], .Z = rot[2] },
+                        .Reason = .Action,
+                    });
+                }
+            }
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onFlowTeleportToPlotPosRequest(
@@ -2530,9 +2760,11 @@ pub fn onFlowTeleportToPlotPosRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistClaimKey(alloc, fs, pc, "flow:tp_plot", txn.message.FlowIncId);
     txn.respond(.{ .Code = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onQuestFastReturnPosRequest(
@@ -2554,19 +2786,47 @@ pub fn onFastReturnDungeonRequest(
     alloc: mem.Alloc,
     fs: *FileSystem,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistIntKey(alloc, fs, progress_comp, "wp:fast_ret_node", txn.message.TreeIncId, txn.message.NodeId);
+    if (txn.message.NodeId > 0) {
+        _ = try QuestEngine.onSubmitNode(qctx, @intCast(@max(0, txn.message.TreeOwnerId)), txn.message.TreeIncId, txn.message.NodeId);
+    }
+    if (!txn.message.ContinueInst) {
+        try QuestEngine.leaveCurrentDungeon(qctx, 0);
+    }
     txn.respond(.{ .ErrorCode = .Success });
 }
 
 pub fn onUnOpenedAreaPullbackRequest(
     txn: *Transaction(pb.UnOpenedAreaPullbackRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    scene_opt: *?Scene,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     try persistIntKey(alloc, fs, progress_comp, "wp:unopen_pullback", txn.message.TransferEffectId, 1);
+    if (scene_opt.*) |scene| {
+        if (scene.instance.players.len > 0) {
+            const safe_loc = scene.last_spatial_check_loc;
+            const cur_loc = scene.instance.players[0].location;
+            const dx = cur_loc[0] - safe_loc[0];
+            const dy = cur_loc[1] - safe_loc[1];
+            const dz = cur_loc[2] - safe_loc[2];
+            if ((safe_loc[0] != 0 or safe_loc[1] != 0 or safe_loc[2] != 0) and (dx * dx + dy * dy + dz * dz > 1.0)) {
+                try QuestEngine.updatePlayerSceneState(qctx, safe_loc, null);
+                txn.conn.pushBestEffort(alloc.gpa, io, pb.TeleportNotify{
+                    .MapId = scene.instance_id,
+                    .Pos = .{ .X = safe_loc[0], .Y = safe_loc[1], .Z = safe_loc[2] },
+                    .Reason = .Action,
+                });
+            }
+        }
+    }
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onReviveRequest(
@@ -2998,9 +3258,74 @@ pub fn onLastBigSceneMiniMapInfoRequest(
     });
 }
 
-pub fn onNavigationFindPathRequest(txn: *Transaction(pb.NavigationFindPathRequest), alloc: mem.Alloc) !void {
+fn distSq3(a: [3]f32, b: [3]f32) f32 {
+    const dx = a[0] - b[0];
+    const dy = a[1] - b[1];
+    const dz = a[2] - b[2];
+    return dx * dx + dy * dy + dz * dz;
+}
+
+pub fn onNavigationFindPathRequest(
+    txn: *Transaction(pb.NavigationFindPathRequest),
+    assets: *const Assets,
+    alloc: mem.Alloc,
+) !void {
     var path: std.ArrayList(pb.Vector) = .empty;
     if (txn.message.StartPos) |s| try path.append(alloc.arena, s);
+    if (txn.message.StartPos != null and txn.message.EndPos != null) {
+        const s = txn.message.StartPos.?;
+        const e = txn.message.EndPos.?;
+        const start3: [3]f32 = .{ s.X, s.Y, s.Z };
+        const end3: [3]f32 = .{ e.X, e.Y, e.Z };
+        const map_id = assets.resolveMapConfigId(if (txn.message.MapId > 0) txn.message.MapId else 8);
+        const match_r2: f32 = 1500.0 * 1500.0;
+        const candidates = assets.indexes.spawnableIndicesForMap(map_id);
+        for (candidates) |idx| {
+            const lcfg = assets.getLevelEntityByIdx(idx) orelse continue;
+            const sc = lcfg.ComponentsData.SplineComponent orelse continue;
+            const opt = sc.Option orelse continue;
+            if (opt != .object) continue;
+            const pts_val = opt.object.get("Points") orelse continue;
+            if (pts_val != .array or pts_val.array.items.len < 2) continue;
+            const base = Assets.AssetIndexes.entityWorldPos(lcfg) orelse .{ 0, 0, 0 };
+            const rot = Assets.AssetIndexes.entityWorldRot(lcfg);
+            const first_obj = pts_val.array.items[0];
+            const last_obj = pts_val.array.items[pts_val.array.items.len - 1];
+            if (first_obj != .object or last_obj != .object) continue;
+            const fp = first_obj.object.get("Position") orelse continue;
+            const lp = last_obj.object.get("Position") orelse continue;
+            if (fp != .object or lp != .object) continue;
+            const off0 = GravityHelper.rotateLocalOffsetUe(readJsonPos3Offsets(fp.object), rot);
+            const off1 = GravityHelper.rotateLocalOffsetUe(readJsonPos3Offsets(lp.object), rot);
+            const p0: [3]f32 = .{ base[0] + off0[0], base[1] + off0[1], base[2] + off0[2] };
+            const p1: [3]f32 = .{ base[0] + off1[0], base[1] + off1[1], base[2] + off1[2] };
+            const forward = distSq3(start3, p0) <= match_r2 and distSq3(end3, p1) <= match_r2;
+            const reverse = distSq3(start3, p1) <= match_r2 and distSq3(end3, p0) <= match_r2;
+            if (!forward and !reverse) continue;
+            const items = pts_val.array.items;
+            if (forward) {
+                for (items) |item| {
+                    if (item != .object) continue;
+                    const pv = item.object.get("Position") orelse continue;
+                    if (pv != .object) continue;
+                    const off = GravityHelper.rotateLocalOffsetUe(readJsonPos3Offsets(pv.object), rot);
+                    try path.append(alloc.arena, .{ .X = base[0] + off[0], .Y = base[1] + off[1], .Z = base[2] + off[2] });
+                }
+            } else {
+                var ri = items.len;
+                while (ri > 0) {
+                    ri -= 1;
+                    const item = items[ri];
+                    if (item != .object) continue;
+                    const pv = item.object.get("Position") orelse continue;
+                    if (pv != .object) continue;
+                    const off = GravityHelper.rotateLocalOffsetUe(readJsonPos3Offsets(pv.object), rot);
+                    try path.append(alloc.arena, .{ .X = base[0] + off[0], .Y = base[1] + off[1], .Z = base[2] + off[2] });
+                }
+            }
+            break;
+        }
+    }
     if (txn.message.EndPos) |e| try path.append(alloc.arena, e);
     txn.respond(.{
         .ErrorCode = .Success,
@@ -3475,7 +3800,8 @@ pub fn onUDPMovePackagePush(
                             player.location = next_location;
                             const dx = player.location[0] - scene.last_spatial_check_loc[0];
                             const dy = player.location[1] - scene.last_spatial_check_loc[1];
-                            if (dx * dx + dy * dy >= 2500.0 * 2500.0) {
+                            const dz = player.location[2] - scene.last_spatial_check_loc[2];
+                            if (dx * dx + dy * dy + dz * dz >= 2500.0 * 2500.0) {
                                 scene.last_spatial_check_loc = player.location;
                                 events.enqueueBestEffort(.spatial_spawns_check, .{ .location = player.location });
                             }

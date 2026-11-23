@@ -226,7 +226,7 @@ pub fn onActionFinishRequest(
     const k = try std.fmt.bufPrint(&kbuf, "quest:act_fin:{d}:{d}", .{ txn.message.IncId, txn.message.StartIndex });
     _ = try progress_comp.info.markClaim(alloc.gpa, k);
     try progress_comp.save(fs, alloc.arena);
-    try QuestEngine.onConditionStateChanged(qctx);
+    try QuestEngine.recheckAndStepActiveTrees(qctx);
     txn.respond(.{ .Code = .Success });
 }
 
@@ -298,7 +298,17 @@ pub fn onRoleQuestAcceptRequest(
 
 pub fn onRoleFavorAcceptQuestRequest(
     txn: *Transaction(pb.RoleFavorAcceptQuestRequest),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
+    var kbuf: [48]u8 = undefined;
+    const qt_id: i32 = if (txn.message.QuestType) |qt| @intFromEnum(qt) else 0;
+    const k = try std.fmt.bufPrint(&kbuf, "role_favor_quest:{d}:{d}", .{ txn.message.RoleId, qt_id });
+    _ = try progress_comp.info.markClaim(alloc.gpa, k);
+    try progress_comp.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch |err| QuestEngine.logHookErr("onRoleFavorAcceptQuest", err);
     txn.respond(.{
         .QuestType = txn.message.QuestType,
         .RoleId = txn.message.RoleId,

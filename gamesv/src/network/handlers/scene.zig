@@ -423,13 +423,40 @@ pub fn onVehicleEnterSharingRequest(
 pub fn onAwakeItemVehicleRequest(
     txn: *Transaction(pb.AwakeItemVehicleRequest),
     alloc: mem.Alloc,
+    io: std.Io,
     fs: *FileSystem,
+    assets: *const Assets,
+    scene_opt: *?Scene,
     progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
 ) !void {
     const key = try std.fmt.allocPrint(alloc.arena, "vehicle:awake:{d}", .{txn.message.ItemID});
     try progress_comp.info.setKeyInt(alloc.gpa, key, txn.message.PosEntityId);
+    if (scene_opt.*) |*scene| {
+        const pos_opt = if (assets.findLevelEntity(scene.instance_id, txn.message.PosEntityId)) |cfg|
+            Assets.AssetIndexes.entityWorldPos(cfg)
+        else
+            null;
+        if (pos_opt) |pos| {
+            const fields = [_][]const u8{ "x", "y", "z" };
+            for (fields, pos) |f, v| {
+                const pkey = try std.fmt.allocPrint(alloc.arena, "world_pos:{d}:{s}", .{ txn.message.ItemID, f });
+                try progress_comp.info.setKeyInt(alloc.gpa, pkey, @intCast(@as(u32, @bitCast(v))));
+            }
+            if (scene.findEntityNetIdByConfigId(txn.message.ItemID)) |veh_nid| {
+                if (scene.setEntityPosition(veh_nid, pos, null)) {
+                    var samples: std.ArrayList(pb.MoveReplaySample) = .empty;
+                    try samples.append(alloc.arena, .{ .Location = .{ .X = pos[0], .Y = pos[1], .Z = pos[2] } });
+                    var moving: std.ArrayList(pb.MovingEntityData) = .empty;
+                    try moving.append(alloc.arena, .{ .EntityId = veh_nid, .Originator = veh_nid, .MoveInfos = samples, .ForcePush = true });
+                    txn.conn.pushBestEffort(alloc.gpa, io, pb.MovePackageNotify{ .MovingEntities = moving });
+                }
+            }
+        }
+    }
     try progress_comp.save(fs, alloc.arena);
     txn.respond(.{ .ErrorCode = .Success });
+    try QuestEngine.onConditionStateChanged(qctx);
 }
 
 pub fn onEntityEnterVehicleRequest(
@@ -523,7 +550,8 @@ pub fn onMovePackagePush(
                         player.location = next_location;
                         const dx = player.location[0] - scene.last_spatial_check_loc[0];
                         const dy = player.location[1] - scene.last_spatial_check_loc[1];
-                        if (dx * dx + dy * dy >= 2500.0 * 2500.0) {
+                        const dz = player.location[2] - scene.last_spatial_check_loc[2];
+                        if (dx * dx + dy * dy + dz * dz >= 2500.0 * 2500.0) {
                             scene.last_spatial_check_loc = player.location;
                             events.enqueueBestEffort(.spatial_spawns_check, .{ .location = player.location });
                         }

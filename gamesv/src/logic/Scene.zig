@@ -1569,15 +1569,14 @@ pub fn delete(
     scene_id: i32,
     net_id: i64,
 ) !void {
-    _ = fs;
-    _ = player_id;
-    _ = scene_id;
-    _ = net_id;
+    var path_buf: [128]u8 = undefined;
+    const entity_path = try std.fmt.bufPrint(&path_buf, "player/{d}/scene/{d}/entity/{d}", .{ player_id, scene_id, net_id });
+    try fs.deleteFile(entity_path);
 }
 
 pub fn remove(scene: *Scene, gpa: Allocator, fs: *FileSystem, net_id: i64) !void {
-    _ = fs;
     const index = scene.net_id_map.get(net_id) orelse return;
+    try delete(fs, scene.player_id, scene.instance_id, net_id);
     try scene.removeEntityState(gpa, index, net_id);
 }
 
@@ -1673,11 +1672,9 @@ pub fn saveComponents(
     entity: Entity,
     comptime components: []const type,
 ) !void {
-    _ = scene;
-    _ = fs;
-    _ = gpa;
-    _ = entity;
     _ = components;
+    if (entity.index >= scene.entities.len) return;
+    try scene.saveEntity(fs, gpa, entity);
 }
 
 pub fn saveInstance(scene: *Scene, fs: *FileSystem, gpa: Allocator) !void {

@@ -286,6 +286,23 @@ fn applyStoredWorldEntityOverrides(
         }
     }
 
+    const pdir_cfg = try std.fmt.allocPrint(alloc.arena, "patrol:dir:{d}", .{config_id});
+    const pdir_net = try std.fmt.allocPrint(alloc.arena, "patrol:dir:{d}", .{net_id});
+    if (progressInt(info, pdir_net) orelse progressInt(info, pdir_cfg)) |pdir| {
+        scene.entities.items(.world_item)[index].patrol_dir = pdir != 0;
+    }
+
+    const bc_act_cfg = try std.fmt.allocPrint(alloc.arena, "be_ctrl:active:{d}", .{config_id});
+    const bc_act_net = try std.fmt.allocPrint(alloc.arena, "be_ctrl:active:{d}", .{net_id});
+    const bc_show_cfg = try std.fmt.allocPrint(alloc.arena, "be_ctrl:show:{d}", .{config_id});
+    const bc_show_net = try std.fmt.allocPrint(alloc.arena, "be_ctrl:show:{d}", .{net_id});
+    const bc_active = (progressInt(info, bc_act_net) orelse progressInt(info, bc_act_cfg) orelse 0) != 0;
+    const bc_show = (progressInt(info, bc_show_net) orelse progressInt(info, bc_show_cfg) orelse 0) != 0;
+    if (bc_active or bc_show) {
+        scene.entities.items(.world_item)[index].be_controlled_player_id = if (bc_active) scene.currentRoleEntityId() else null;
+        scene.entities.items(.world_item)[index].be_controlled_show = bc_show;
+    }
+
     var spline_entity_id: i32 = 0;
     var spline_active = false;
     const item_status_key = try std.fmt.allocPrint(alloc.arena, "scene_item_spline_status:{d}", .{config_id});
@@ -1244,7 +1261,8 @@ fn evictDistantAmbientEntities(
         const pos = pos_opt orelse continue;
         const dx = pos.location[0] - player_loc[0];
         const dy = pos.location[1] - player_loc[1];
-        if (dx * dx + dy * dy <= evict_r2) continue;
+        const dz = pos.location[2] - player_loc[2];
+        if (dx * dx + dy * dy + dz * dz <= evict_r2) continue;
 
         victim_ids.append(alloc.arena, nid.net_id) catch continue;
     }
@@ -1365,8 +1383,14 @@ fn considerSpawnCandidates(
 
         const dx = pos[0] - player_loc[0];
         const dy = pos[1] - player_loc[1];
-        const dist2 = dx * dx + dy * dy;
+        const dz = pos[2] - player_loc[2];
+        const dist2 = dx * dx + dy * dy + dz * dz;
         if (dist2 > r2) continue;
+        if (cfg.ComponentsData.BaseInfoComponent) |bi| {
+            if (bi.AoiZRadius) |az| {
+                if (az > 0 and @abs(dz) > @as(f32, @floatFromInt(az))) continue;
+            }
+        }
 
         const is_quest_target = QuestEngine.isTargetIdInSet(active_quest_targets, cfg.EntityId);
         const is_priority = is_quest_target or isPriorityWorldEntity(assets, &cfg);

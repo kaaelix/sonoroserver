@@ -708,6 +708,11 @@ pub const spawn = struct {
         }
         scene.entities.items(.world_item)[entity.index].interact = interact_state_component;
         interact_state_component = null;
+        if (spawn_base.entity_type == .npc) {
+            if (std.math.cast(i32, entity_id)) |cid32| {
+                scene.entities.items(.world_item)[entity.index].npc_spawn_id = cid32;
+            }
+        }
         if (spawn_base.entity_type == .scene_item) {
             scene.entities.items(.world_item)[entity.index].scene_item = Entity.SceneItemComponent.fromProgress(
                 progress_info orelse .{},

@@ -480,6 +480,35 @@ fn finishLpNonChildNode(
     }
 }
 
+fn clearLpNodeFinished(ctx: LevelPlayContext, lp_id: i32, node_id: i32, dirty_pc: *bool) void {
+    setLpNodeActive(ctx, lp_id, node_id, false, dirty_pc);
+    const pc = ctx.progress_comp orelse return;
+    var buf: [48]u8 = undefined;
+    const key = lpKeyBuf(&buf, "lp_node", lp_id, node_id);
+    if (key.len == 0) return;
+    if (pc.info.removeClaim(ctx.alloc.gpa, key)) {
+        dirty_pc.* = true;
+    }
+    if (pc.info.getKeyInt(key) != 0) {
+        pc.info.setKeyInt(ctx.alloc.gpa, key, 0) catch {};
+        dirty_pc.* = true;
+    }
+}
+
+fn resetLpSubtreeFinishedNodes(
+    ctx: LevelPlayContext,
+    lp_id: i32,
+    nodes: []const LazyNodeStore.NodeEntry,
+    parent_id: i32,
+    dirty_pc: *bool,
+) void {
+    for (nodes) |child| {
+        if (child.parent_id != parent_id) continue;
+        clearLpNodeFinished(ctx, lp_id, child.id, dirty_pc);
+        resetLpSubtreeFinishedNodes(ctx, lp_id, nodes, child.id, dirty_pc);
+    }
+}
+
 fn deactivateLpSubtree(
     ctx: LevelPlayContext,
     lp_id: i32,
@@ -595,8 +624,9 @@ fn stepLevelPlayNode(
         if (any_child and node.parent_id != 0) return .failed;
         finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
         return .completed;
-    } else if (std.mem.eql(u8, node.node_type, "ParallelSelect")) {
-        const needed: i32 = @max(1, node.count);
+    } else if (std.mem.eql(u8, node.node_type, "ParallelSelect") or std.mem.eql(u8, node.node_type, "Parallel")) {
+        const is_parallel_all = std.mem.eql(u8, node.node_type, "Parallel");
+        const needed_sel: i32 = @max(1, node.count);
         var finished_count: i32 = 0;
         var failed_count: i32 = 0;
         var total_children: i32 = 0;
@@ -613,19 +643,30 @@ fn stepLevelPlayNode(
                 .tree_ended => return .tree_ended,
                 .completed => {
                     finished_count += 1;
-                    if (finished_count >= needed) break;
+                    if (!is_parallel_all and finished_count >= needed_sel) break;
                 },
                 .failed => failed_count += 1,
                 .running => {},
             }
         }
+        const needed: i32 = if (is_parallel_all) total_children else needed_sel;
+        if (is_parallel_all and failed_count > 0) return .failed;
         if (finished_count >= needed) {
-            deactivateLpSubtree(ctx, lp_id, nodes, node.id, push_updates and !initial_boot, dirty_pc);
+            if (!is_parallel_all) {
+                deactivateLpSubtree(ctx, lp_id, nodes, node.id, push_updates and !initial_boot, dirty_pc);
+            }
             finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
             return .completed;
         }
-        if (node.parent_id != 0 and total_children > 0 and (total_children - failed_count) < needed) {
+        if (!is_parallel_all and node.parent_id != 0 and total_children > 0 and (total_children - failed_count) < needed) {
             return .failed;
+        }
+        return .running;
+    } else if (std.mem.eql(u8, node.node_type, "AlwaysPending")) {
+        for (nodes) |child| {
+            if (child.parent_id != node.id) continue;
+            const res = try stepLevelPlayNode(ctx, lp_id, nodes, child, initial_boot, push_updates, player_pos_opt, newly_activated, newly_actions, dirty_pc, steps);
+            if (res == .tree_ended) return .tree_ended;
         }
         return .running;
     } else if (std.mem.eql(u8, node.node_type, "AlwaysFalse")) {
@@ -655,11 +696,11 @@ fn stepLevelPlayNode(
         try completeLevelPlay(ctx, lp_id);
         return .tree_ended;
     } else if (std.mem.eql(u8, node.node_type, "QuestFailed")) {
-        if (try QuestEngine.evalQuestFailedConditionPub(qctx, lp_id, node, player_pos_opt, &ctx.scene.lp_fail_timers)) |_| {
+        if (try QuestEngine.evalQuestFailedConditionPub(qctx, lp_id, node, player_pos_opt, &ctx.scene.lp_fail_timers)) |reason| {
             if (node.data == .object) {
                 runLevelPlayActions(ctx, lp_id, node.id, node.data.object.get("FinishActions"));
             }
-            try onLevelPlayEnabled(ctx, lp_id, false);
+            try onBtRollback(ctx, lp_id, node.id, reason);
             return .tree_ended;
         }
         return .running;
@@ -724,7 +765,6 @@ fn stepLevelPlayNode(
         }
         return if (wait_true) .running else .failed;
     } else if (std.mem.eql(u8, node.node_type, "ConditionSelector")) {
-        var selected_child_id: ?i32 = null;
         if (node.data == .object) {
             if (node.data.object.get("Slots")) |slots_val| {
                 if (slots_val == .array) {
@@ -735,23 +775,21 @@ fn stepLevelPlayNode(
                         else
                             true;
                         if (!pass) continue;
-                        if (slot.object.get("Node")) |sn| {
-                            if (sn == .object) {
-                                selected_child_id = jsonInt(sn.object.get("Id"));
-                                break;
-                            }
+                        const sn = slot.object.get("Node") orelse continue;
+                        if (sn != .object) continue;
+                        const cid = jsonInt(sn.object.get("Id")) orelse continue;
+                        const cnode = findLpNodeById(nodes, cid) orelse continue;
+                        const res = try stepLevelPlayNode(ctx, lp_id, nodes, cnode.*, initial_boot, push_updates, player_pos_opt, newly_activated, newly_actions, dirty_pc, steps);
+                        switch (res) {
+                            .completed => {
+                                finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+                                return .completed;
+                            },
+                            .running, .tree_ended => return res,
+                            .failed => continue,
                         }
                     }
                 }
-            }
-        }
-        if (selected_child_id) |cid| {
-            if (findLpNodeById(nodes, cid)) |cnode| {
-                const res = try stepLevelPlayNode(ctx, lp_id, nodes, cnode.*, initial_boot, push_updates, player_pos_opt, newly_activated, newly_actions, dirty_pc, steps);
-                if (res == .completed) {
-                    finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
-                }
-                return res;
             }
         }
         return .running;
@@ -778,11 +816,14 @@ fn stepLevelPlayNode(
                 }
                 return .running;
             }
-            if (!any_child or !child_completed) break;
+            if (!any_child) {
+                finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
+                return .completed;
+            }
+            if (!child_completed) return .running;
+            resetLpSubtreeFinishedNodes(ctx, lp_id, nodes, node.id, dirty_pc);
         }
-        if (steps.* >= 96) return .running;
-        finishLpNonChildNode(ctx, lp_id, node, push_updates and !initial_boot, dirty_pc);
-        return .completed;
+        return .running;
     } else if (std.mem.eql(u8, node.node_type, "ChildQuest")) {
         const was_active = isLpNodeActive(ctx.progress_comp, lp_id, node.id);
         if (!was_active) {
@@ -1763,6 +1804,105 @@ pub fn onEntityStateChanged(ctx: LevelPlayContext, _: i32, _: []const u8) !void 
 
 pub fn onConditionStateChanged(ctx: LevelPlayContext) !void {
     try evaluateEnteredLevelPlayTrees(ctx, 0);
+}
+
+pub fn stepEnteredTreeById(ctx: LevelPlayContext, lp_id: i32) !void {
+    if (lp_id <= 0) return;
+    try evaluateEnteredLevelPlayTrees(ctx, lp_id);
+}
+
+pub fn onBtTimerEnd(ctx: LevelPlayContext, lp_id: i32) !bool {
+    if (lp_id <= 0) return false;
+    if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) return false;
+    if (!QuestInfo.containsInt(ctx.quest_comp.info.progress.entered_level_plays, lp_id)) return false;
+    const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp_id) catch return false;
+    var progressed = false;
+    var dirty_pc = false;
+    for (nodes) |node| {
+        if (!isLpNodeActive(ctx.progress_comp, lp_id, node.id)) continue;
+        if (!std.mem.eql(u8, node.node_type, "ChildQuest")) continue;
+        const cond = QuestEngine.getChildConditionPub(node.data) orelse continue;
+        const ctype = jsonStr(cond.get("Type")) orelse continue;
+        if (!std.mem.eql(u8, ctype, "Timer") and !std.mem.eql(u8, ctype, "WaitTime")) continue;
+        try completeLpChildQuest(ctx, lp_id, nodes, node, true, &dirty_pc);
+        progressed = true;
+        break;
+    }
+    if (progressed) {
+        try stepLevelPlayTree(ctx, lp_id, nodes, true, currentPlayerPos(ctx));
+    }
+    return progressed;
+}
+
+pub fn onLevelSequenceMarkReached(ctx: LevelPlayContext, entity_config_id: i32, mark: []const u8) !void {
+    if (entity_config_id <= 0 or mark.len == 0) return;
+    const entered_snap = try ctx.alloc.arena.dupe(i32, ctx.quest_comp.info.progress.entered_level_plays);
+    for (entered_snap) |lpid| {
+        if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lpid)) continue;
+        const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lpid) catch continue;
+        var progressed = false;
+        var dirty_pc = false;
+        for (nodes) |node| {
+            if (!isLpNodeActive(ctx.progress_comp, lpid, node.id)) continue;
+            if (!std.mem.eql(u8, node.node_type, "ChildQuest")) continue;
+            const cond = QuestEngine.getChildConditionPub(node.data) orelse continue;
+            const ctype = jsonStr(cond.get("Type")) orelse continue;
+            if (!std.mem.eql(u8, ctype, "WaitUntilLevelSequenceReachMark")) continue;
+            if ((jsonInt(cond.get("EntityId")) orelse 0) != entity_config_id) continue;
+            const required_mark = jsonStr(cond.get("Mark")) orelse continue;
+            if (!std.mem.eql(u8, required_mark, mark)) continue;
+            try completeLpChildQuest(ctx, lpid, nodes, node, true, &dirty_pc);
+            progressed = true;
+        }
+        if (progressed) {
+            try stepLevelPlayTree(ctx, lpid, nodes, true, currentPlayerPos(ctx));
+        }
+    }
+}
+
+pub fn onBtRollback(ctx: LevelPlayContext, lp_id: i32, fail_node_id: i32, reason: pb.FailReason) !void {
+    if (lp_id <= 0) return;
+    if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) return;
+    ctx.scene.lp_timers.cancelQuest(lp_id);
+    ctx.scene.lp_fail_timers.cancelQuest(lp_id);
+    ctx.scene.releaseOccupationsForTree(ctx.alloc.gpa, lp_id, lp_id);
+
+    const nodes = ctx.assets.level_play_nodes.getOwnerNodes(ctx.io, lp_id) catch return;
+    var latest_ckpt_id: i32 = 0;
+    for (nodes) |n| {
+        if (!isLevelPlayNodeMarked(ctx.progress_comp, lp_id, n.id)) continue;
+        if (n.data == .object and n.data.object.get("SaveConfig") != null and n.id > latest_ckpt_id) {
+            latest_ckpt_id = n.id;
+        }
+    }
+    if (latest_ckpt_id == 0 and reason != .DefaultFail) {
+        try onLevelPlayEnabled(ctx, lp_id, false);
+        return;
+    }
+
+    var dirty_pc = false;
+    const qctx = toQuestCtx(ctx);
+    for (nodes) |n| {
+        if (isLpNodeActive(ctx.progress_comp, lp_id, n.id)) {
+            QuestEngine.removeDoInteractOptionsForBtNode(qctx, .BtTypeLevelPlay, lp_id, n.id);
+            setLpNodeActive(ctx, lp_id, n.id, false, &dirty_pc);
+        }
+        if (n.id >= latest_ckpt_id) {
+            clearLpNodeFinished(ctx, lp_id, n.id, &dirty_pc);
+        }
+    }
+    if (dirty_pc) {
+        if (ctx.progress_comp) |pc| {
+            pc.save(ctx.fs, ctx.alloc.arena) catch {};
+        }
+    }
+    ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BtRollbackNotify{
+        .TreeOwnerId = lp_id,
+        .TreeIncId = lp_id,
+        .FailNodeId = fail_node_id,
+        .FailReason = reason,
+    }) catch {};
+    try stepLevelPlayTree(ctx, lp_id, nodes, true, currentPlayerPos(ctx));
 }
 
 pub fn onFlowEnd(ctx: LevelPlayContext, lp_id: i32, node_id: i32) !void {

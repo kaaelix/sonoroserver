@@ -9,6 +9,7 @@ pub const ShapeConfig = struct {
     Radius: ?f32 = null,
     Height: ?f32 = null,
     InnerRadius: ?f32 = null,
+    Angle: ?f32 = null,
     Size: ?Vec3 = null,
     Center: ?Vec3 = null,
     Rotator: ?Vec3 = null,

@@ -6,6 +6,7 @@ const comp_util = @import("../../logic/component/comp_util.zig");
 const CoopService = @import("../../logic/CoopService.zig");
 const PlayerBasicComponent = @import("../../logic/component/player/PlayerBasicComponent.zig");
 const PlayerProgressComponent = @import("../../logic/component/player/PlayerProgressComponent.zig");
+const PlayerRoleComponent = @import("../../logic/component/player/PlayerRoleComponent.zig");
 const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
 const RewardService = @import("../../logic/helpers/reward.zig");
 const EnergyHelper = @import("../../logic/helpers/energy.zig");
@@ -199,6 +200,7 @@ pub fn onMatchChangeRoleRequest(
     alloc: mem.Alloc,
     io: std.Io,
     pid: PlayerID,
+    role_comp: *const PlayerRoleComponent,
     coop: *CoopService,
 ) !void {
     coop.mutex.lockUncancelable(io);
@@ -208,7 +210,23 @@ pub fn onMatchChangeRoleRequest(
         }
     }
     coop.mutex.unlock(io);
-    coop.broadcastMatch(alloc.gpa, io, pid.id, 0, pb.MatchChangeRoleNotify{ .PlayerId = pid.id });
+    var role_infos: std.ArrayList(pb.MatchRoleInfo) = .empty;
+    for (txn.message.RoleId.items, 0..) |rid, idx| {
+        if (rid <= 0) continue;
+        const lv: i32 = if (role_comp.role_map.get(rid)) |r| r.level else 1;
+        const branch_id: i32 = if (idx < txn.message.SkillBranchId.items.len) txn.message.SkillBranchId.items[idx] else 0;
+        const phantom_id: i32 = if (idx < txn.message.TowerDefencePhantomId.items.len) txn.message.TowerDefencePhantomId.items[idx] else 0;
+        try role_infos.append(alloc.arena, .{
+            .RoleId = rid,
+            .RoleLevel = lv,
+            .SkillBranchId = branch_id,
+            .TowerDefencePhantomId = phantom_id,
+        });
+    }
+    coop.broadcastMatch(alloc.gpa, io, pid.id, 0, pb.MatchChangeRoleNotify{
+        .PlayerId = pid.id,
+        .RoleInfo = role_infos,
+    });
     txn.respond(.{ .ErrorCode = .Success });
 }
 

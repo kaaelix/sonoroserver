@@ -218,23 +218,6 @@ const SpawnTransform = struct {
     has_gravity_config: bool = false,
 };
 
-fn rotateLocalOffsetUe(local: [3]f32, rot_deg: [3]f32) [3]f32 {
-    const to_rad = std.math.pi / 180.0;
-    const sr = @sin(rot_deg[0] * to_rad);
-    const cr = @cos(rot_deg[0] * to_rad);
-    const sp = @sin(rot_deg[1] * to_rad);
-    const cp = @cos(rot_deg[1] * to_rad);
-    const sy = @sin(rot_deg[2] * to_rad);
-    const cy = @cos(rot_deg[2] * to_rad);
-
-    // UE FRotationMatrix::MakeFromRotator(Pitch=rot_deg[1], Yaw=rot_deg[2], Roll=rot_deg[0]):
-    return .{
-        local[0] * (cp * cy) + local[1] * (sr * sp * cy - cr * sy) + local[2] * (-(cr * sp * cy + sr * sy)),
-        local[0] * (cp * sy) + local[1] * (sr * sp * sy + cr * cy) + local[2] * (cy * sr - cr * sp * sy),
-        local[0] * sp + local[1] * (-sr * cp) + local[2] * (cr * cp),
-    };
-}
-
 fn resolveTeleporterSpawn(
     is_nexus: bool,
     entity_cfg: *const LevelEntityConfig,
@@ -249,7 +232,7 @@ fn resolveTeleporterSpawn(
 
     var ox: f32 = 0.0;
     var oy: f32 = if (is_pillar_tp) 300.0 else 0.0;
-    var oz: f32 = 85.0;
+    var oz: f32 = 0.0;
     var yaw: f32 = base_rot[2];
 
     const tc_opt = entity_cfg.ComponentsData.TeleportComponent orelse entity_cfg.ComponentsData.DynamicTeleportComponent;
@@ -262,17 +245,22 @@ fn resolveTeleporterSpawn(
                 ox = px;
                 oy = py;
             }
-            // TeleportPos.Z is ground surface height relative to entity origin; always add +85cm capsule half-height.
-            oz = (p.Z orelse 0.0) + 85.0;
+            // TeleportPos.Z is ground surface height relative to entity origin.
+            oz = p.Z orelse 0.0;
             yaw = base_rot[2] + (p.A orelse 0.0);
         }
     }
 
-    const rotated = rotateLocalOffsetUe(.{ ox, oy, oz }, base_rot);
+    const rotated = GravityHelper.rotateLocalOffsetUe(.{ ox, oy, oz }, base_rot);
+    // Capsule half-height (85cm) must lift away from the gravity down vector.
+    const cap_up = if (grav.configured)
+        [3]f32{ -grav.dir[0] * 85.0, -grav.dir[1] * 85.0, -grav.dir[2] * 85.0 }
+    else
+        GravityHelper.rotateLocalOffsetUe(.{ 0.0, 0.0, 85.0 }, base_rot);
     return .{
-        .x = base_pos[0] + rotated[0],
-        .y = base_pos[1] + rotated[1],
-        .z = base_pos[2] + rotated[2],
+        .x = base_pos[0] + rotated[0] + cap_up[0],
+        .y = base_pos[1] + rotated[1] + cap_up[1],
+        .z = base_pos[2] + rotated[2] + cap_up[2],
         .yaw = yaw,
         .gravity = grav.dir,
         .has_gravity_config = grav.configured,
