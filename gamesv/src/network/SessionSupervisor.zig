@@ -57,6 +57,7 @@ fn cleanupGameplay(
                     live_state,
                     gameplay.connection.seq,
                     gameplay.connection.last_client_seq_no,
+                    gameplay.connection.last_scene_transition_seq,
                 )) {
                     gameplay.state = null;
                     gameplay.claimed_player_id = null;

@@ -28,6 +28,7 @@ send_mutex: Io.Mutex = .init,
 session_key: ?[32]u8 = null,
 seq: u32 = 0,
 last_client_seq_no: u32 = 0,
+last_scene_transition_seq: u32 = 0,
 
 pub fn recordClientSeqNo(connection: *Connection, header: Message.Header) void {
     const seq_no = switch (header) {
@@ -619,17 +620,31 @@ fn processInboundMessage(
         const is_reconnect = pending_reconnect.* != null;
         var maybe_handoff = session_manager.takeHandoff(io, id);
         if (pending_reconnect.*) |reconnect| {
-            const permit_silent_login = maybe_handoff != null;
             const last_seq: u32 = @intCast(@max(reconnect.last_server_seq_no, 0));
+            if (maybe_handoff) |*handoff| {
+                if (last_seq < handoff.last_scene_transition_seq) {
+                    log.info(
+                        "player({d}) reconnect seq={d} missed scene transition seq={d}; forcing fresh login",
+                        .{ id, last_seq, handoff.last_scene_transition_seq },
+                    );
+                    handoff.state.deinit(gpa, io, fs);
+                    maybe_handoff = null;
+                }
+            }
+            const permit_silent_login = maybe_handoff != null;
             const restored_client_seq_no: u32 = if (maybe_handoff) |handoff| handoff.last_client_seq_no else 0;
             gameplay.connection.seq = if (maybe_handoff) |handoff|
                 @max(handoff.seq, last_seq)
             else
                 last_seq;
             gameplay.connection.last_client_seq_no = restored_client_seq_no;
+            gameplay.connection.last_scene_transition_seq = if (maybe_handoff) |handoff|
+                handoff.last_scene_transition_seq
+            else
+                0;
 
             gameplay.connection.respond(gpa, io, reconnect.rpc_id, proto.pb.ReconnectResponse{
-                .ErrorCode = .Success,
+                .ErrorCode = if (permit_silent_login) .Success else .ErrReconnectGwgetGatePlayerFailed,
                 .LastRecvSeqNo = resolveReconnectLastRecvSeqNo(restored_client_seq_no, reconnect.last_server_seq_no),
                 .Timestamp = Io.Clock.real.now(fs.io).toMilliseconds(),
                 .IsPermittedSilentLogin = permit_silent_login,
@@ -640,7 +655,7 @@ fn processInboundMessage(
             };
             pending_reconnect.* = null;
             if (!permit_silent_login) {
-                log.info("player({d}) reconnect requires fresh login (no live session to hand off)", .{id});
+                log.info("player({d}) reconnect requires fresh login (no compatible live session to hand off)", .{id});
                 return false;
             }
         }
@@ -883,6 +898,9 @@ pub fn push(conn: *Connection, gpa: Allocator, io: Io, message: anytype) !void {
         .seq_no = conn.nextSeqNo(),
         .msg_id = @field(proto.pb_desc, name).msg_id,
     };
+    if (@TypeOf(message) == proto.pb.LeaveSceneNotify or @TypeOf(message) == proto.pb.JoinSceneNotify) {
+        conn.last_scene_transition_seq = header.seq_no;
+    }
 
     try conn.enqueue(gpa, io, .{ .push = header }, message);
 }

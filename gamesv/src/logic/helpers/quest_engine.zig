@@ -44,6 +44,8 @@ pub fn logHookErr(comptime hook: []const u8, err: anyerror) void {
 }
 pub const syncWorldStateOnJoin = QuestActions.syncWorldStateOnJoin;
 pub const emitEntityStateTagUpdate = QuestActions.emitEntityStateTagUpdate;
+pub const emitEntityStateTagUpdateChecked = QuestActions.emitEntityStateTagUpdateChecked;
+pub const hasClientLevelTagComponent = @import("../handlers/tags.zig").hasClientLevelTagComponent;
 pub const entityDataLayersActive = QuestActions.entityDataLayersActive;
 pub const syncPersistedVehicleNpcLinks = QuestActions.syncPersistedVehicleNpcLinks;
 pub const updatePlayerSceneState = QuestActions.updatePlayerSceneState;
@@ -5880,10 +5882,19 @@ fn buildReadyQuestList(ctx: QuestContext) !std.ArrayList(i32) {
     var list: std.ArrayList(i32) = .empty;
     if (!ctx.quest_comp.info.hasFinishedQuest(prologue_quest_id)) return list;
 
+    const cur_map: i32 = if (ctx.scene) |s| s.instance_id else if (ctx.scene_comp) |sc| sc.last_scene_info.instance_id else 8;
     const eval_ctx = makeEvalContext(ctx);
     for (ctx.assets.tables.quest_data.items) |q| {
         const d = q.Data;
         if (!std.mem.eql(u8, d.DistributeType, "Interact")) continue;
+        if (d.DungeonId > 0 and d.DungeonId != cur_map) continue;
+        if (d.AddInteractOption) |aio| {
+            if (aio == .object) {
+                if (jsonInt(aio.object.get("EntityId"))) |eid| {
+                    if (eid > 0 and ctx.assets.findLevelEntity(cur_map, eid) == null) continue;
+                }
+            }
+        }
         if (!isEligibleQuest(ctx, d, false)) continue;
         if (ConditionEvaluator.evalQuestProvideConditions(eval_ctx, d.ProvideType)) {
             try list.append(ctx.alloc.arena, d.Id);

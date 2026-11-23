@@ -1,36 +1,51 @@
 const std = @import("std");
 const pb = @import("proto").pb;
+const Assets = @import("../../data/Assets.zig");
 const EventQueue = @import("../EventQueue.zig");
 const Scene = @import("../Scene.zig");
 const mem = @import("../../mem.zig");
 const Connection = @import("../../network/Connection.zig");
 
-const EntityTagTargetQuery = Scene.Query(&.{
-    Scene.Entity,
-    *Scene.Entity.ConfigComponent,
-    ?*Scene.Entity.VehicleComponent,
-    ?*Scene.Entity.FsmComponent,
-});
+/// Client only attaches `LevelTagComponent` on monsters, scene items, custom/scene entities,
+/// and non-vehicle `Common` (`NpcType == 0`) NPCs (`Simple`/`Passerby`/`Vehicle`/`Tuanzi` lack it).
+pub fn hasClientLevelTagComponent(scene: *const Scene, assets: ?*const Assets, net_id: i64) bool {
+    const idx = scene.net_id_map.get(net_id) orelse return false;
+    const cfg = scene.entities.items(.config)[idx];
+    return switch (cfg.entity_type) {
+        .monster, .scene_item, .custom, .scene_entity => true,
+        .npc => blk: {
+            if (scene.entities.items(.vehicle)[idx] != null) break :blk false;
+            if (scene.entities.items(.fsm)[idx] == null) break :blk false;
+            if (assets) |a| {
+                if (a.findLevelEntity(scene.instance_id, cfg.config_id)) |le| {
+                    if (le.ComponentsData.BaseInfoComponent) |bi| {
+                        if (bi.Category) |cat| {
+                            if (cat.NpcType) |nt| {
+                                if (nt != 0) break :blk false;
+                            }
+                        }
+                    }
+                    if (std.mem.eql(u8, le.BlueprintType, "PasserbyNpc") or
+                        std.mem.eql(u8, le.BlueprintType, "SimpleNpc")) break :blk false;
+                }
+            }
+            break :blk true;
+        },
+        else => false,
+    };
+}
 
 pub fn updateGameplayTags(
     event: EventQueue.Dequeue(.gameplay_tag_change),
     conn: *Connection,
-    target_query: EntityTagTargetQuery,
+    scene: *Scene,
+    assets: *const Assets,
     alloc: mem.Alloc,
     io: std.Io,
 ) !void {
     if (event.data.add_tag_ids.len == 0 and event.data.remove_tag_ids.len == 0) return;
 
-    const has_level_tag_comp = if (target_query.byNetId(event.data.entity.net_id)) |item| blk: {
-        _, const cfg, const vehicle, const fsm = item;
-        break :blk switch (cfg.entity_type) {
-            .monster, .scene_item, .custom, .scene_entity => true,
-            .npc => vehicle == null and fsm != null,
-            else => false,
-        };
-    } else false;
-
-    if (has_level_tag_comp) {
+    if (hasClientLevelTagComponent(scene, assets, event.data.entity.net_id)) {
         // LevelTagComponent entities (monsters/scene items/scene entities/NPCs) sync via EntityCommonTagNotify
         // even when IsMoveAutonomousProxy is true; Role/Vehicle/Vision lack LevelTagComponent on client.
         var common_notify: pb.EntityCommonTagNotify = .{ .Id = event.data.entity.net_id };

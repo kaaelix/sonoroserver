@@ -725,6 +725,9 @@ pub const spawn = struct {
                 .SceneItemEventListenerComponent => {
                     scene.entities.items(.world_item)[entity.index].listener_present = true;
                 },
+                .BatchBulletCasterComponent => {
+                    scene.entities.items(.world_item)[entity.index].batch_bullet_cast_present = true;
+                },
                 .QuickHackComponent => {
                     scene.entities.items(.world_item)[entity.index].hacking_present = true;
                 },

@@ -732,7 +732,7 @@ fn tryUnlockTeleporterForInteraction(
                         try quest_comp.save(fs, alloc.arena);
                         if (scene.findEntityNetIdByConfigId(cfg_id32)) |nid| {
                             if (try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, nid, "关卡.Common.状态.激活")) |upd| {
-                                try QuestEngine.emitEntityStateTagUpdate(conn, alloc.gpa, alloc.arena, io, nid, upd);
+                                try QuestEngine.emitEntityStateTagUpdateChecked(scene, assets, conn, alloc.gpa, alloc.arena, io, nid, upd);
                             }
                         }
                     }

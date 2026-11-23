@@ -33,6 +33,7 @@ pub const WorldItemState = struct {
     buff_producer_present: bool = false,
     buff_consumer_present: bool = false,
     listener_present: bool = false,
+    batch_bullet_cast_present: bool = false,
     hacking_present: bool = false,
     hack_target_present: bool = false,
     pulling_foundation_present: bool = false,
@@ -428,6 +429,12 @@ pub fn entityToProto(
     if (storage.world_item.listener_present) {
         try entity.ComponentPbs.append(alloc.arena, .{
             .ComponentPb = .{ .SceneItemEventListenerComponentPb = .{} },
+        });
+    }
+
+    if (storage.world_item.batch_bullet_cast_present) {
+        try entity.ComponentPbs.append(alloc.arena, .{
+            .ComponentPb = .{ .BatchBulletCastComponentPb = .{ .ConstateId = 0 } },
         });
     }
 

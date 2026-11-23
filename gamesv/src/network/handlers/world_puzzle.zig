@@ -163,7 +163,7 @@ pub fn onChangeEntityStateRequest(
         if (txn.message.EntityId != 0) {
             if (net_id_opt) |net_id| {
                 if (try scene.updateEntityStateTagId(alloc.gpa, net_id, txn.message.StateTagId)) |upd| {
-                    try QuestEngine.emitEntityStateTagUpdate(txn.conn, alloc.gpa, alloc.arena, io, net_id, upd);
+                    try QuestEngine.emitEntityStateTagUpdateChecked(scene, assets, txn.conn, alloc.gpa, alloc.arena, io, net_id, upd);
                 }
             }
 
@@ -440,6 +440,7 @@ pub fn onEntityPatrolAddTagRequest(
     alloc: mem.Alloc,
     io: std.Io,
     fs: *FileSystem,
+    assets: *const Assets,
     scene_opt: *?Scene,
     pc: *PlayerProgressComponent,
 ) !void {
@@ -457,9 +458,11 @@ pub fn onEntityPatrolAddTagRequest(
                     try new_tags.setGameplayTagCount(alloc.gpa, txn.message.TagId, 1);
                     tag_slot.* = new_tags;
                 }
-                var notify: pb.EntityCommonTagNotify = .{ .Id = txn.message.EntityId };
-                try notify.Tags.append(alloc.arena, .{ .TagId = txn.message.TagId, .RemoveTagIds = true });
-                txn.conn.pushBestEffort(alloc.gpa, io, notify);
+                if (QuestEngine.hasClientLevelTagComponent(scene, assets, txn.message.EntityId)) {
+                    var notify: pb.EntityCommonTagNotify = .{ .Id = txn.message.EntityId };
+                    try notify.Tags.append(alloc.arena, .{ .TagId = txn.message.TagId, .RemoveTagIds = true });
+                    txn.conn.pushBestEffort(alloc.gpa, io, notify);
+                }
                 scene.markFsmDirty(alloc.gpa, txn.message.EntityId, Scene.Entity.FsmComponent.WakeReason.tag) catch {};
             }
         }
@@ -726,7 +729,7 @@ pub fn onSetInitTagRequest(
             null;
         if (net_id_opt) |nid| {
             if (try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, nid, "关卡.Common.状态.常态")) |upd| {
-                try QuestEngine.emitEntityStateTagUpdate(txn.conn, alloc.gpa, alloc.arena, io, nid, upd);
+                try QuestEngine.emitEntityStateTagUpdateChecked(scene, assets, txn.conn, alloc.gpa, alloc.arena, io, nid, upd);
             }
         }
     }
@@ -793,7 +796,7 @@ pub fn onSetFanStateRequest(
             }
             const state_name: []const u8 = if (txn.message.IsActive != 0) "关卡.Common.状态.激活" else "关卡.Common.状态.常态";
             if (try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, nid, state_name)) |upd| {
-                try QuestEngine.emitEntityStateTagUpdate(txn.conn, alloc.gpa, alloc.arena, io, nid, upd);
+                try QuestEngine.emitEntityStateTagUpdateChecked(scene, assets, txn.conn, alloc.gpa, alloc.arena, io, nid, upd);
             }
         }
     }
@@ -2758,7 +2761,7 @@ pub fn onAwakeDynamicPortalRequest(
         if (net_id_opt) |nid| {
             const state_name: []const u8 = if (txn.message.IsAwake) "关卡.Common.状态.激活" else "关卡.Common.状态.常态";
             if (try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, nid, state_name)) |upd| {
-                try QuestEngine.emitEntityStateTagUpdate(txn.conn, alloc.gpa, alloc.arena, io, nid, upd);
+                try QuestEngine.emitEntityStateTagUpdateChecked(scene, assets, txn.conn, alloc.gpa, alloc.arena, io, nid, upd);
             }
         }
     }

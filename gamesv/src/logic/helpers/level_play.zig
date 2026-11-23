@@ -1458,7 +1458,7 @@ pub fn onGetRewardTreasureBox(ctx: LevelPlayContext, net_id: i64) !void {
     }
 
     if (try ctx.scene.updateEntityStateTag(ctx.alloc.gpa, &ctx.assets.tables.gameplay_tag_remap, net_id, "关卡.Common.状态.激活")) |upd| {
-        try QuestEngine.emitEntityStateTagUpdate(ctx.conn, ctx.alloc.gpa, ctx.alloc.arena, ctx.io, net_id, upd);
+        try QuestEngine.emitEntityStateTagUpdateChecked(ctx.scene, ctx.assets, ctx.conn, ctx.alloc.gpa, ctx.alloc.arena, ctx.io, net_id, upd);
     }
 
     if (completed_lp_id) |lp_id| {

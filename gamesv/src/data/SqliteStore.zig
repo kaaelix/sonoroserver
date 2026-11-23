@@ -13,6 +13,9 @@ db: sqlite.Db,
 io: Io,
 gpa: Allocator,
 mutex: Io.Mutex = .init,
+stmt_upsert_state: sqlite.Stmt,
+stmt_delete_file: sqlite.Stmt,
+stmt_upsert_player: sqlite.Stmt,
 
 pub fn init(gpa: Allocator, io: Io, state_dir: []const u8) !*SqliteStore {
     const db_path = try std.fmt.allocPrintSentinel(gpa, "{s}/gamesv.db", .{state_dir}, 0);
@@ -23,11 +26,39 @@ pub fn init(gpa: Allocator, io: Io, state_dir: []const u8) !*SqliteStore {
 
     try ensureSchema(&db);
 
+    var stmt_upsert_state = try db.prepare(
+        \\INSERT INTO state_files(path, content, updated_at) VALUES(?1, ?2, ?3)
+        \\ON CONFLICT(path) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at;
+    );
+    errdefer stmt_upsert_state.deinit();
+
+    var stmt_delete_file = try db.prepare("DELETE FROM state_files WHERE path = ?1;");
+    errdefer stmt_delete_file.deinit();
+
+    var stmt_upsert_player = try db.prepare(
+        \\INSERT INTO players(player_id, name, level, exp, coin, rare_coin, cash_coin, sex, world_level, updated_at)
+        \\VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        \\ON CONFLICT(player_id) DO UPDATE SET
+        \\  name = excluded.name,
+        \\  level = excluded.level,
+        \\  exp = excluded.exp,
+        \\  coin = excluded.coin,
+        \\  rare_coin = excluded.rare_coin,
+        \\  cash_coin = excluded.cash_coin,
+        \\  sex = excluded.sex,
+        \\  world_level = excluded.world_level,
+        \\  updated_at = excluded.updated_at;
+    );
+    errdefer stmt_upsert_player.deinit();
+
     const store = try gpa.create(SqliteStore);
     store.* = .{
         .db = db,
         .io = io,
         .gpa = gpa,
+        .stmt_upsert_state = stmt_upsert_state,
+        .stmt_delete_file = stmt_delete_file,
+        .stmt_upsert_player = stmt_upsert_player,
     };
     log.info("Shared SQLite store initialized at {s} (WAL mode)", .{db_path});
     return store;
@@ -36,6 +67,9 @@ pub fn init(gpa: Allocator, io: Io, state_dir: []const u8) !*SqliteStore {
 pub fn deinit(store: *SqliteStore) void {
     store.mutex.lockUncancelable(store.io);
     defer store.mutex.unlock(store.io);
+    store.stmt_upsert_player.deinit();
+    store.stmt_delete_file.deinit();
+    store.stmt_upsert_state.deinit();
     store.db.close();
     store.gpa.destroy(store);
 }
@@ -137,10 +171,9 @@ fn handleSync(store: *SqliteStore, op: FileSystem.SyncOp, path: []const u8, cont
     switch (op) {
         .write => try store.upsertStateFileLocked(path, content, now_s),
         .delete_file => {
-            var stmt = try store.db.prepare("DELETE FROM state_files WHERE path = ?1;");
-            defer stmt.deinit();
-            try stmt.bindText(1, path);
-            _ = try stmt.step();
+            store.stmt_delete_file.reset();
+            try store.stmt_delete_file.bindText(1, path);
+            _ = try store.stmt_delete_file.step();
         },
         .delete_tree => {
             const prefix = try std.fmt.allocPrint(store.gpa, "{s}/%", .{path});
@@ -155,15 +188,11 @@ fn handleSync(store: *SqliteStore, op: FileSystem.SyncOp, path: []const u8, cont
 }
 
 fn upsertStateFileLocked(store: *SqliteStore, path: []const u8, content: []const u8, now_s: i64) !void {
-    var stmt = try store.db.prepare(
-        \\INSERT INTO state_files(path, content, updated_at) VALUES(?1, ?2, ?3)
-        \\ON CONFLICT(path) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at;
-    );
-    defer stmt.deinit();
-    try stmt.bindText(1, path);
-    try stmt.bindText(2, content);
-    try stmt.bindInt(3, now_s);
-    _ = try stmt.step();
+    store.stmt_upsert_state.reset();
+    try store.stmt_upsert_state.bindText(1, path);
+    try store.stmt_upsert_state.bindText(2, content);
+    try store.stmt_upsert_state.bindInt(3, now_s);
+    _ = try store.stmt_upsert_state.step();
 
     // Also mirror structured player basic info if path is player/<uid>/basic_info
     if (std.mem.startsWith(u8, path, "player/") and std.mem.endsWith(u8, path, "/basic_info")) {
@@ -207,32 +236,18 @@ fn upsertPlayerFromZonLocked(store: *SqliteStore, uid: i64, content: []const u8,
     const sex = extractZonInt(content, ".sex") orelse 1;
     const world_level = extractZonInt(content, ".cur_world_level") orelse 1;
 
-    var stmt = try store.db.prepare(
-        \\INSERT INTO players(player_id, name, level, exp, coin, rare_coin, cash_coin, sex, world_level, updated_at)
-        \\VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-        \\ON CONFLICT(player_id) DO UPDATE SET
-        \\  name = excluded.name,
-        \\  level = excluded.level,
-        \\  exp = excluded.exp,
-        \\  coin = excluded.coin,
-        \\  rare_coin = excluded.rare_coin,
-        \\  cash_coin = excluded.cash_coin,
-        \\  sex = excluded.sex,
-        \\  world_level = excluded.world_level,
-        \\  updated_at = excluded.updated_at;
-    );
-    defer stmt.deinit();
-    try stmt.bindInt(1, uid);
-    try stmt.bindText(2, name);
-    try stmt.bindInt(3, level);
-    try stmt.bindInt(4, exp);
-    try stmt.bindInt(5, coin);
-    try stmt.bindInt(6, rare_coin);
-    try stmt.bindInt(7, cash_coin);
-    try stmt.bindInt(8, sex);
-    try stmt.bindInt(9, world_level);
-    try stmt.bindInt(10, now_s);
-    _ = try stmt.step();
+    store.stmt_upsert_player.reset();
+    try store.stmt_upsert_player.bindInt(1, uid);
+    try store.stmt_upsert_player.bindText(2, name);
+    try store.stmt_upsert_player.bindInt(3, level);
+    try store.stmt_upsert_player.bindInt(4, exp);
+    try store.stmt_upsert_player.bindInt(5, coin);
+    try store.stmt_upsert_player.bindInt(6, rare_coin);
+    try store.stmt_upsert_player.bindInt(7, cash_coin);
+    try store.stmt_upsert_player.bindInt(8, sex);
+    try store.stmt_upsert_player.bindInt(9, world_level);
+    try store.stmt_upsert_player.bindInt(10, now_s);
+    _ = try store.stmt_upsert_player.step();
 }
 
 pub fn backfillExistingState(store: *SqliteStore, fs: *FileSystem) !usize {

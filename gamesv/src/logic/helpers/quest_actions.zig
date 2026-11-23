@@ -22,6 +22,7 @@ const map_handler = @import("../../network/handlers/map.zig");
 const spline_state = @import("spline_state.zig");
 const MoraleHelper = @import("morale.zig");
 const GravityHelper = @import("gravity.zig");
+const tags_handler = @import("../handlers/tags.zig");
 
 const log = std.log.scoped(.quest_actions);
 
@@ -1484,6 +1485,29 @@ pub fn syncWorldStateOnJoin(ctx: QuestContext) !void {
     }
 }
 
+pub fn emitEntityStateTagUpdateChecked(
+    scene: *const Scene,
+    assets: ?*const Assets,
+    conn: *Connection,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    net_id: i64,
+    upd: Scene.StateTagUpdate,
+) !void {
+    if (tags_handler.hasClientLevelTagComponent(scene, assets, net_id)) {
+        try emitEntityStateTagUpdate(conn, gpa, arena, io, net_id, upd);
+        return;
+    }
+    if (upd.new_tag_id != 0) {
+        conn.push(gpa, io, pb.EntityStateReadyNotify{
+            .EntityId = net_id,
+            .TagId = upd.new_tag_id,
+            .Ready = true,
+        }) catch {};
+    }
+}
+
 pub fn emitEntityStateTagUpdate(
     conn: *Connection,
     gpa: std.mem.Allocator,
@@ -1513,7 +1537,11 @@ pub fn emitEntityStateTagUpdate(
 }
 
 fn emitEntityStateTags(ctx: QuestContext, net_id: i64, upd: Scene.StateTagUpdate) !void {
-    try emitEntityStateTagUpdate(ctx.conn, ctx.alloc.gpa, ctx.alloc.arena, ctx.io, net_id, upd);
+    if (ctx.scene) |scene| {
+        try emitEntityStateTagUpdateChecked(scene, ctx.assets, ctx.conn, ctx.alloc.gpa, ctx.alloc.arena, ctx.io, net_id, upd);
+    } else {
+        try emitEntityStateTagUpdate(ctx.conn, ctx.alloc.gpa, ctx.alloc.arena, ctx.io, net_id, upd);
+    }
 }
 
 fn applyChangeEntityState(ctx: QuestContext, callbacks: ActionCallbacks, params: std.json.ObjectMap) !void {
@@ -2439,7 +2467,7 @@ pub fn ensureQuestEntitySpawned(ctx: QuestContext, entity_config_id: i32) void {
             if (saved_state.len != 0) {
                 if (scene.updateEntityStateTag(ctx.alloc.gpa, &ctx.assets.tables.gameplay_tag_remap, nid, saved_state) catch null) |upd| {
                     if (upd.old_tag_id != upd.new_tag_id) {
-                        emitEntityStateTagUpdate(ctx.conn, ctx.alloc.gpa, ctx.alloc.arena, ctx.io, nid, upd) catch {};
+                        emitEntityStateTagUpdateChecked(scene, ctx.assets, ctx.conn, ctx.alloc.gpa, ctx.alloc.arena, ctx.io, nid, upd) catch {};
                     }
                 }
             }
@@ -2990,7 +3018,7 @@ fn applyEntityGameplayTagChange(
         }
         try notify.Tags.append(ctx.alloc.arena, .{ .TagId = tid, .RemoveTagIds = is_add });
     }
-    if (notify.Tags.items.len > 0) {
+    if (notify.Tags.items.len > 0 and tags_handler.hasClientLevelTagComponent(scene, ctx.assets, net_id)) {
         ctx.conn.push(ctx.alloc.gpa, ctx.io, notify) catch {};
     }
     scene.markFsmDirty(ctx.alloc.gpa, net_id, Scene.Entity.FsmComponent.WakeReason.tag) catch {};

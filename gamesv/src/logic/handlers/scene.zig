@@ -379,6 +379,16 @@ fn applyStoredWorldEntityOverrides(
         scene.entities.items(.world_item)[index].scene_item = null;
     }
 
+    scene.entities.items(.world_item)[index].batch_bullet_cast_present = false;
+    if (assets.findLevelEntity(scene.instance_id, config_id)) |lvl_cfg| {
+        for (lvl_cfg.ComponentsData.extra) |entry| {
+            if (entry == .BatchBulletCasterComponent) {
+                scene.entities.items(.world_item)[index].batch_bullet_cast_present = true;
+                break;
+            }
+        }
+    }
+
     if (scene.entities.items(.world_item)[index].interact) |*interact| interact.deinit(alloc.gpa);
     scene.entities.items(.world_item)[index].interact = null;
     if (entityInteractConfig(assets, scene, config_id)) |interact_config| {
@@ -670,7 +680,8 @@ pub fn onInitialSceneJoin(
     const new_scene_now_ms = (Io.Clock.awake).now(io).toMilliseconds();
     try buff_timers.ensureAllRegistered(alloc.gpa, &scene, assets, new_scene_now_ms);
     buff_timers.syncAllLeftDurations(&scene, new_scene_now_ms);
-    try scene.save(fs, alloc.gpa);
+    // notifyJoinScene performs the full scene.save once join setup finishes; avoid double-saving 2k+ entities here.
+    try scene.savePersistent(fs, alloc.gpa);
     try events.enqueue(.scene_switch, .{
         .pending_flow = event.data.pending_flow,
     });
@@ -1667,7 +1678,7 @@ fn spawnNearbyWorldEntities(
                     if (scene.findEntityNetIdByConfigId(cfg_id32)) |nid| {
                         if (try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, nid, state_name)) |upd| {
                             if (upd.old_tag_id != upd.new_tag_id) {
-                                try QuestEngine.emitEntityStateTagUpdate(conn, alloc.gpa, alloc.arena, io, nid, upd);
+                                try QuestEngine.emitEntityStateTagUpdateChecked(scene, assets, conn, alloc.gpa, alloc.arena, io, nid, upd);
                             }
                         }
                     }

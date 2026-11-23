@@ -188,6 +188,10 @@ fn readEntireFileAlloc(io: Io, dir: Io.Dir, sub_path: []const u8, a: Allocator) 
 }
 
 fn writeEntryLocked(fs: *FileSystem, entry: *FileEntry, path: []const u8, content: []const u8) !void {
+    if (entry.content) |old_content| {
+        if (std.mem.eql(u8, old_content, content)) return;
+    }
+
     const new_copy = try fs.gpa.dupe(u8, content);
     errdefer fs.gpa.free(new_copy);
 

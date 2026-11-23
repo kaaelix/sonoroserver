@@ -150,6 +150,7 @@ pub const SessionManager = struct {
         state: State,
         seq: u32,
         last_client_seq_no: u32 = 0,
+        last_scene_transition_seq: u32 = 0,
     };
 
     mutex: Io.Mutex = .init,
@@ -231,6 +232,7 @@ pub const SessionManager = struct {
         state: State,
         seq: u32,
         last_client_seq_no: u32,
+        last_scene_transition_seq: u32,
     ) bool {
         manager.mutex.lockUncancelable(io);
         defer manager.mutex.unlock(io);
@@ -246,6 +248,7 @@ pub const SessionManager = struct {
             .state = state,
             .seq = seq,
             .last_client_seq_no = last_client_seq_no,
+            .last_scene_transition_seq = last_scene_transition_seq,
         }) catch {
             _ = manager.sessions.remove(player_id);
             return false;

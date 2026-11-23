@@ -45,7 +45,8 @@ fn dispatchLogicEvent(q: *EventQueue, e: EventQueue.Event, state: *State, gpa: s
                         .@"fn" => |fn_info| {
                             if (fn_info.params.len == 0) continue;
 
-                            const EventDequeue = fn_info.params[0].type.?;
+                            const EventDequeue = fn_info.params[0].type orelse continue;
+                            if (@typeInfo(EventDequeue) != .@"struct") continue;
                             if (!@hasDecl(EventDequeue, "dequeue_event_tag")) continue;
 
                             if (EventDequeue.dequeue_event_tag != tag) continue;
