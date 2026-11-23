@@ -3315,9 +3315,8 @@ pub fn onNavigationFindPathRequest(
 ) !void {
     var path: std.ArrayList(pb.Vector) = .empty;
     if (txn.message.StartPos) |s| try path.append(alloc.arena, s);
-    if (txn.message.StartPos != null and txn.message.EndPos != null) {
-        const s = txn.message.StartPos.?;
-        const e = txn.message.EndPos.?;
+    if (txn.message.StartPos) |s| {
+        if (txn.message.EndPos) |e| {
         const start3: [3]f32 = .{ s.X, s.Y, s.Z };
         const end3: [3]f32 = .{ e.X, e.Y, e.Z };
         const map_id = assets.resolveMapConfigId(if (txn.message.MapId > 0) txn.message.MapId else 8);
@@ -3367,6 +3366,7 @@ pub fn onNavigationFindPathRequest(
                 }
             }
             break;
+        }
         }
     }
     if (txn.message.EndPos) |e| try path.append(alloc.arena, e);

@@ -1065,6 +1065,9 @@ pub fn afterSceneJoin(
     try notifyInfrastructureRoadData(alloc, conn, assets, io);
     try QuestEngine.syncWorldStateOnJoin(qctx);
     try QuestEngine.pushReadyQuestList(qctx);
+    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+        try LevelPlayHelper.syncOnLogin(lp_ctx);
+    }
 
     const rtc: Io.Clock = .real;
     const monotonic_clock: Io.Clock = .awake;

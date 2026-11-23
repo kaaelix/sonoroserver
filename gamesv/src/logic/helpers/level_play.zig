@@ -21,6 +21,7 @@ const PlayerProgressComponent = @import("../component/player/PlayerProgressCompo
 const PlayerSceneComponent = @import("../component/player/PlayerSceneComponent.zig");
 const RewardService = @import("reward.zig");
 const QuestEngine = @import("quest_engine.zig");
+const quest_types = @import("quest_types.zig");
 const ConditionEvaluator = @import("condition.zig");
 const QuestInfo = @import("../../fs/QuestInfo.zig");
 const prologue_quest = @import("prologue_quest.zig");
@@ -460,6 +461,7 @@ fn pushLevelPlayBehaviorTreeInfo(
     try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.BehaviorTreeInfoNotify{
         .TreeInfos = tree_infos,
     });
+    try ctx.scene.sent_lp_bt_trees.put(ctx.alloc.gpa, lp_id, {});
 }
 
 fn finishLpNonChildNode(
@@ -798,6 +800,7 @@ fn stepLevelPlayNode(
         }
         return .running;
     } else if (std.mem.eql(u8, node.node_type, "Repeater")) {
+        const cd_key = quest_types.repeaterCooldownKey(lp_id, node.id);
         while (steps.* < 96) {
             if (node.data == .object) {
                 if (node.data.object.get("ExitCondition")) |ec| {
@@ -807,6 +810,9 @@ fn stepLevelPlayNode(
                         return .completed;
                     }
                 }
+            }
+            if (ctx.scene.lp_repeater_cooldowns.get(cd_key)) |ready_ms| {
+                if (QuestEngine.nowMsPub(ctx.io) < ready_ms) return .running;
             }
             var any_child = false;
             var child_completed = false;
@@ -827,6 +833,11 @@ fn stepLevelPlayNode(
             }
             if (!child_completed) return .running;
             resetLpSubtreeFinishedNodes(ctx, lp_id, nodes, node.id, dirty_pc);
+            const wait_ms = quest_types.subtreeWaitDelayMs(nodes, node.id);
+            if (wait_ms > 0) {
+                ctx.scene.lp_repeater_cooldowns.put(ctx.alloc.gpa, cd_key, QuestEngine.nowMsPub(ctx.io) + wait_ms) catch {};
+                return .running;
+            }
         }
         return .running;
     } else if (std.mem.eql(u8, node.node_type, "ChildQuest")) {
@@ -879,6 +890,19 @@ fn stepLevelPlayTree(
 ) !void {
     if (nodes.len == 0) return;
     if (QuestInfo.containsInt(ctx.quest_comp.info.completed_level_plays, lp_id)) return;
+    if (push_updates and !ctx.scene.sent_lp_bt_trees.contains(lp_id)) {
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LevelPlayStateNotify{
+            .Id = lp_id,
+            .State = 2,
+            .CompleteNumber = 0,
+        }) catch {};
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.EnterLevelPlayNotify{
+            .Id = lp_id,
+            .State = 2,
+            .CanGetReward = true,
+        }) catch {};
+        try pushLevelPlayBehaviorTreeInfo(ctx, lp_id, nodes);
+    }
     if (lp_step_depth > 0) {
         lp_recheck_pending = true;
         return;
@@ -1160,6 +1184,7 @@ pub fn completeLevelPlay(ctx: LevelPlayContext, level_play_id: i32) !void {
         .CompleteNumber = 1,
     });
     if (was_entered) {
+        _ = ctx.scene.sent_lp_bt_trees.remove(level_play_id);
         try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LeaveLevelPlayNotify{
             .Id = level_play_id,
         });
@@ -1672,6 +1697,7 @@ pub fn onPlayerMove(ctx: LevelPlayContext, x: f32, y: f32, z: f32) !void {
             if (!still_inside) {
                 if (try QuestInfo.removeIntValue(&ctx.quest_comp.info.progress.entered_level_plays, ctx.alloc.gpa, lpid)) {
                     dirty_entered = true;
+                    _ = ctx.scene.sent_lp_bt_trees.remove(lpid);
                     ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LeaveLevelPlayNotify{ .Id = lpid }) catch {};
                     continue;
                 }
@@ -1775,6 +1801,7 @@ pub fn onLevelPlayEnabled(ctx: LevelPlayContext, level_play_id: i32, enabled: bo
                 .State = 0,
                 .CompleteNumber = 0,
             }) catch {};
+            _ = ctx.scene.sent_lp_bt_trees.remove(level_play_id);
             ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.LeaveLevelPlayNotify{ .Id = level_play_id }) catch {};
             ctx.quest_comp.save(ctx.fs, ctx.alloc.arena) catch {};
         }

@@ -5,6 +5,7 @@ const common = @import("common");
 const FileSystem = common.FileSystem;
 const Connection = @import("../../network/Connection.zig");
 const Assets = @import("../../data/Assets.zig");
+const LazyNodeStore = @import("../../data/LazyNodeStore.zig");
 const Scene = @import("../Scene.zig");
 const EventQueue = @import("../EventQueue.zig");
 const PlayerBasicComponent = @import("../component/player/PlayerBasicComponent.zig");
@@ -294,4 +295,47 @@ pub fn parseStrList(arena: std.mem.Allocator, val_opt: ?std.json.Value) ![]const
         }
     }
     return out.items;
+}
+
+/// Builds a unique 64-bit cooldown key from an owner ID (positive for LevelPlay, negative for Quest) and node ID.
+pub fn repeaterCooldownKey(owner_id: i32, node_id: i32) i64 {
+    return (@as(i64, owner_id) << 32) | @as(i64, @as(u32, @bitCast(node_id)));
+}
+
+fn waitActionDelayMs(act_val: std.json.Value) i64 {
+    if (act_val != .object) return 0;
+    const name = jsonStr(act_val.object.get("Name")) orelse return 0;
+    if (!std.mem.eql(u8, name, "Wait")) return 0;
+    const p = act_val.object.get("Params") orelse return 0;
+    if (p != .object) return 0;
+    const secs = jsonFloat(p.object.get("Time")) orelse return 0;
+    if (secs <= 0) return 0;
+    return @max(@as(i64, 200), @as(i64, @intFromFloat(secs * 1000.0)));
+}
+
+pub fn actionListWaitDelayMs(actions_opt: ?std.json.Value) i64 {
+    const av = actions_opt orelse return 0;
+    if (av != .array) return 0;
+    var total_ms: i64 = 0;
+    for (av.array.items) |act_val| {
+        total_ms += waitActionDelayMs(act_val);
+    }
+    return total_ms;
+}
+
+/// Sums any `Wait` action durations under a Repeater subtree so timer-loop nodes throttle to their Wait cadence.
+pub fn subtreeWaitDelayMs(nodes: []const LazyNodeStore.NodeEntry, parent_id: i32) i64 {
+    var total_ms: i64 = 0;
+    for (nodes) |child| {
+        if (child.parent_id != parent_id) continue;
+        if (child.data == .object) {
+            total_ms += actionListWaitDelayMs(child.data.object.get("Actions"));
+            total_ms += actionListWaitDelayMs(child.data.object.get("FinishActions"));
+            if (child.data.object.get("Action")) |sv| {
+                total_ms += waitActionDelayMs(sv);
+            }
+        }
+        total_ms += subtreeWaitDelayMs(nodes, child.id);
+    }
+    return total_ms;
 }

@@ -3764,6 +3764,7 @@ fn stepNode(
         }
         return .running;
     } else if (std.mem.eql(u8, node.node_type, "Repeater")) {
+        const cd_key = quest_types.repeaterCooldownKey(-quest_id, node.id);
         while (steps.* < max_steps_per_advance) {
             if (node.data == .object) {
                 if (node.data.object.get("ExitCondition")) |ec| {
@@ -3772,6 +3773,11 @@ fn stepNode(
                         try finishNonChildNode(ctx, quest_id, node, push_updates);
                         return .completed;
                     }
+                }
+            }
+            if (ctx.scene) |scene| {
+                if (scene.lp_repeater_cooldowns.get(cd_key)) |ready_ms| {
+                    if (nowMs(ctx.io) < ready_ms) return .running;
                 }
             }
             var any_child = false;
@@ -3793,6 +3799,13 @@ fn stepNode(
             }
             if (!child_completed) return .running;
             try resetQuestSubtreeFinishedNodes(ctx, quest_id, nodes, node.id);
+            if (ctx.scene) |scene| {
+                const wait_ms = quest_types.subtreeWaitDelayMs(nodes, node.id);
+                if (wait_ms > 0) {
+                    scene.lp_repeater_cooldowns.put(ctx.alloc.gpa, cd_key, nowMs(ctx.io) + wait_ms) catch {};
+                    return .running;
+                }
+            }
         }
         return .running;
     } else if (std.mem.eql(u8, node.node_type, "ChildQuest")) {
@@ -5880,9 +5893,8 @@ fn buildReadyQuestList(ctx: QuestContext) !std.ArrayList(i32) {
 }
 
 pub fn pushReadyQuestList(ctx: QuestContext) !void {
-    if (ctx.scene) |scene| {
-        if (!scene.join_scene_pushed) return;
-    }
+    const scene = ctx.scene orelse return;
+    if (!scene.join_scene_pushed) return;
     const ready_list = try buildReadyQuestList(ctx);
     if (ready_list.items.len > 0) {
         try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.QuestReadyListNotify{ .QuestId = ready_list });

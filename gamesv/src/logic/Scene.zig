@@ -74,6 +74,8 @@ quest_timers: QuestTimerQueue = .{},
 lp_timers: QuestTimerQueue = .{},
 fail_timers: QuestTimerQueue = .{},
 lp_fail_timers: QuestTimerQueue = .{},
+sent_lp_bt_trees: std.AutoHashMapUnmanaged(i32, void) = .empty,
+lp_repeater_cooldowns: std.AutoHashMapUnmanaged(i64, i64) = .empty,
 bt_timers: std.ArrayListUnmanaged(ActiveBtTimer) = .empty,
 bt_occupations: std.ArrayListUnmanaged(BtOccupation) = .empty,
 save_node_keys: std.ArrayListUnmanaged(u64) = .empty,
@@ -447,6 +449,8 @@ pub fn deinit(scene: *Scene, gpa: Allocator, fs: *FileSystem) void {
     scene.lp_timers.deinit(gpa);
     scene.fail_timers.deinit(gpa);
     scene.lp_fail_timers.deinit(gpa);
+    scene.sent_lp_bt_trees.deinit(gpa);
+    scene.lp_repeater_cooldowns.deinit(gpa);
     scene.clearBtTimers(gpa);
     scene.bt_timers.deinit(gpa);
     scene.clearBtOccupations(gpa);
@@ -1572,7 +1576,7 @@ pub fn delete(
 ) !void {
     var path_buf: [128]u8 = undefined;
     const entity_path = try std.fmt.bufPrint(&path_buf, "player/{d}/scene/{d}/entity/{d}", .{ player_id, scene_id, net_id });
-    try fs.deleteFile(entity_path);
+    try fs.deleteTree(entity_path);
 }
 
 pub fn remove(scene: *Scene, gpa: Allocator, fs: *FileSystem, net_id: i64) !void {
