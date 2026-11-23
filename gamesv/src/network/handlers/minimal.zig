@@ -19,6 +19,8 @@ const Scene = @import("../../logic/Scene.zig");
 const PlayerRoleComponent = @import("../../logic/component/player/PlayerRoleComponent.zig");
 const Connection = @import("../../network/Connection.zig");
 const Transaction = @import("../handlers.zig").Transaction;
+const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
+const attributes_helper = @import("../../logic/helpers/attributes.zig");
 const pb_kv = @import("pb_kv.zig");
 
 const FileSystem = common.FileSystem;
@@ -922,7 +924,44 @@ pub fn onClientCurrentRoleReportRequest(txn: *Transaction(pb.ClientCurrentRoleRe
     });
 }
 
-pub fn onCharacterDeathPush(_: *Transaction(pb.CharacterDeathPush)) !void {}
+pub fn onCharacterDeathPush(
+    txn: *Transaction(pb.CharacterDeathPush),
+    alloc: mem.Alloc,
+    io: std.Io,
+    fs: *FileSystem,
+    scene_opt: *?Scene,
+    pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    _ = try pc.info.addKeyInt(alloc.gpa, "combat:char_death_cnt", 1);
+    try pc.save(fs, alloc.arena);
+    if (scene_opt.*) |*scene| {
+        var target_nid: i64 = scene.currentRoleEntityId();
+        if (txn.message.RoleId > 0) {
+            const slice = scene.entities.slice();
+            for (slice.items(.entity_id), slice.items(.config)) |eid, cfg| {
+                if (cfg.entity_type == .player and cfg.config_id == txn.message.RoleId) {
+                    target_nid = eid.net_id;
+                    break;
+                }
+            }
+        }
+        if (scene.net_id_map.get(target_nid)) |idx| {
+            if (scene.entities.items(.attribute)[idx]) |*attr| {
+                _ = attributes_helper.set_life_unconditional(attr, 0);
+                var changed: std.ArrayList(pb.EAttributeType) = .empty;
+                try changed.append(alloc.arena, .Life);
+                var cpack: std.ArrayList(pb.CombatReceiveData) = .empty;
+                try attributes_helper.generate_attr_messages(&cpack, target_nid, attr, &changed, alloc, io);
+                if (cpack.items.len > 0) {
+                    try txn.conn.push(alloc.gpa, io, pb.CombatReceivePackNotify{ .Data = cpack });
+                }
+            }
+            scene.markFsmDirty(alloc.gpa, target_nid, Scene.Entity.FsmComponent.WakeReason.attribute) catch {};
+        }
+    }
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
 pub fn onPlayerNetStatePush(_: *Transaction(pb.PlayerNetStatePush)) !void {}
 pub fn onRobotDestinationPush(_: *Transaction(pb.RobotDestinationPush)) !void {}
 pub fn onNetTestDataPush(_: *Transaction(pb.NetTestDataPush)) !void {}

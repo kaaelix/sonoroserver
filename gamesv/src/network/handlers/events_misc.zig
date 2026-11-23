@@ -1299,7 +1299,23 @@ pub fn onFlowerPollutionRequest(
     txn.respond(.{ .ErrorCode = .Success });
 }
 
-pub fn onFlowerPollutionSplinePush(_: *Transaction(pb.FlowerPollutionSplinePush)) !void {}
+pub fn onFlowerPollutionSplinePush(
+    txn: *Transaction(pb.FlowerPollutionSplinePush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    scene_opt: *?Scene,
+    progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    const key = try std.fmt.allocPrint(alloc.arena, "flower_poll:{d}", .{txn.message.ManagerEntityId});
+    try pb_kv.persistInt(alloc, fs, progress_comp, key, if (txn.message.IsRemovePollution) 0 else txn.message.SplineConfigId);
+    if (scene_opt.*) |*scene| {
+        if (scene.net_id_map.get(txn.message.ManagerEntityId)) |idx| {
+            scene.entities.items(.world_item)[idx].flower_pollution = !txn.message.IsRemovePollution;
+        }
+    }
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
 
 pub fn onFoundationRequest(
     txn: *Transaction(pb.FoundationRequest),
@@ -1783,7 +1799,17 @@ pub fn onRiskHarvestSettleRequest(
     txn.respond(.{ .ErrorCode = .Success });
 }
 
-pub fn onSunSpiritActionOperationEndPush(_: *Transaction(pb.SunSpiritActionOperationEndPush)) !void {}
+pub fn onSunSpiritActionOperationEndPush(
+    txn: *Transaction(pb.SunSpiritActionOperationEndPush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    const key = try std.fmt.allocPrint(alloc.arena, "sun_spirit:op:{d}", .{txn.message.IncId});
+    try pb_kv.persistInt(alloc, fs, progress_comp, key, txn.message.Index);
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
 
 pub fn onTetrisFinishRequest(
     txn: *Transaction(pb.TetrisFinishRequest),
@@ -1829,7 +1855,18 @@ pub fn onVacuumCleanerRequest(
     txn.respond(.{ .ErrorCode = .Success });
 }
 
-pub fn onZitherPlayNotePush(_: *Transaction(pb.ZitherPlayNotePush)) !void {}
+pub fn onZitherPlayNotePush(
+    txn: *Transaction(pb.ZitherPlayNotePush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    _ = txn.message;
+    _ = try progress_comp.info.addKeyInt(alloc.gpa, "misc:zither_notes", 1);
+    try progress_comp.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
 
 pub fn onZitherPlayStateRequest(
     txn: *Transaction(pb.ZitherPlayStateRequest),

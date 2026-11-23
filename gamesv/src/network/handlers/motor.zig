@@ -20,6 +20,7 @@ const PlayerProgressComponent = @import("../../logic/component/player/PlayerProg
 const ConsumeHelper = @import("../../logic/helpers/consume.zig");
 const RewardService = @import("../../logic/helpers/reward.zig");
 const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
+const CoopService = @import("../../logic/CoopService.zig");
 
 fn intList(arena: std.mem.Allocator, items: []const i32) !std.ArrayList(i32) {
     var list: std.ArrayList(i32) = .empty;
@@ -1246,13 +1247,105 @@ pub fn onMotorOutlookEditPresetRequest(
     });
 }
 
-pub fn onMotorAnimReplaySampleUdpPush(_: *Transaction(pb.MotorAnimReplaySampleUdpPush)) !void {}
-pub fn onMotorCycleCruiseStatePush(_: *Transaction(pb.MotorCycleCruiseStatePush)) !void {}
-pub fn onMotorIsEnablePush(_: *Transaction(pb.MotorIsEnablePush)) !void {}
-pub fn onMotorOnlineProgressReportPush(_: *Transaction(pb.MotorOnlineProgressReportPush)) !void {}
-pub fn onMotorPositionStatePush(_: *Transaction(pb.MotorPositionStatePush)) !void {}
-pub fn onMotorSummonAndRidePush(_: *Transaction(pb.MotorSummonAndRidePush)) !void {}
-pub fn onMotorFightRefreshBossPush(_: *Transaction(pb.MotorFightRefreshBossPush)) !void {}
+pub fn onMotorAnimReplaySampleUdpPush(
+    txn: *Transaction(pb.MotorAnimReplaySampleUdpPush),
+    alloc: mem.Alloc,
+    io: std.Io,
+    pid: PlayerID,
+    maybe_coop: ?*CoopService,
+) !void {
+    if (txn.message.MotorAnimEntities.items.len == 0) return;
+    if (maybe_coop) |coop| {
+        const host_id = if (txn.message.SceneOwnerId != 0) txn.message.SceneOwnerId else pid.id;
+        coop.broadcastRoom(alloc.gpa, io, host_id, pid.id, pb.MotorAnimReplaySampleUdpNotify{
+            .MotorAnimEntities = txn.message.MotorAnimEntities,
+        });
+    }
+}
+
+pub fn onMotorCycleCruiseStatePush(
+    txn: *Transaction(pb.MotorCycleCruiseStatePush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    try pc.info.setKeyInt(alloc.gpa, "motor:cruise", if (txn.message.IsStart) 1 else 0);
+    try pc.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
+
+pub fn onMotorIsEnablePush(
+    txn: *Transaction(pb.MotorIsEnablePush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    try pc.info.setKeyInt(alloc.gpa, "motor:enabled", if (txn.message.IsEnable) 1 else 0);
+    try pc.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
+
+pub fn onMotorOnlineProgressReportPush(
+    txn: *Transaction(pb.MotorOnlineProgressReportPush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    pc: *PlayerProgressComponent,
+) !void {
+    const key = try std.fmt.allocPrint(alloc.arena, "motor:progress:{d}", .{txn.message.InstId});
+    try pc.info.setKeyInt(alloc.gpa, key, txn.message.Progress);
+    try pc.save(fs, alloc.arena);
+}
+
+pub fn onMotorPositionStatePush(
+    txn: *Transaction(pb.MotorPositionStatePush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    const key = try std.fmt.allocPrint(alloc.arena, "motor:pos_state:{d}", .{txn.message.EntityId});
+    try pc.info.setKeyInt(alloc.gpa, key, txn.message.PositionState);
+    try pc.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
+
+pub fn onMotorSummonAndRidePush(
+    txn: *Transaction(pb.MotorSummonAndRidePush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    scene_opt: *?Scene,
+    pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    try pc.info.setKeyInt(alloc.gpa, "motor:summoned", 1);
+    try pc.info.setKeyInt(alloc.gpa, "motor:riding", 1);
+    if (scene_opt.*) |*scene| {
+        if (txn.message.Transform) |tr| {
+            if (tr.Pos) |p| {
+                if (std.math.isFinite(p.X) and std.math.isFinite(p.Y) and std.math.isFinite(p.Z)) {
+                    _ = scene.setEntityPosition(txn.message.VehicleIncId, .{ p.X, p.Y, p.Z }, if (tr.Rot) |r| r.Yaw else null);
+                }
+            }
+        }
+    }
+    try pc.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
+
+pub fn onMotorFightRefreshBossPush(
+    txn: *Transaction(pb.MotorFightRefreshBossPush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    const key = try std.fmt.allocPrint(alloc.arena, "motor:boss_refresh:{d}:{d}", .{ txn.message.SubLevelIndex, txn.message.WaveGroupIndex });
+    try pc.info.setKeyInt(alloc.gpa, key, txn.message.RefreshId);
+    try pc.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
 
 pub fn onMotorDecalMotorIpRequest(
     txn: *Transaction(pb.MotorDecalMotorIpRequest),

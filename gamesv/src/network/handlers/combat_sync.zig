@@ -286,9 +286,28 @@ pub fn onChangeStateConfirmPush(txn: *Transaction(pb.ChangeStateConfirmPush), st
 // Standalone Combat / Buff / FSM / SoundBox / Security / Client RPCs
 // =========================================================================
 
-pub fn onBeforeHitPush(_: *Transaction(pb.BeforeHitPush)) !void {}
-pub fn onCreateBulletPush(_: *Transaction(pb.CreateBulletPush)) !void {}
-pub fn onDestroyBulletPush(_: *Transaction(pb.DestroyBulletPush)) !void {}
+pub fn onBeforeHitPush(txn: *Transaction(pb.BeforeHitPush), state: *State, alloc: mem.Alloc) !void {
+    _ = txn.message;
+    if (state.scene) |*scene| {
+        const nid = scene.currentRoleEntityId();
+        if (nid > 0) scene.markFsmDirty(alloc.gpa, nid, Scene.Entity.FsmComponent.WakeReason.event) catch {};
+    }
+}
+pub fn onCreateBulletPush(txn: *Transaction(pb.CreateBulletPush), state: *State, alloc: mem.Alloc) !void {
+    if (state.scene) |*scene| {
+        if (txn.message.TargetId > 0) scene.markFsmDirty(alloc.gpa, txn.message.TargetId, Scene.Entity.FsmComponent.WakeReason.event) catch {};
+        if (txn.message.CombatCommon) |cc| {
+            if (cc.EntityId > 0) scene.markFsmDirty(alloc.gpa, cc.EntityId, Scene.Entity.FsmComponent.WakeReason.event) catch {};
+        }
+    }
+}
+pub fn onDestroyBulletPush(txn: *Transaction(pb.DestroyBulletPush), state: *State, alloc: mem.Alloc) !void {
+    if (state.scene) |*scene| {
+        if (txn.message.CombatCommon) |cc| {
+            if (cc.EntityId > 0) scene.markFsmDirty(alloc.gpa, cc.EntityId, Scene.Entity.FsmComponent.WakeReason.skill_end) catch {};
+        }
+    }
+}
 pub fn onGameplayTagPush(txn: *Transaction(pb.GameplayTagPush), state: *State, alloc: mem.Alloc, io: std.Io, events: *EventQueue) !void {
     try forwardCombatPush(.AnimationGameplayTagPush, pb.AnimationGameplayTagPush{
         .AddTagIds = txn.message.TagId,
@@ -297,8 +316,12 @@ pub fn onGameplayTagPush(txn: *Transaction(pb.GameplayTagPush), state: *State, a
 }
 pub fn onRTimeStopAnimPush(_: *Transaction(pb.RTimeStopAnimPush)) !void {}
 pub fn onSlowTimePush(_: *Transaction(pb.SlowTimePush)) !void {}
-pub fn onRoleTrialUiEndPush(_: *Transaction(pb.RoleTrialUiEndPush)) !void {}
-pub fn onRoleSkinTrialUiEndPush(_: *Transaction(pb.RoleSkinTrialUiEndPush)) !void {}
+pub fn onRoleTrialUiEndPush(_: *Transaction(pb.RoleTrialUiEndPush), qctx: QuestEngine.QuestContext) !void {
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
+pub fn onRoleSkinTrialUiEndPush(_: *Transaction(pb.RoleSkinTrialUiEndPush), qctx: QuestEngine.QuestContext) !void {
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
 pub fn onCheckClientPush(_: *Transaction(pb.CheckClientPush)) !void {}
 fn pushExecuteQteNotify(
     conn: anytype,

@@ -604,6 +604,45 @@ pub const spawn = struct {
         }
         errdefer if (passive_ga_skill_component) |*p| p.deinit(alloc.gpa);
 
+        var monster_ai_component: ?Entity.MonsterAiComponent = null;
+        if (use_ai_runtime) {
+            var hatred_id: i64 = 0;
+            var perception_ids: [8]i32 = @splat(0);
+            var perception_len: u8 = 0;
+            if (ai_id) |aid| {
+                if (assets.tables.ai_base.getDataById(aid)) |ab| {
+                    if (ab.SubBehaviorConfigs) |sbc| {
+                        if (sbc.AiHate) |hate_str| {
+                            hatred_id = std.fmt.parseInt(i64, hate_str, 10) catch 0;
+                        }
+                        if (sbc.AiSense) |sense_str| {
+                            const sg_id = std.fmt.parseInt(i32, sense_str, 10) catch 0;
+                            if (sg_id > 0) {
+                                if (assets.tables.ai_sense_group.getDataById(sg_id)) |sg| {
+                                    for (sg.AiSenseIds) |sid| {
+                                        if (perception_len >= perception_ids.len) break;
+                                        if (sid != 0) {
+                                            perception_ids[perception_len] = sid;
+                                            perception_len += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            monster_ai_component = .{
+                .weapon_id = weapon_id,
+                .hatred_group_id = 0,
+                .ai_team_init_id = 100,
+                .combat_message_id = 0,
+                .hatred_id = hatred_id,
+                .perception_ids = perception_ids,
+                .perception_len = perception_len,
+            };
+        }
+
         const entity = try scene.spawn(alloc.gpa, fs, .{
             Entity.ConfigComponent{
                 .camp = final_camp,
@@ -621,12 +660,7 @@ pub const spawn = struct {
             Entity.FightBuffComponent{},
             attribute_component,
             if (use_ai_runtime) Entity.LogicStateComponent{} else null,
-            if (use_ai_runtime) Entity.MonsterAiComponent{
-                .weapon_id = weapon_id,
-                .hatred_group_id = 0,
-                .ai_team_init_id = 100,
-                .combat_message_id = 0,
-            } else null,
+            monster_ai_component,
             if (use_ai_runtime) Entity.CharacterAttachComponent{} else null,
             if (spawn_base.entity_type == .vehicle or blk: {
                 for (entity_config.ComponentsData.extra) |entry| {

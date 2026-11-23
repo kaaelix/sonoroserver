@@ -267,6 +267,7 @@ pub const GachaViewInfo = @import("tables/GachaViewInfo.zig");
 pub const GachaTextureInfo = @import("tables/GachaTextureInfo.zig");
 pub const AiStateMachineConfig = @import("tables/AiStateMachineConfig.zig");
 pub const AiBase = @import("tables/AiBase.zig");
+pub const AiSenseGroup = @import("tables/AiSenseGroup.zig");
 pub const PhantomItem = @import("tables/PhantomItem.zig");
 pub const PhantomSkill = @import("tables/PhantomSkill.zig");
 pub const PhantomSummonGroup = @import("tables/PhantomSummonGroup.zig");
@@ -424,6 +425,7 @@ gacha_view_info: Table(GachaViewInfo, "Id"),
 gacha_texture_info: Table(GachaTextureInfo, "Id"),
 ai_state_machine_config: Table(AiStateMachineConfig, "Id"),
 ai_base: Table(AiBase, "Id"),
+ai_sense_group: Table(AiSenseGroup, "Id"),
 phantom_item: Table(PhantomItem, "ItemId"),
 phantom_skill: Table(PhantomSkill, "PhantomSkillId"),
 phantom_summon_group: Table(PhantomSummonGroup, "Id"),

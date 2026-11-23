@@ -313,9 +313,38 @@ pub fn onLandingDamageRequest(
     try QuestEngine.onConditionStateChanged(qctx);
 }
 
-pub fn onSceneBlockChangePush(_: *Transaction(pb.SceneBlockChangePush)) !void {}
+pub fn onSceneBlockChangePush(
+    txn: *Transaction(pb.SceneBlockChangePush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    progress_comp: *PlayerProgressComponent,
+) !void {
+    var dirty = false;
+    for (txn.message.DownloadBlockId.items) |bid| {
+        const key = try std.fmt.allocPrint(alloc.arena, "scene:block:{d}", .{bid});
+        try progress_comp.info.setKeyInt(alloc.gpa, key, 1);
+        dirty = true;
+    }
+    for (txn.message.DeleteBlockId.items) |bid| {
+        const key = try std.fmt.allocPrint(alloc.arena, "scene:block:{d}", .{bid});
+        try progress_comp.info.setKeyInt(alloc.gpa, key, 0);
+        dirty = true;
+    }
+    if (dirty) try progress_comp.save(fs, alloc.arena);
+}
 
-pub fn onMapOpenPush(_: *Transaction(pb.MapOpenPush)) !void {}
+pub fn onMapOpenPush(
+    txn: *Transaction(pb.MapOpenPush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    progress_comp: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    _ = txn.message;
+    _ = try progress_comp.info.addKeyInt(alloc.gpa, "ui:map_open_cnt", 1);
+    try progress_comp.save(fs, alloc.arena);
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
 
 pub fn onAceAntiDataPush(_: *Transaction(pb.AceAntiDataPush)) !void {}
 

@@ -1639,7 +1639,17 @@ pub fn onBeControlledEntityHoverRequest(
     txn.respond(.{ .ErrorCode = .Success });
 }
 
-pub fn onEntityTimeFlowPush(_: *Transaction(pb.EntityTimeFlowPush)) !void {}
+pub fn onEntityTimeFlowPush(
+    txn: *Transaction(pb.EntityTimeFlowPush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    pc: *PlayerProgressComponent,
+) !void {
+    if (std.math.isFinite(txn.message.TimeDilation)) {
+        const milli: i64 = @intFromFloat(std.math.clamp(txn.message.TimeDilation, -1000.0, 1000.0) * 1000.0);
+        try persistIntKey(alloc, fs, pc, "ent:time_flow", txn.message.EntityId, milli);
+    }
+}
 
 pub fn onSceneModeChangeFinishRequest(
     txn: *Transaction(pb.SceneModeChangeFinishRequest),
@@ -3728,8 +3738,29 @@ pub fn onCharacterMoveToPointEndPush(
         .{ .Roll = position.rotation[0], .Pitch = position.rotation[1], .Yaw = position.rotation[2] },
     )) try progress_comp.save(fs, alloc.arena);
 }
-pub fn onFollowerChairPresentationPush(_: *Transaction(pb.FollowerChairPresentationPush)) !void {}
-pub fn onHoldWeaponPush(_: *Transaction(pb.HoldWeaponPush)) !void {}
+pub fn onFollowerChairPresentationPush(
+    txn: *Transaction(pb.FollowerChairPresentationPush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    pc: *PlayerProgressComponent,
+) !void {
+    try persistIntKey(alloc, fs, pc, "chair:pres", txn.message.EntityId, if (txn.message.IsShow) 1 else 0);
+}
+
+pub fn onHoldWeaponPush(
+    txn: *Transaction(pb.HoldWeaponPush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    scene_opt: *?Scene,
+    pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    try persistIntKey(alloc, fs, pc, "role:hold_weapon", txn.message.EntityId, txn.message.WeaponEntityId);
+    if (scene_opt.*) |*scene| {
+        scene.markFsmDirty(alloc.gpa, txn.message.EntityId, Scene.Entity.FsmComponent.WakeReason.blackboard) catch {};
+    }
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
 pub fn onPhotographPush(
     _: *Transaction(pb.PhotographPush),
     alloc: mem.Alloc,
@@ -3745,9 +3776,47 @@ pub fn onPhotographPush(
     pc.save(fs, alloc.arena) catch {};
     QuestEngine.onConditionStateChanged(qctx) catch {};
 }
-pub fn onPlayEntityMontagePush(_: *Transaction(pb.PlayEntityMontagePush)) !void {}
-pub fn onRoadNetworkEntityUpdateCurRoadPush(_: *Transaction(pb.RoadNetworkEntityUpdateCurRoadPush)) !void {}
-pub fn onTestSpawnTemplateEntityPush(_: *Transaction(pb.TestSpawnTemplateEntityPush)) !void {}
+pub fn onPlayEntityMontagePush(
+    txn: *Transaction(pb.PlayEntityMontagePush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    scene_opt: *?Scene,
+    pc: *PlayerProgressComponent,
+) !void {
+    try pc.info.setKeyInt(alloc.gpa, "ent:montage_hash", txn.message.MontageHashCode);
+    try pc.save(fs, alloc.arena);
+    if (scene_opt.*) |*scene| {
+        const slice = scene.entities.slice();
+        for (slice.items(.entity_id), slice.items(.fsm)) |eid, fsm_opt| {
+            if (fsm_opt != null) {
+                scene.markFsmDirty(alloc.gpa, eid.net_id, Scene.Entity.FsmComponent.WakeReason.client_pass) catch {};
+            }
+        }
+    }
+}
+
+pub fn onRoadNetworkEntityUpdateCurRoadPush(
+    txn: *Transaction(pb.RoadNetworkEntityUpdateCurRoadPush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    pc: *PlayerProgressComponent,
+    qctx: QuestEngine.QuestContext,
+) !void {
+    try persistIntKey(alloc, fs, pc, "road:cur", txn.message.EntityId, txn.message.CurRoadId);
+    try persistIntKey(alloc, fs, pc, "road:idx", txn.message.EntityId, txn.message.CurRoadIndex);
+    QuestEngine.onConditionStateChanged(qctx) catch {};
+}
+
+pub fn onTestSpawnTemplateEntityPush(
+    txn: *Transaction(pb.TestSpawnTemplateEntityPush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    pc: *PlayerProgressComponent,
+) !void {
+    if (txn.message.ConfigId > 0) {
+        try persistIntKey(alloc, fs, pc, "debug:test_spawn", txn.message.ConfigId, txn.message.Level);
+    }
+}
 pub fn onPlayerNetStateBackServerPush(_: *Transaction(pb.PlayerNetStateBackServerPush)) !void {}
 pub fn onExitGamePush(_: *Transaction(pb.ExitGamePush)) !void {
     log.debug("client sent ExitGamePush", .{});

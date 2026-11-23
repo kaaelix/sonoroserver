@@ -43,6 +43,9 @@ pub const WorldItemState = struct {
     npc_spawn_id: i32 = 0,
     hold_hand_target_id: ?i64 = null,
     hold_hand_type: i32 = 0,
+    in_range_player_id: i32 = 0,
+    trigger_count: i32 = 0,
+    exit_trigger_count: i32 = 0,
 };
 
 entity_id: struct { net_id: i64 },
@@ -380,14 +383,21 @@ pub fn entityToProto(
     }
 
     if (storage.world_item.range_present) {
+        var in_range_players: std.ArrayList(i32) = .empty;
+        if (storage.world_item.in_range_player_id > 0) {
+            try in_range_players.append(alloc.arena, storage.world_item.in_range_player_id);
+        }
         try entity.ComponentPbs.append(alloc.arena, .{
-            .ComponentPb = .{ .RangeComponent = .{} },
+            .ComponentPb = .{ .RangeComponent = .{ .InRangePlayers = in_range_players } },
         });
     }
 
     if (storage.world_item.trigger_present) {
         try entity.ComponentPbs.append(alloc.arena, .{
-            .ComponentPb = .{ .TriggerComponent = .{} },
+            .ComponentPb = .{ .TriggerComponent = .{
+                .TriggerCount = storage.world_item.trigger_count,
+                .ExitTriggerCount = storage.world_item.exit_trigger_count,
+            } },
         });
     }
 
@@ -574,7 +584,7 @@ pub fn entityToProto(
 
     if (storage.monster_ai) |comp| {
         try entity.ComponentPbs.append(alloc.arena, .{
-            .ComponentPb = .{ .MonsterAiComponentPb = try comp.toProto() },
+            .ComponentPb = .{ .MonsterAiComponentPb = try comp.toProto(alloc.arena) },
         });
     }
 

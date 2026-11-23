@@ -1159,7 +1159,21 @@ pub fn onJokerGuessRewardRequest(
     txn.respond(.{ .ErrorCode = .Success });
 }
 
-pub fn onKurotatoSyncEntityDealDamagePush(_: *Transaction(pb.KurotatoSyncEntityDealDamagePush)) !void {}
+pub fn onKurotatoSyncEntityDealDamagePush(
+    txn: *Transaction(pb.KurotatoSyncEntityDealDamagePush),
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    progress_comp: *PlayerProgressComponent,
+) !void {
+    var dirty = false;
+    for (txn.message.EntityDealDamages.items) |entry| {
+        const key = try std.fmt.allocPrint(alloc.arena, "kurotato:dmg:{d}", .{entry.key});
+        _ = try progress_comp.info.addKeyInt(alloc.gpa, key, entry.value);
+        _ = try progress_comp.info.addKeyInt(alloc.gpa, "kurotato:dmg_total", entry.value);
+        dirty = true;
+    }
+    if (dirty) try progress_comp.save(fs, alloc.arena);
+}
 
 pub fn onKurotatoChestRewardSelectRequest(
     txn: *Transaction(pb.KurotatoChestRewardSelectRequest),
