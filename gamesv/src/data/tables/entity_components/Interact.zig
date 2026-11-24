@@ -129,6 +129,8 @@ pub const RandomInteractConfig = struct {
 };
 
 Disabled: ?bool = null,
+DoIntactType: []const u8 = "",
+Range: i32 = 0,
 Options: []const InteractOption = &.{},
 RandomInteract: ?RandomInteractConfig = null,
 

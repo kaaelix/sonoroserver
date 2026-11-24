@@ -33,6 +33,8 @@ const TrialRoles = @import("../helpers/trial_roles.zig");
 const RoleHelper = @import("../helpers/role.zig");
 const autopilot = @import("../helpers/autopilot.zig");
 const QuestEngine = @import("../helpers/quest_engine.zig");
+const ConditionEvaluator = @import("../helpers/condition.zig");
+const LevelEntityConfig = @import("../../data/tables/LevelEntityConfig.zig");
 const LevelPlayHelper = @import("../helpers/level_play.zig");
 const spline_state = @import("../helpers/spline_state.zig");
 const spawn_cmd = @import("../commands/entity.zig").spawn;
@@ -720,6 +722,8 @@ pub fn notifyJoinScene(
     weapon_comp: *PlayerWeaponComponent,
     motor_comp: *PlayerMotorComponent,
     echo_comp: *PlayerEchoComponent,
+    inventory_comp: *const PlayerInventoryComponent,
+    map_comp: *const PlayerMapComponent,
     quest_comp: *const PlayerQuestComponent,
     progress_comp: *PlayerProgressComponent,
     scene: *Scene,
@@ -727,6 +731,18 @@ pub fn notifyJoinScene(
     io: Io,
 ) !void {
     const log = std.log.scoped(.scene_join);
+    const join_eval_ctx: ConditionEvaluator.EvalContext = .{
+        .assets = assets,
+        .basic_comp = basic_comp,
+        .echo_comp = echo_comp,
+        .inventory_comp = inventory_comp,
+        .map_comp = map_comp,
+        .quest_comp = quest_comp,
+        .role_comp = role_comp,
+        .weapon_comp = weapon_comp,
+        .progress_comp = progress_comp,
+        .scene = scene,
+    };
     try exploreSkillNotify(alloc, scene, conn, io);
     var scene_info: pb.SceneInformation = .{
         .InstanceId = scene.instance_id,
@@ -911,7 +927,9 @@ pub fn notifyJoinScene(
             var should_remove = QuestEngine.shouldHideWorldEntity(quest_comp.info, &active_quest_targets, cfg_id);
             if (!should_remove) {
                 if (assets.findLevelEntity(scene.instance_id, cfg_id)) |lcfg| {
-                    if (isBlockedWorldEntityConfig(assets, quest_comp.info, scene.instance_id, lcfg, is_quest_target, explicitly_shown)) {
+                    if (isBlockedWorldEntityConfig(assets, quest_comp.info, scene.instance_id, lcfg, is_quest_target, explicitly_shown) or
+                        !passesEntityVisibleConditions(assets, join_eval_ctx, lcfg, is_quest_target, explicitly_shown))
+                    {
                         should_remove = true;
                     }
                 }
@@ -1263,6 +1281,19 @@ pub fn handleSpatialSpawnsCheck(
         .progress_comp = progress_comp,
     }, loc[0], loc[1], loc[2]);
 
+    const eval_ctx: ConditionEvaluator.EvalContext = .{
+        .assets = assets,
+        .basic_comp = basic_comp,
+        .echo_comp = echo_comp,
+        .inventory_comp = inventory_comp,
+        .map_comp = map_comp,
+        .quest_comp = quest_comp,
+        .role_comp = role_comp,
+        .weapon_comp = weapon_comp,
+        .progress_comp = progress_comp,
+        .scene = scene,
+    };
+
     try spawnNearbyWorldEntities(
         events,
         scene,
@@ -1273,6 +1304,7 @@ pub fn handleSpatialSpawnsCheck(
         map_comp,
         quest_comp,
         progress_comp,
+        eval_ctx,
         alloc,
         io,
         loc,
@@ -1439,10 +1471,28 @@ fn insertSpawnCandidate(buf: []SpawnCandidate, len: *usize, cap: usize, cand: Sp
     }
 }
 
+fn passesEntityVisibleConditions(
+    assets: *const Assets,
+    eval_ctx: ConditionEvaluator.EvalContext,
+    cfg: *const LevelEntityConfig,
+    is_quest_target: bool,
+    explicitly_shown: bool,
+) bool {
+    if (is_quest_target or explicitly_shown) return true;
+    var comps = cfg.ComponentsData;
+    if (assets.findTemplateConfig(cfg.BlueprintType)) |tpl| {
+        tpl.ComponentsData.mergeInto(&comps);
+    }
+    var vis_ctx = eval_ctx;
+    vis_ctx.self_entity_config_id = std.math.cast(i32, cfg.EntityId) orelse 0;
+    return ConditionEvaluator.evalEntityVisibleComponent(vis_ctx, &comps);
+}
+
 fn considerSpawnCandidates(
     assets: *const Assets,
     scene: *const Scene,
     quest_info: QuestInfo,
+    eval_ctx: ConditionEvaluator.EvalContext,
     active_quest_targets: *const std.AutoHashMapUnmanaged(i32, void),
     now_ms: i64,
     player_loc: [3]f32,
@@ -1486,6 +1536,7 @@ fn considerSpawnCandidates(
         }
         const explicitly_shown = cfg_id32 > 0 and QuestInfo.containsInt(quest_info.world.shown_entities, cfg_id32);
         if (isBlockedWorldEntityConfig(assets, quest_info, scene.instance_id, &cfg, is_quest_target, explicitly_shown)) continue;
+        if (!passesEntityVisibleConditions(assets, eval_ctx, &cfg, is_quest_target, explicitly_shown)) continue;
         if ((cfg.InSleep or cfg.IsHidden) and !explicitly_shown and !is_quest_target) continue;
         if (QuestEngine.shouldHideWorldEntity(quest_info, active_quest_targets, cfg.EntityId)) continue;
 
@@ -1600,6 +1651,7 @@ fn spawnNearbyWorldEntities(
     map_comp: *const PlayerMapComponent,
     quest_comp: *const PlayerQuestComponent,
     progress_comp: *PlayerProgressComponent,
+    eval_ctx: ConditionEvaluator.EvalContext,
     alloc: mem.Alloc,
     io: std.Io,
     player_loc: [3]f32,
@@ -1644,6 +1696,7 @@ fn spawnNearbyWorldEntities(
                     assets,
                     scene,
                     quest_comp.info,
+                    eval_ctx,
                     &active_quest_targets,
                     now_ms,
                     player_loc,
@@ -1662,6 +1715,7 @@ fn spawnNearbyWorldEntities(
             assets,
             scene,
             quest_comp.info,
+            eval_ctx,
             &active_quest_targets,
             now_ms,
             player_loc,

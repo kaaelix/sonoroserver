@@ -20,6 +20,7 @@ const CalabashHelper = @import("calabash.zig");
 const MoraleHelper = @import("morale.zig");
 const GravityHelper = @import("gravity.zig");
 const Range = @import("../../data/tables/entity_components/Range.zig");
+const Components = @import("../../data/tables/entity_components/Components.zig");
 const Scene = @import("../Scene.zig");
 
 pub const EvalContext = struct {
@@ -1024,15 +1025,8 @@ fn evalSingleProvideCondition(ctx: EvalContext, cond_item: std.json.Value) bool 
     switch (t_val) {
         .integer => return evalInlineConditionBlock(ctx, cond_item),
         .string => |ctype| {
-            if (std.mem.eql(u8, ctype, "PreQuest")) {
-                const pre_id = jsonInt(obj.get("PreQuest")) orelse return false;
-                return ctx.quest_comp.info.hasFinishedQuest(pre_id);
-            } else if (std.mem.eql(u8, ctype, "PreChildQuest")) {
-                const sub = obj.get("PreChildQuest") orelse return false;
-                if (sub != .object) return false;
-                const qid = jsonInt(sub.object.get("QuestId")) orelse return false;
-                const cid = jsonInt(sub.object.get("ChildQuestId")) orelse return false;
-                return ctx.quest_comp.info.hasFinishedChildQuest(qid, cid);
+            if (std.mem.eql(u8, ctype, "PreQuest") or std.mem.eql(u8, ctype, "PreChildQuest")) {
+                return evalSingleInlineCondition(ctx, cond_item);
             } else if (std.mem.eql(u8, ctype, "ExploreLevel")) {
                 const req = jsonInt(obj.get("ExploreLevel")) orelse 1;
                 return ctx.basic_comp.info.attributes.level >= req;
@@ -1354,24 +1348,23 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
             if (!found or is_locked != want_locked) return false;
         }
         return true;
-    } else if (std.mem.eql(u8, ct, "CompareTimePeriod")) {
-        const period = if (obj.get("TimePeriod")) |v| switch (v) {
-            .string => |s| s,
-            else => return false,
-        } else return false;
+    } else if (std.mem.eql(u8, ct, "CompareTimePeriod") or std.mem.eql(u8, ct, "TimePeriod")) {
+        const period = getParamStr(obj, "TimePeriod") orelse return false;
         const cmp = getParamStr(obj, "Compare") orelse "Eq";
-        const hm = currentMapHourMinute(ctx);
-        const total_minute = hm.hour * 60 + hm.minute;
-        const is_day = total_minute >= 360 and total_minute < 1080;
-        const matches = if (std.mem.eql(u8, period, "DayTime"))
-            is_day
-        else if (std.mem.eql(u8, period, "Night"))
-            !is_day
-        else
-            return false;
-        if (std.mem.eql(u8, cmp, "Eq")) return matches;
-        if (std.mem.eql(u8, cmp, "Ne")) return !matches;
-        return false;
+        return evalTimePeriodMatch(ctx, period, cmp);
+    } else if (std.mem.eql(u8, ct, "PreQuest")) {
+        const pre_id = jsonInt(obj.get("PreQuestId")) orelse jsonInt(obj.get("PreQuest")) orelse return false;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
+        const done = ctx.quest_comp.info.hasFinishedQuest(pre_id);
+        return if (isNegCompare(cmp)) !done else done;
+    } else if (std.mem.eql(u8, ct, "PreChildQuest")) {
+        const sub = obj.get("PreChildQuest") orelse return false;
+        if (sub != .object) return false;
+        const qid = jsonInt(sub.object.get("QuestId")) orelse return false;
+        const cid = jsonInt(sub.object.get("ChildQuestId")) orelse return false;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
+        const done = ctx.quest_comp.info.hasFinishedChildQuest(qid, cid);
+        return if (isNegCompare(cmp)) !done else done;
     } else if (std.mem.eql(u8, ct, "Clock")) {
         const hm = currentMapHourMinute(ctx);
         const start_h = jsonInt(obj.get("Start")) orelse 0;
@@ -2111,6 +2104,184 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
         const done = isLevelPlayNodeMarkedFinished(ctx, nid);
         const cur: i32 = @intFromBool(done);
         return compareInts(cur, 1, cmp);
+    } else if (std.mem.eql(u8, ct, "CheckEntityHasSceneItemAttributeTag")) {
+        const raw_eid = jsonInt(obj.get("EntityId")) orelse 0;
+        const eid = if (raw_eid > 0) raw_eid else ctx.self_entity_config_id;
+        if (eid <= 0) return false;
+        const check_ty = jsonInt(obj.get("CheckType")) orelse 0;
+        const tags_val = obj.get("Tags") orelse return false;
+        if (tags_val != .array or tags_val.array.items.len == 0) return check_ty != 0;
+        var has_any = false;
+        var has_all = true;
+        for (tags_val.array.items) |tv| {
+            const tid = jsonInt(tv) orelse continue;
+            if (entityHasRuntimeTag(ctx, eid, tid)) {
+                has_any = true;
+            } else {
+                has_all = false;
+            }
+        }
+        return switch (check_ty) {
+            0 => has_all,
+            1 => !has_any,
+            else => has_any,
+        };
+    } else if (std.mem.eql(u8, ct, "CheckPlayerStateRestriction")) {
+        const rid = jsonInt(obj.get("RestrictionId")) orelse return true;
+        return evalPlayerStateRestriction(ctx, rid);
+    } else if (std.mem.eql(u8, ct, "ListenEntitySelfEvent")) {
+        const ev_key = getParamStr(obj, "EventKey") orelse return false;
+        const eid = if ((jsonInt(obj.get("EntityId")) orelse 0) > 0) jsonInt(obj.get("EntityId")).? else ctx.self_entity_config_id;
+        const pc = ctx.progress_comp orelse return false;
+        var kbuf: [128]u8 = undefined;
+        const k = std.fmt.bufPrint(&kbuf, "ent_self_ev:{d}:{s}", .{ eid, ev_key }) catch return false;
+        return pc.info.getKeyInt(k) > 0 or pc.info.hasClaim(k);
+    } else if (std.mem.eql(u8, ct, "CheckAiState")) {
+        const st_type = getParamStr(obj, "StateType") orelse return false;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
+        const eid = if ((jsonInt(obj.get("EntityId")) orelse 0) > 0) jsonInt(obj.get("EntityId")).? else ctx.self_entity_config_id;
+        var actual: []const u8 = "";
+        if (ctx.progress_comp) |pc| {
+            var kbuf: [48]u8 = undefined;
+            if (std.fmt.bufPrint(&kbuf, "ai_state:{d}", .{eid})) |k| {
+                actual = pc.info.getKeyStr(k);
+            } else |_| {}
+        }
+        const eq = actual.len > 0 and std.mem.eql(u8, actual, st_type);
+        return if (isNegCompare(cmp)) !eq else eq;
+    } else if (std.mem.eql(u8, ct, "CheckDollGrabMachineFinished")) {
+        var eid: i32 = ctx.self_entity_config_id;
+        if (obj.get("Target")) |tv| {
+            if (tv == .object) {
+                if (jsonInt(tv.object.get("EntityId"))) |tid| {
+                    if (tid > 0) eid = tid;
+                }
+            }
+        }
+        const pc = ctx.progress_comp orelse return false;
+        var kbuf: [48]u8 = undefined;
+        const k = std.fmt.bufPrint(&kbuf, "doll:fin:{d}", .{eid}) catch return false;
+        return pc.info.hasClaim(k) or pc.info.getKeyInt(k) > 0;
+    } else if (std.mem.eql(u8, ct, "CheckFishingPointHasFish")) {
+        const want = if (obj.get("HasFish")) |v| (if (v == .bool) v.bool else true) else true;
+        var is_empty = false;
+        if (ctx.progress_comp) |pc| {
+            if (ctx.self_entity_config_id > 0) {
+                var kbuf: [48]u8 = undefined;
+                if (std.fmt.bufPrint(&kbuf, "fish:empty:{d}", .{ctx.self_entity_config_id})) |k| {
+                    is_empty = pc.info.getKeyInt(k) > 0;
+                } else |_| {}
+            }
+        }
+        return (!is_empty) == want;
+    } else if (std.mem.eql(u8, ct, "CheckFishingCageFillingRatio")) {
+        const ratio = jsonInt(obj.get("Ratio")) orelse 0;
+        const cmp = getParamStr(obj, "Compare") orelse "Le";
+        const cur: i32 = if (ctx.progress_comp) |pc| @intCast(std.math.clamp(pc.info.getKeyInt("fish:cage_ratio"), 0, 100)) else 0;
+        return compareInts(cur, ratio, cmp);
+    } else if (std.mem.eql(u8, ct, "CheckAlertAreaEnabled")) {
+        const area_id = jsonInt(obj.get("AreaId")) orelse return false;
+        const pc = ctx.progress_comp orelse return false;
+        var kbuf: [48]u8 = undefined;
+        const k = std.fmt.bufPrint(&kbuf, "alert_enable:{d}", .{area_id}) catch return false;
+        return pc.info.getKeyInt(k) != 0;
+    } else if (std.mem.eql(u8, ct, "CheckFollowShooterActive")) {
+        const want = if (obj.get("Active")) |v| (if (v == .bool) v.bool else true) else true;
+        const id = jsonInt(obj.get("Id")) orelse 0;
+        const pc = ctx.progress_comp orelse return !want;
+        const cur = pc.info.getKeyInt("trial:follow_shooter") == id and id > 0;
+        return cur == want;
+    } else if (std.mem.eql(u8, ct, "CheckDungeonHasSaveConfig")) {
+        const did = jsonInt(obj.get("DungeonId")) orelse return false;
+        const want = if (obj.get("IsHasSaveConfig")) |v| (if (v == .bool) v.bool else true) else true;
+        var has_save = false;
+        if (ctx.progress_comp) |pc| {
+            var kbuf: [48]u8 = undefined;
+            if (std.fmt.bufPrint(&kbuf, "inst:save_cfg:{d}", .{did})) |k| {
+                has_save = pc.info.getKeyInt(k) > 0 or pc.info.hasClaim(k);
+            } else |_| {}
+        }
+        return has_save == want;
+    } else if (std.mem.eql(u8, ct, "CheckVehicleSpeed")) {
+        const target_speed = jsonInt(obj.get("Speed")) orelse 0;
+        const cmp = getParamStr(obj, "CompareType") orelse getParamStr(obj, "Compare") orelse "Gt";
+        const cur_speed: i32 = if (ctx.progress_comp) |pc| @intCast(std.math.clamp(pc.info.getKeyInt("vehicle:speed"), 0, std.math.maxInt(i32))) else 0;
+        return compareInts(cur_speed, target_speed, cmp);
+    } else if (std.mem.eql(u8, ct, "CheckIsGlobalTimeScaleEnabled")) {
+        const want = if (obj.get("Enabled")) |v| (if (v == .bool) v.bool else true) else true;
+        const cur = if (ctx.progress_comp) |pc| pc.info.getKeyInt("time_scale:global") > 0 else false;
+        return cur == want;
+    } else if (std.mem.eql(u8, ct, "CheckIsEntityTimeScaleEnabled")) {
+        const want = if (obj.get("Enabled")) |v| (if (v == .bool) v.bool else true) else true;
+        var eid: i32 = ctx.self_entity_config_id;
+        if (obj.get("Target")) |tv| {
+            if (tv == .object) {
+                if (jsonInt(tv.object.get("EntityId"))) |tid| {
+                    if (tid > 0) eid = tid;
+                }
+            }
+        }
+        var cur = false;
+        if (ctx.progress_comp) |pc| {
+            var kbuf: [48]u8 = undefined;
+            if (std.fmt.bufPrint(&kbuf, "time_scale:ent:{d}", .{eid})) |k| {
+                cur = pc.info.getKeyInt(k) > 0;
+            } else |_| {}
+        }
+        return cur == want;
+    } else if (std.mem.eql(u8, ct, "CheckElementalEffectActive")) {
+        const want = if (obj.get("IsActive")) |v| (if (v == .bool) v.bool else true) else true;
+        var active = false;
+        if (ctx.self_entity_config_id > 0) {
+            if (ctx.progress_comp) |pc| {
+                var kbuf: [48]u8 = undefined;
+                if (std.fmt.bufPrint(&kbuf, "elem_ability:{d}", .{ctx.self_entity_config_id})) |k| {
+                    if (pc.info.getKeyInt(k) > 0) active = true;
+                } else |_| {}
+            }
+            if (!active) {
+                const st = resolveCurrentEntityState(ctx, ctx.self_entity_config_id);
+                if (std.mem.indexOf(u8, st, "激活") != null) active = true;
+            }
+        }
+        return active == want;
+    } else if (std.mem.eql(u8, ct, "CheckClientEvent")) {
+        const ev_name = getParamStr(obj, "EventName") orelse return false;
+        const pc = ctx.progress_comp orelse return false;
+        var kbuf: [128]u8 = undefined;
+        const k = std.fmt.bufPrint(&kbuf, "client_ev:{s}", .{ev_name}) catch return false;
+        return pc.info.hasClaim(k) or pc.info.getKeyInt(k) > 0;
+    } else if (std.mem.eql(u8, ct, "CheckCollectAnimalParts")) {
+        const check_ty = jsonInt(obj.get("CheckType")) orelse 0;
+        const slots = obj.get("Slots") orelse return false;
+        if (slots != .array) return false;
+        const pc = ctx.progress_comp orelse return false;
+        for (slots.array.items) |sv| {
+            const slot_id = jsonInt(sv) orelse continue;
+            var kbuf: [48]u8 = undefined;
+            const k = std.fmt.bufPrint(&kbuf, "animal_part:{d}:{d}", .{ ctx.self_entity_config_id, slot_id }) catch continue;
+            const collected = pc.info.hasClaim(k) or pc.info.getKeyInt(k) > 0;
+            if (check_ty == 0 and collected) return true;
+            if (check_ty != 0 and !collected) return false;
+        }
+        return check_ty != 0;
+    } else if (std.mem.eql(u8, ct, "CheckPlayerIsInDeadEyeProcess")) {
+        const want = if (obj.get("IsInDeadEyeProcess")) |v| (if (v == .bool) v.bool else true) else true;
+        const active = if (ctx.progress_comp) |pc| pc.info.getKeyInt("deadeye:active") > 0 else false;
+        return active == want;
+    } else if (std.mem.eql(u8, ct, "CheckSceneItemDirection")) {
+        return evalCheckSceneItemDirection(ctx, obj);
+    } else if (std.mem.eql(u8, ct, "CheckPlayerRelativeAngle") or std.mem.eql(u8, ct, "CheckPlayerEnterClientTriggerDir")) {
+        return evalCheckPlayerRelativeAngle(ctx, obj);
+    } else if (std.mem.eql(u8, ct, "CheckTrafficBlocked")) {
+        const is_blocked = if (obj.get("IsBlocked")) |v| (if (v == .bool) v.bool else true) else true;
+        const player_pos = currentPlayerPos3D(ctx) orelse return !is_blocked;
+        const ent_pos = resolveEntityWorldPos(ctx, ctx.self_entity_config_id) orelse return !is_blocked;
+        const dx = player_pos[0] - ent_pos[0];
+        const dy = player_pos[1] - ent_pos[1];
+        const dz = player_pos[2] - ent_pos[2];
+        const in_zone = (dx * dx + dy * dy + dz * dz) <= 300.0 * 300.0;
+        return in_zone == is_blocked;
     }
     return false;
 }
@@ -3124,6 +3295,165 @@ fn isLevelPlayNodeMarkedFinished(ctx: EvalContext, nid: i32) bool {
         }
     }
     return false;
+}
+
+pub fn evalConditionGroupList(ctx: EvalContext, list_val: std.json.Value) bool {
+    if (list_val != .array or list_val.array.items.len == 0) return true;
+    for (list_val.array.items) |grp| {
+        if (evalInlineConditionBlock(ctx, grp)) return true;
+    }
+    return false;
+}
+
+pub fn evalEntityVisibleComponent(ctx: EvalContext, components: *const Components) bool {
+    const extra_ev = for (components.extra) |entry| {
+        if (entry == .EntityVisibleComponent) break entry.EntityVisibleComponent;
+    } else null;
+    const tpl_ev = for (components.template_extra) |entry| {
+        if (entry == .EntityVisibleComponent) break entry.EntityVisibleComponent;
+    } else null;
+    const ev = extra_ev orelse tpl_ev orelse return true;
+    if (ev.Disabled orelse false) return true;
+    if (ev.VisibleConditions) |vc| {
+        return evalConditionGroupList(ctx, vc);
+    }
+    return true;
+}
+
+fn isNegCompare(cmp: []const u8) bool {
+    return std.mem.eql(u8, cmp, "Ne") or std.mem.eql(u8, cmp, "NotEq") or std.mem.eql(u8, cmp, "!=");
+}
+
+fn evalTimePeriodMatch(ctx: EvalContext, period: []const u8, cmp: []const u8) bool {
+    const hm = currentMapHourMinute(ctx);
+    const total_minute = hm.hour * 60 + hm.minute;
+    const is_day = total_minute >= 360 and total_minute < 1080;
+    const matches = if (std.mem.eql(u8, period, "DayTime"))
+        is_day
+    else if (std.mem.eql(u8, period, "Night"))
+        !is_day
+    else
+        return false;
+    if (std.mem.eql(u8, cmp, "Eq")) return matches;
+    if (isNegCompare(cmp)) return !matches;
+    return false;
+}
+
+fn entityHasRuntimeTag(ctx: EvalContext, eid: i32, tid: i32) bool {
+    if (tid == 0) return false;
+    if (ctx.scene) |scene| {
+        if (scene.findEntityNetIdByConfigId(eid)) |nid| {
+            if (scene.net_id_map.get(nid)) |idx| {
+                if (scene.entities.items(.tag)[idx]) |tag| {
+                    if (ctx.assets) |assets| {
+                        if (tag.hasTag(&assets.tables.gameplay_tag_parent, tid)) return true;
+                    }
+                    for (tag.entity_common_tags) |ct_id| {
+                        if (ct_id == tid) return true;
+                    }
+                }
+                if (scene.entities.items(.state_tag)[idx]) |st| {
+                    if (st.state_tag_id == tid) return true;
+                }
+            }
+        }
+    }
+    if (ctx.progress_comp) |pc| {
+        var kbuf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&kbuf, "tag_ent:{d}:{d}", .{ eid, tid })) |k| {
+            if (pc.info.getKeyInt(k) > 0) return true;
+        } else |_| {}
+    }
+    return false;
+}
+
+fn playerRoleHasTagName(ctx: EvalContext, tag_name: []const u8) bool {
+    const scene = ctx.scene orelse return false;
+    const assets = ctx.assets orelse return false;
+    const role_nid = scene.currentRoleEntityId();
+    if (role_nid <= 0) return false;
+    const idx = scene.net_id_map.get(role_nid) orelse return false;
+    const tag_comp = scene.entities.items(.tag)[idx] orelse return false;
+    const tag_id = gameplay_tags.idFromName(&assets.tables.gameplay_tag_remap, tag_name) catch return false;
+    return tag_comp.hasTag(&assets.tables.gameplay_tag_parent, tag_id);
+}
+
+fn evalPlayerStateRestriction(ctx: EvalContext, restriction_id: i32) bool {
+    // Check PlayerStateRestriction rules (Id=1 Water/NoClimb, 2 NotInSkill, 3 NoSuperArmor, 750001/850001 NotInBattle, 900001 Ground&NotInSkill, etc.)
+    const in_skill = playerRoleHasTagName(ctx, "行为状态.逻辑状态.技能中");
+    const in_battle = if (ctx.scene) |s| s.player_in_battle or playerRoleHasTagName(ctx, "行为状态.逻辑状态.进入战斗") else false;
+    return switch (restriction_id) {
+        1 => (evalPlayerMotionState(ctx, "Water") orelse false or evalPlayerMotionState(ctx, "WalkOnWater") orelse false) and !playerRoleHasTagName(ctx, "战斗状态.行为限制.禁止攀爬"),
+        2 => !in_skill,
+        3 => !playerRoleHasTagName(ctx, "怪物.common.状态标识.霸体"),
+        900001 => (evalPlayerMotionState(ctx, "Ground") orelse true) and !in_skill,
+        750001, 850001 => !in_battle,
+        150001 => !in_skill,
+        else => !in_skill,
+    };
+}
+
+fn resolveEntityWorldRot(ctx: EvalContext, cfg_id_raw: i64) [3]f32 {
+    if (cfg_id_raw > 0) {
+        if (ctx.scene) |scene| {
+            const slice = scene.entities.slice();
+            for (slice.items(.config), slice.items(.position)) |cfg, pos_opt| {
+                if (cfg.config_id == cfg_id_raw) {
+                    if (pos_opt) |p| return p.rotation;
+                }
+            }
+        }
+        if (ctx.assets) |assets| {
+            const map_id: i32 = if (ctx.scene) |sc| sc.instance_id else 8;
+            if (assets.findLevelEntity(map_id, cfg_id_raw)) |lcfg| {
+                return Assets.AssetIndexes.entityWorldRot(lcfg);
+            }
+        }
+    }
+    return .{ 0, 0, 0 };
+}
+
+fn evalCheckSceneItemDirection(ctx: EvalContext, obj: std.json.ObjectMap) bool {
+    const target_dir = parseJsonVectorPos(obj.get("Direction")) orelse return false;
+    const tol = jsonFloatVal(obj.get("AngleInterval")) orelse 30.0;
+    const eid: i32 = if (obj.get("Target")) |tv| (if (tv == .object) jsonInt(tv.object.get("EntityId")) else null) orelse ctx.self_entity_config_id else ctx.self_entity_config_id;
+    const rot = resolveEntityWorldRot(ctx, eid);
+    const yaw_rad = rot[2] * (std.math.pi / 180.0);
+    const cur_dir = [3]f32{ @cos(yaw_rad), @sin(yaw_rad), 0.0 };
+    const tlen = @sqrt(target_dir[0] * target_dir[0] + target_dir[1] * target_dir[1] + target_dir[2] * target_dir[2]);
+    if (tlen < 0.0001) return true;
+    const dot = std.math.clamp((cur_dir[0] * target_dir[0] + cur_dir[1] * target_dir[1] + cur_dir[2] * target_dir[2]) / tlen, -1.0, 1.0);
+    const ang_deg = std.math.acos(dot) * (180.0 / std.math.pi);
+    return ang_deg <= tol;
+}
+
+fn evalCheckPlayerRelativeAngle(ctx: EvalContext, obj: std.json.ObjectMap) bool {
+    const player_pos = currentPlayerPos3D(ctx) orelse return false;
+    const eid = jsonInt(obj.get("TargetEntityId")) orelse jsonInt(obj.get("EntityId")) orelse ctx.self_entity_config_id;
+    const ent_pos = resolveEntityWorldPos(ctx, eid) orelse return true;
+    const ent_rot = resolveEntityWorldRot(ctx, eid);
+    const rel_world = [3]f32{ player_pos[0] - ent_pos[0], player_pos[1] - ent_pos[1], player_pos[2] - ent_pos[2] };
+    const bspace = getParamStr(obj, "BaseVectorSpace") orelse "World";
+    const rel = if (std.mem.eql(u8, bspace, "Local")) rotateInverseEuler(rel_world, ent_rot) else rel_world;
+    const rlen = @sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
+    if (rlen < 0.001) return true;
+    const bvec = parseJsonVectorPos(obj.get("BaseVector")) orelse [3]f32{ 1, 0, 0 };
+    const blen = @sqrt(bvec[0] * bvec[0] + bvec[1] * bvec[1] + bvec[2] * bvec[2]);
+    if (blen < 0.001) return true;
+    const dot = std.math.clamp((rel[0] * bvec[0] + rel[1] * bvec[1] + rel[2] * bvec[2]) / (rlen * blen), -1.0, 1.0);
+    const ang_deg = std.math.acos(dot) * (180.0 / std.math.pi);
+    if (obj.get("ValidAngleRanges")) |ranges| {
+        if (ranges == .array and ranges.array.items.len > 0) {
+            for (ranges.array.items) |r| {
+                if (r != .object) continue;
+                const min_a = jsonFloatVal(r.object.get("Min")) orelse 0.0;
+                const max_a = jsonFloatVal(r.object.get("Max")) orelse 180.0;
+                if (ang_deg >= min_a and ang_deg <= max_a) return true;
+            }
+            return false;
+        }
+    }
+    return true;
 }
 
 fn evalPlayerSkillReady(ctx: EvalContext, obj: std.json.ObjectMap) bool {

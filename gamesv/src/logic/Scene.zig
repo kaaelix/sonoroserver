@@ -87,6 +87,8 @@ pending_killed_removals: std.ArrayListUnmanaged(KilledRemovalEntry) = .empty,
 dynamic_interact_options: std.ArrayListUnmanaged(DynamicInteractOption) = .empty,
 play_bubbles: std.ArrayListUnmanaged(PlayBubbleRecord) = .empty,
 player_range_states: std.AutoHashMapUnmanaged(i64, RangeTriggerState) = .empty,
+fired_condition_listeners: std.AutoHashMapUnmanaged(u64, void) = .empty,
+auto_interact_states: std.AutoHashMapUnmanaged(i64, bool) = .empty,
 async_flows: std.ArrayListUnmanaged(AsyncFlowEntry) = .empty,
 action_node_next_idx: std.AutoHashMapUnmanaged(u64, usize) = .empty,
 last_server_rollback_quest_id: i32 = 0,
@@ -505,6 +507,8 @@ pub fn deinit(scene: *Scene, gpa: Allocator, fs: *FileSystem) void {
     for (scene.play_bubbles.items) |*rec| rec.deinit(gpa);
     scene.play_bubbles.deinit(gpa);
     scene.player_range_states.deinit(gpa);
+    scene.fired_condition_listeners.deinit(gpa);
+    scene.auto_interact_states.deinit(gpa);
     for (scene.async_flows.items) |*af| af.deinit(gpa);
     scene.async_flows.deinit(gpa);
     scene.action_node_next_idx.deinit(gpa);

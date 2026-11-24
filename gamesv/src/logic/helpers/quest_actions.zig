@@ -536,6 +536,25 @@ pub fn executeAction(
             const k = try std.fmt.allocPrint(ctx.alloc.arena, "enrichment:scan:{d}", .{eid});
             try recordProgressInt(ctx, k, 1, true);
         }
+    } else if (std.mem.eql(u8, name, "SendAiEvent")) {
+        if (quest_types.jsonStr(params.get("EventType"))) |ev_ty| {
+            if (resolveActionEntityCfgId(ctx.scene, params)) |eid| {
+                const k = try std.fmt.allocPrint(ctx.alloc.arena, "ai_state:{d}", .{eid});
+                if (ctx.progress_comp) |pc| {
+                    try pc.info.setKeyStr(ctx.alloc.gpa, k, ev_ty);
+                    try pc.save(ctx.fs, ctx.alloc.arena);
+                }
+            }
+        }
+    } else if (std.mem.eql(u8, name, "SendClientEvent")) {
+        if (quest_types.jsonStr(params.get("EventName"))) |ev_name| {
+            const k = try std.fmt.allocPrint(ctx.alloc.arena, "client_ev:{s}", .{ev_name});
+            try recordProgressInt(ctx, k, 1, true);
+        }
+    } else if (std.mem.eql(u8, name, "TriggerDeadeyeMode")) {
+        try recordProgressInt(ctx, "deadeye:active", 1, false);
+    } else if (std.mem.eql(u8, name, "VehicleSetSpeedImmediately")) {
+        try recordProgressInt(ctx, "vehicle:speed", 25, false);
     } else if (std.mem.eql(u8, name, "SummonEntity")) {
         try applySummonEntityAction(ctx, params);
     } else if (std.mem.eql(u8, name, "DestroySummonedEntities") or std.mem.eql(u8, name, "DestroyDynamicEntities")) {
@@ -3670,6 +3689,10 @@ fn applyModifySceneTagAction(ctx: QuestContext, params: std.json.ObjectMap) !voi
     if (tags.len == 0) return;
     const is_add = quest_types.jsonBool(params.get("IsAddTag")) orelse true;
     for (ids) |cfg_id| {
+        for (tags) |t| {
+            const tk = try std.fmt.allocPrint(ctx.alloc.arena, "tag_ent:{d}:{d}", .{ cfg_id, t });
+            try recordProgressInt(ctx, tk, if (is_add) 1 else 0, false);
+        }
         if (is_add) ensureQuestEntitySpawned(ctx, cfg_id);
         if (scene.findEntityNetIdByConfigId(cfg_id)) |net_id| {
             try applyEntityGameplayTagChange(ctx, scene, net_id, tags, is_add);

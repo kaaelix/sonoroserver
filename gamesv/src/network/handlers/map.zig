@@ -673,6 +673,7 @@ fn trackRangeArea(
     var has_roll_block = false;
     var cfg_id: i32 = std.math.cast(i32, range_entity_id) orelse 0;
     var trigger_comp: ?@import("../../data/tables/entity_components/Trigger.zig") = null;
+    var client_trigger_comp: ?@import("../../data/tables/entity_components/Extra.zig").ClientTriggerComponent = null;
     if (scene_opt.*) |*scene| {
         if (scene.net_id_map.contains(range_entity_id)) resolved_in_world = true;
         const resolved = scene.findConfigIdByNetId(range_entity_id) orelse range_entity_id;
@@ -730,6 +731,7 @@ fn trackRangeArea(
                         .AirPassageComponent => has_air_passage = true,
                         .RollBlockComponent, .RollBlockFloorComponent, .RollBlockItemComponent => has_roll_block = true,
                         .ClientTriggerComponent => |ct| {
+                            client_trigger_comp = ct.*;
                             if (!(ct.Disabled orelse false) and components.SplineComponent != null) {
                                 has_air_passage = true;
                             }
@@ -801,6 +803,12 @@ fn trackRangeArea(
                     progress_dirty.* = true;
                 }
             }
+        }
+    }
+    if (client_trigger_comp) |ct| {
+        if (trigger_events) {
+            try QuestEngine.handleClientTriggerActions(quest_ctx, range_entity_id, cfg_id, ct, is_enter);
+            progress_dirty.* = true;
         }
     }
 

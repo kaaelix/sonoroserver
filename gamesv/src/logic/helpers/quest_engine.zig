@@ -25,6 +25,8 @@ const RoleHelper = @import("role.zig");
 const RoleEntityTemplates = @import("../templates/RoleEntityTemplates.zig");
 const entity_proto = @import("entity_proto.zig");
 const TriggerConfig = @import("../../data/tables/entity_components/Trigger.zig");
+const ClientTriggerConfig = @import("../../data/tables/entity_components/Extra.zig").ClientTriggerComponent;
+const InteractConfig = @import("../../data/tables/entity_components/Interact.zig");
 
 const log = std.log.scoped(.quest_engine);
 
@@ -540,6 +542,7 @@ pub fn onMove(ctx: QuestContext, pos: [3]f32) !void {
     if (progressed) {
         try finalizeProgression(ctx);
     }
+    try checkAutoInteractTriggers(ctx, pos);
     if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
         try LevelPlayHelper.onPlayerMove(lp_ctx, pos[0], pos[1], pos[2]);
     }
@@ -3655,6 +3658,7 @@ pub fn onConditionStateChanged(ctx: QuestContext) !void {
         try finalizeProgression(ctx);
     }
     try reevaluateInRangeTriggers(ctx);
+    try reevaluateConditionListeners(ctx);
     if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
         try LevelPlayHelper.onConditionStateChanged(lp_ctx);
     }
@@ -5941,6 +5945,124 @@ pub fn executeTriggerActions(
 
     try executeEntityActions(ctx, entity_id, cfg_id, actions_val.array.items);
     return true;
+}
+
+/// Executes `ClientTriggerComponent` `OnTriggerEnter` / `OnTriggerExit` actions on server when accessed.
+pub fn handleClientTriggerActions(
+    ctx: QuestContext,
+    entity_id: i64,
+    cfg_id: i32,
+    ct: ClientTriggerConfig,
+    is_enter: bool,
+) !void {
+    if (ct.Disabled orelse false) return;
+    const block_val = (if (is_enter) ct.OnTriggerEnter else ct.OnTriggerExit) orelse return;
+    if (block_val != .object) return;
+    const acts_val = block_val.object.get("Actions") orelse return;
+    if (acts_val != .array or acts_val.array.items.len == 0) return;
+    try executeEntityActions(ctx, entity_id, cfg_id, acts_val.array.items);
+}
+
+threadlocal var evaluating_condition_listeners: bool = false;
+
+/// Evaluates `ConditionListenerComponent.Listeners` for active scene entities and runs met actions once per cycle.
+pub fn reevaluateConditionListeners(ctx: QuestContext) !void {
+    if (evaluating_condition_listeners) return;
+    const scene = ctx.scene orelse return;
+    if (scene.entities.len == 0) return;
+
+    evaluating_condition_listeners = true;
+    defer evaluating_condition_listeners = false;
+
+    const Snap = struct { net_id: i64, cfg_id: i32 };
+    var snaps: std.ArrayList(Snap) = .empty;
+    const slice = scene.entities.slice();
+    for (slice.items(.entity_id), slice.items(.config)) |nid, cfg| {
+        if (cfg.config_id > 0) try snaps.append(ctx.alloc.arena, .{ .net_id = nid.net_id, .cfg_id = cfg.config_id });
+    }
+
+    var eval_ctx = makeEvalContext(ctx);
+    for (snaps.items) |snap| {
+        const lcfg = ctx.assets.findLevelEntity(scene.instance_id, snap.cfg_id) orelse continue;
+        var components = lcfg.ComponentsData;
+        if (ctx.assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+            tpl.ComponentsData.mergeInto(&components);
+        }
+        const cl = components.ConditionListenerComponent orelse continue;
+        if (cl.Disabled orelse false) continue;
+        if (cl.Listeners != .array or cl.Listeners.array.items.len == 0) continue;
+
+        eval_ctx.self_entity_config_id = snap.cfg_id;
+        for (cl.Listeners.array.items, 0..) |listener_val, idx| {
+            if (listener_val != .object) continue;
+            const cond_val = listener_val.object.get("Condition") orelse continue;
+            const acts_val = listener_val.object.get("Actions") orelse continue;
+            if (acts_val != .array or acts_val.array.items.len == 0) continue;
+
+            const dedupe_key: u64 = (@as(u64, @as(u32, @bitCast(snap.cfg_id))) << 32) | @as(u64, @truncate(idx));
+            const met = ConditionEvaluator.evalInlineConditionBlock(eval_ctx, cond_val);
+            if (met) {
+                if (scene.fired_condition_listeners.contains(dedupe_key)) continue;
+                try scene.fired_condition_listeners.put(ctx.alloc.gpa, dedupe_key, {});
+                try executeEntityActions(ctx, snap.net_id, snap.cfg_id, acts_val.array.items);
+            } else {
+                _ = scene.fired_condition_listeners.remove(dedupe_key);
+            }
+        }
+    }
+}
+
+threadlocal var checking_auto_interacts: bool = false;
+
+/// Automatically triggers nearby entities configured with `InteractComponent.DoIntactType == "Auto"` when entered.
+pub fn checkAutoInteractTriggers(ctx: QuestContext, pos: [3]f32) !void {
+    if (checking_auto_interacts) return;
+    const scene = ctx.scene orelse return;
+    if (scene.entities.len == 0) return;
+
+    checking_auto_interacts = true;
+    defer checking_auto_interacts = false;
+
+    const Snap = struct { net_id: i64, cfg_id: i32, ent_pos: [3]f32 };
+    var snaps: std.ArrayList(Snap) = .empty;
+    const slice = scene.entities.slice();
+    for (slice.items(.entity_id), slice.items(.config), slice.items(.position)) |nid, cfg, p_opt| {
+        if (cfg.config_id <= 0 or cfg.entity_type == .player) continue;
+        const p = p_opt orelse continue;
+        try snaps.append(ctx.alloc.arena, .{ .net_id = nid.net_id, .cfg_id = cfg.config_id, .ent_pos = p.location });
+    }
+
+    var eval_ctx = makeEvalContext(ctx);
+    for (snaps.items) |snap| {
+        if (!scene.net_id_map.contains(snap.net_id)) continue;
+        const lcfg = ctx.assets.findLevelEntity(scene.instance_id, snap.cfg_id) orelse continue;
+        var components = lcfg.ComponentsData;
+        if (ctx.assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+            tpl.ComponentsData.mergeInto(&components);
+        }
+        const ic: InteractConfig = components.InteractComponent orelse continue;
+        if (ic.Disabled orelse false) continue;
+        if (!std.mem.eql(u8, ic.DoIntactType, "Auto")) continue;
+
+        const r: f32 = @floatFromInt(if (ic.Range > 0) ic.Range else 150);
+        const dx = pos[0] - snap.ent_pos[0];
+        const dy = pos[1] - snap.ent_pos[1];
+        const dz = pos[2] - snap.ent_pos[2];
+        const in_range = (dx * dx + dy * dy + dz * dz) <= r * r;
+
+        const was_in_range = scene.auto_interact_states.get(snap.net_id) orelse false;
+        if (in_range == was_in_range) continue;
+        try scene.auto_interact_states.put(ctx.alloc.gpa, snap.net_id, in_range);
+        if (!in_range) continue;
+
+        eval_ctx.self_entity_config_id = snap.cfg_id;
+        for (ic.Options, 0..) |opt, opt_idx| {
+            if (opt.Condition) |opt_cond| {
+                if (!ConditionEvaluator.evalInlineConditionBlock(eval_ctx, opt_cond)) continue;
+            }
+            if (try onInteractHandled(ctx, snap.net_id, @intCast(opt_idx))) break;
+        }
+    }
 }
 
 fn completeGuideById(ctx: QuestContext, guide_id: i32) anyerror!void {

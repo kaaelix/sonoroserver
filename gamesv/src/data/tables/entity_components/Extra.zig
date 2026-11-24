@@ -125,9 +125,9 @@ pub const ClientConditionListenerComponent = struct {
 
 pub const ClientTriggerComponent = struct {
     Disabled: ?bool = null,
-    OnTriggerEnter: ?EmptyObj = null,
-    OnTriggerExit: ?EmptyObj = null,
-    TriggerMatch: ?EmptyObj = null,
+    OnTriggerEnter: ?std.json.Value = null,
+    OnTriggerExit: ?std.json.Value = null,
+    TriggerMatch: ?std.json.Value = null,
 };
 
 pub const CombatComponent = struct {
@@ -284,6 +284,7 @@ pub const EntityVisibleComponent = struct {
     UseCutEffect: ?bool = null,
     UseFadeEffect: ?bool = null,
     UseHolographicEffect: ?bool = null,
+    VisibleConditions: ?std.json.Value = null,
 };
 
 pub const ExhibitComponent = struct {
