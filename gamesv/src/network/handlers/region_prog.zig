@@ -628,7 +628,8 @@ pub fn onTraceRecallQuestRequest(
 ) !void {
     var kbuf: [48]u8 = undefined;
     const k = try std.fmt.bufPrint(&kbuf, "recall:trace:{d}", .{txn.message.RecallQuestId});
-    try progress_comp.info.setKeyInt(alloc.gpa, k, txn.message.Operate);
+    const traced: i64 = if (txn.message.TraceType == 2 or (txn.message.TraceType == 0 and txn.message.Operate == 0)) 0 else 1;
+    try progress_comp.info.setKeyInt(alloc.gpa, k, traced);
     try progress_comp.save(fs, alloc.arena);
     txn.respond(.{ .ErrorId = .Success });
 }

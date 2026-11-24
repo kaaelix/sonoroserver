@@ -6823,7 +6823,11 @@ fn ensureTrackedFocusValid(ctx: QuestContext) void {
     }
 
     const cur = ctx.quest_comp.info.tracked_quest_id;
-    if (cur > 0 and ctx.quest_comp.info.hasActiveQuest(cur)) return;
+    if (cur <= 0) {
+        ctx.quest_comp.info.tracked_quest_id = 0;
+        return;
+    }
+    if (ctx.quest_comp.info.hasActiveQuest(cur)) return;
 
     var best: i32 = 0;
     for (ctx.quest_comp.info.active_quests) |aq| {

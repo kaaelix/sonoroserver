@@ -609,7 +609,8 @@ pub fn onMonthCardRequest(
     }
     if (dirty) try progress_comp.save(fs, alloc.arena);
     if (granted_today) {
-        _ = try RewardService.grantItems(reward_ctx, 0, true, &.{.{ .item_id = 3, .count = 90 }}, 19500);
+        // MonthCardRequest fires during OnLoadingNetDataDone; avoid popping CommonRewardView mid-load.
+        _ = try RewardService.grantItems(reward_ctx, 0, false, &.{.{ .item_id = 3, .count = 90 }}, 19500);
     }
     txn.respond(.{
         .Days = days,
@@ -855,38 +856,7 @@ pub fn onStorageInfoRequest(
     progress_comp: *const PlayerProgressComponent,
 ) !void {
     var infos: std.ArrayList(pb.ClientStorageInfo) = .empty;
-    var kbuf: [48]u8 = undefined;
-    var seen_sys: std.AutoHashMapUnmanaged(i32, void) = .empty;
-    for (progress_comp.info.dynamic.strs) |entry| {
-        if (std.mem.startsWith(u8, entry.key, "cstorage:msg:")) {
-            const sys_id = std.fmt.parseInt(i32, entry.key["cstorage:msg:".len..], 10) catch continue;
-            if (pb_kv.loadMsg(alloc.arena, progress_comp, entry.key, pb.ClientStorageInfo)) |msg| {
-                try seen_sys.put(alloc.arena, sys_id, {});
-                try infos.append(alloc.arena, msg);
-            }
-        }
-    }
-    for (progress_comp.info.dynamic.ints) |entry| {
-        if (!std.mem.startsWith(u8, entry.key, "cstorage:i:")) continue;
-        const sys_id = std.fmt.parseInt(i32, entry.key["cstorage:i:".len..], 10) catch continue;
-        if (seen_sys.contains(sys_id)) continue;
-        try seen_sys.put(alloc.arena, sys_id, {});
-        try infos.append(alloc.arena, .{
-            .SystemId = sys_id,
-            .Data = .{ .LongData = .{ .Data = entry.val } },
-        });
-    }
-    for (progress_comp.info.dynamic.strs) |entry| {
-        if (!std.mem.startsWith(u8, entry.key, "cstorage:s:")) continue;
-        const sys_id = std.fmt.parseInt(i32, entry.key["cstorage:s:".len..], 10) catch continue;
-        if (seen_sys.contains(sys_id)) continue;
-        try seen_sys.put(alloc.arena, sys_id, {});
-        try infos.append(alloc.arena, .{
-            .SystemId = sys_id,
-            .Data = .{ .StringData = .{ .Data = try alloc.arena.dupe(u8, entry.val) } },
-        });
-    }
-    _ = &kbuf;
+    try pb_kv.appendStoredClientStorageInfos(alloc.arena, progress_comp, &infos);
     txn.respond(.{ .Infos = infos });
 }
 

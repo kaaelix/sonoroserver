@@ -315,12 +315,15 @@ fn deliverAkiResponse(
     resp: aki_logic_bridge.LogicResponse,
 ) !void {
     if (resp.grants.len > 0) {
+        // MonthCardRequest runs during OnLoadingNetDataDone before WorldDone; opening CommonRewardView
+        // mid-loading locks UI input behind LoadingView / NewcomerSplashView.
+        const show_popup = resp.msg_id != proto.pb_desc.MonthCardResponse.msg_id;
         // DropPackage 2105 (ShowBg = false) avoids null DropPackage.Value in ItemHintController
         // while still emitting OnItemRewardNotify -> ItemRewardController.OpenCommonRewardView(1009).
         _ = try RewardService.grantItems(
             state.rewardContext(gpa, io),
             2105,
-            true,
+            show_popup,
             resp.grants,
             akiRewardReason(resp.msg_id),
         );

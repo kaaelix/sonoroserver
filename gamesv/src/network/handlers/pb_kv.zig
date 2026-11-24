@@ -75,3 +75,44 @@ pub fn persistClaim(
     _ = try pc.info.markClaim(alloc.gpa, key);
     try pc.save(fs, alloc.arena);
 }
+
+/// Appends persisted `ClientStorageInfo` entries (`cstorage:msg:*`, `cstorage:i:*`, `cstorage:s:*`) without duplicating SystemIds.
+pub fn appendStoredClientStorageInfos(
+    arena: std.mem.Allocator,
+    progress_comp: *const PlayerProgressComponent,
+    infos: *std.ArrayList(proto.pb.ClientStorageInfo),
+) !void {
+    var seen_sys: std.AutoHashMapUnmanaged(i32, void) = .empty;
+    for (infos.items) |existing| {
+        try seen_sys.put(arena, existing.SystemId, {});
+    }
+    for (progress_comp.info.dynamic.strs) |entry| {
+        if (!std.mem.startsWith(u8, entry.key, "cstorage:msg:")) continue;
+        const sys_id = std.fmt.parseInt(i32, entry.key["cstorage:msg:".len..], 10) catch continue;
+        if (seen_sys.contains(sys_id)) continue;
+        if (loadMsg(arena, progress_comp, entry.key, proto.pb.ClientStorageInfo)) |msg| {
+            try seen_sys.put(arena, sys_id, {});
+            try infos.append(arena, msg);
+        }
+    }
+    for (progress_comp.info.dynamic.ints) |entry| {
+        if (!std.mem.startsWith(u8, entry.key, "cstorage:i:")) continue;
+        const sys_id = std.fmt.parseInt(i32, entry.key["cstorage:i:".len..], 10) catch continue;
+        if (seen_sys.contains(sys_id)) continue;
+        try seen_sys.put(arena, sys_id, {});
+        try infos.append(arena, .{
+            .SystemId = sys_id,
+            .Data = .{ .LongData = .{ .Data = entry.val } },
+        });
+    }
+    for (progress_comp.info.dynamic.strs) |entry| {
+        if (!std.mem.startsWith(u8, entry.key, "cstorage:s:")) continue;
+        const sys_id = std.fmt.parseInt(i32, entry.key["cstorage:s:".len..], 10) catch continue;
+        if (seen_sys.contains(sys_id)) continue;
+        try seen_sys.put(arena, sys_id, {});
+        try infos.append(arena, .{
+            .SystemId = sys_id,
+            .Data = .{ .StringData = .{ .Data = try arena.dupe(u8, entry.val) } },
+        });
+    }
+}

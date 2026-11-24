@@ -194,7 +194,8 @@ pub fn onTraceQuestRequest(
     txn: *Transaction(pb.TraceQuestRequest),
     qctx: QuestEngine.QuestContext,
 ) !void {
-    const qid: i32 = if (txn.message.Operate == 0) 0 else txn.message.QuestId;
+    const is_untrack = txn.message.TraceType == 2 or (txn.message.TraceType == 0 and txn.message.Operate == 0);
+    const qid: i32 = if (is_untrack or txn.message.QuestId <= 0) 0 else txn.message.QuestId;
     try QuestEngine.setTrackedQuest(qctx, qid);
     try txn.conn.push(qctx.alloc.gpa, qctx.io, pb.TraceQuestNotify{
         .QuestId = qctx.quest_comp.info.tracked_quest_id,

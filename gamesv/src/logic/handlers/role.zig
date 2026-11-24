@@ -10,10 +10,12 @@ const PlayerWeaponComponent = @import("../component/player/PlayerWeaponComponent
 const PlayerEchoComponent = @import("../component/player/PlayerEchoComponent.zig");
 const PlayerCosmeticComponent = @import("../component/player/PlayerCosmeticComponent.zig");
 const PlayerInventoryComponent = @import("../component/player/PlayerInventoryComponent.zig");
+const PlayerProgressComponent = @import("../component/player/PlayerProgressComponent.zig");
 const CosmeticInfo = @import("../../fs/CosmeticInfo.zig");
 const CosmeticsHelper = @import("../helpers/cosmetics.zig");
 const RoleStats = @import("../helpers/role_stats.zig");
 const RoleHelper = @import("../helpers/role.zig");
+const pb_kv = @import("../../network/handlers/pb_kv.zig");
 
 const PlayerQuestComponent = @import("../component/player/PlayerQuestComponent.zig");
 const TrialRoles = @import("../helpers/trial_roles.zig");
@@ -118,6 +120,14 @@ pub fn ensureRoleAttributes(
     }
 }
 
+fn hasStorageSystem(items: []const pb.ClientStorageInfo, sys_type: pb.EClientStorageSystemIdType) bool {
+    const target_id = @intFromEnum(sys_type);
+    for (items) |item| {
+        if (item.SystemId == target_id) return true;
+    }
+    return false;
+}
+
 pub fn pushData(
     _: EventQueue.Dequeue(.push_data),
     conn: *Connection,
@@ -130,6 +140,7 @@ pub fn pushData(
     cosmetic_comp: *PlayerCosmeticComponent,
     inventory_comp: *PlayerInventoryComponent,
     quest_comp: *const PlayerQuestComponent,
+    progress_comp: *PlayerProgressComponent,
     io: std.Io,
 ) !void {
     try conn.push(alloc.gpa, io, pb.NormalItemUpdateNotify{
@@ -159,13 +170,22 @@ pub fn pushData(
     });
 
     var storage_info_notify: pb.StorageInfoNotify = .default;
-    try storage_info_notify.Infos.ensureTotalCapacity(alloc.arena, 6);
-    storage_info_notify.Infos.appendAssumeCapacity(try buildEmptyStorageRecord(.RoleSkinRedDot, alloc.arena));
-    storage_info_notify.Infos.appendAssumeCapacity(try buildEmptyStorageRecord(.FlySkinRedDot, alloc.arena));
-    storage_info_notify.Infos.appendAssumeCapacity(try buildEmptyStorageRecord(.WeaponSkinRedDot, alloc.arena));
-    storage_info_notify.Infos.appendAssumeCapacity(try buildEmptyStorageRecord(.CalabashSkinRedDot, alloc.arena));
-    storage_info_notify.Infos.appendAssumeCapacity(try buildIntStorageRecord(.Ornament, cosmetic_comp.info.viewed_ornaments, alloc.arena));
-    storage_info_notify.Infos.appendAssumeCapacity(try buildEmptyStorageRecord(.GetOrnament, alloc.arena));
+    try pb_kv.appendStoredClientStorageInfos(alloc.arena, progress_comp, &storage_info_notify.Infos);
+    const default_empty_storage = [_]pb.EClientStorageSystemIdType{
+        .RoleSkinRedDot,
+        .FlySkinRedDot,
+        .WeaponSkinRedDot,
+        .CalabashSkinRedDot,
+        .GetOrnament,
+    };
+    for (default_empty_storage) |sys_type| {
+        if (!hasStorageSystem(storage_info_notify.Infos.items, sys_type)) {
+            try storage_info_notify.Infos.append(alloc.arena, try buildEmptyStorageRecord(sys_type, alloc.arena));
+        }
+    }
+    if (!hasStorageSystem(storage_info_notify.Infos.items, .Ornament)) {
+        try storage_info_notify.Infos.append(alloc.arena, try buildIntStorageRecord(.Ornament, cosmetic_comp.info.viewed_ornaments, alloc.arena));
+    }
     try conn.push(alloc.gpa, io, storage_info_notify);
 
     const selected_main_role = RoleHelper.selectedMainRoleId(
