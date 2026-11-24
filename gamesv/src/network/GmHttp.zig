@@ -16,6 +16,7 @@ const js_cmd = @import("../logic/commands/js_patches.zig");
 const mem = @import("../mem.zig");
 const gm_bridge = @import("gm_bridge.zig");
 const aki_logic_bridge = @import("aki_logic_bridge.zig");
+const gm_i18n = @import("gm_i18n.zig");
 
 const log = std.log.scoped(.gm_http);
 const panel_html = @embedFile("gm_panel.html");
@@ -514,25 +515,53 @@ fn buildCatalogJson(arena: Allocator, assets: *const Assets, query: []const u8) 
         null;
 
     var out: Io.Writer.Allocating = .init(arena);
-    const max_rows: usize = 120;
+    const max_rows: usize = 200;
 
     if (std.mem.eql(u8, kind, "quests")) {
         const QuestItem = struct {
             id: i32,
             type: i32,
+            type_name: []const u8,
             ch: i32,
+            chapter: []const u8,
             reg: i32,
-            key: []const u8,
+            region: []const u8,
+            title: []const u8,
         };
         var rows: std.ArrayList(QuestItem) = .empty;
-        for (assets.tables.quest_data.items) |entry| {
-            const d = entry.Data;
-            if (d.Id <= 0 or d.Type == 100) continue;
+        // Pass 1: priority story/companion/exploration/collab quests first when listing/searching
+        const priority_types = [_]i32{ 1, 3, 16, 9, 2, 7, 10, 14, 15, 17, 4, 11 };
+        for (priority_types) |pt| {
             if (type_filter) |tf| {
-                if (d.Type != tf) continue;
+                if (tf != pt) continue;
             }
-            if (!idMatchesQuery(arena, d.Id, d.Key, q)) continue;
-            try rows.append(arena, .{ .id = d.Id, .type = d.Type, .ch = d.ChapterId, .reg = d.RegionId, .key = d.Key });
+            for (assets.tables.quest_data.items) |entry| {
+                const d = entry.Data;
+                if (d.Id <= 0 or d.Type == 100 or d.Type != pt) continue;
+                const title = gm_i18n.resolveQuestTitle(arena, d.Id, d.Type, d.ChapterId, d.RegionId, d.Key);
+                const ch_name = gm_i18n.chapterName(d.ChapterId);
+                const reg_name = gm_i18n.regionName(d.RegionId);
+                const type_name = gm_i18n.questTypeName(d.Type);
+                if (!idMatchesQuery(arena, d.Id, title, q) and
+                    !containsCaseInsensitive(ch_name, q) and
+                    !containsCaseInsensitive(reg_name, q) and
+                    !containsCaseInsensitive(type_name, q) and
+                    !containsCaseInsensitive(d.Key, q))
+                {
+                    continue;
+                }
+                try rows.append(arena, .{
+                    .id = d.Id,
+                    .type = d.Type,
+                    .type_name = type_name,
+                    .ch = d.ChapterId,
+                    .chapter = ch_name,
+                    .reg = d.RegionId,
+                    .region = reg_name,
+                    .title = title,
+                });
+                if (rows.items.len >= max_rows) break;
+            }
             if (rows.items.len >= max_rows) break;
         }
         try out.writer.print("{f}", .{std.json.fmt(.{ .items = rows.items }, .{})});
@@ -560,11 +589,13 @@ fn buildCatalogJson(arena: Allocator, assets: *const Assets, query: []const u8) 
     }
 
     if (std.mem.eql(u8, kind, "weapons")) {
-        const WepCat = struct { id: i32, star: i32, kind: []const u8 };
+        const WepCat = struct { id: i32, star: i32, wtype: i32, kind: []const u8 };
         var rows: std.ArrayList(WepCat) = .empty;
         for (assets.tables.weapon_conf.items) |w| {
-            if (!idMatchesQuery(arena, w.ItemId, "weapon", q)) continue;
-            try rows.append(arena, .{ .id = w.ItemId, .star = w.QualityId, .kind = "Weapon" });
+            const wlabel = gm_i18n.weaponTypeName(w.WeaponType);
+            const full_tag = std.fmt.allocPrint(arena, "{s} ({d}★)", .{ wlabel, w.QualityId }) catch wlabel;
+            if (!idMatchesQuery(arena, w.ItemId, full_tag, q)) continue;
+            try rows.append(arena, .{ .id = w.ItemId, .star = w.QualityId, .wtype = w.WeaponType, .kind = wlabel });
             if (rows.items.len >= max_rows) break;
         }
         try out.writer.print("{f}", .{std.json.fmt(.{ .items = rows.items }, .{})});
@@ -572,11 +603,18 @@ fn buildCatalogJson(arena: Allocator, assets: *const Assets, query: []const u8) 
     }
 
     if (std.mem.eql(u8, kind, "echoes")) {
-        const EchoCat = struct { id: i32, mon: i32, star: i32, fetters: []const i32 };
+        const EchoCat = struct { id: i32, mon: i32, star: i32, cost_hint: []const u8, fetters: []const i32 };
         var rows: std.ArrayList(EchoCat) = .empty;
         for (assets.tables.phantom_item.items) |p| {
-            if (!idMatchesQuery(arena, p.ItemId, "", q) and !idMatchesQuery(arena, p.MonsterId, "", q)) continue;
-            try rows.append(arena, .{ .id = p.ItemId, .mon = p.MonsterId, .star = p.QualityId, .fetters = p.FetterGroup });
+            const cost_lbl: []const u8 = switch (p.Rarity) {
+                0 => "Cost 1 (Common)",
+                1 => "Cost 3 (Elite)",
+                2 => "Cost 4 (Overlord)",
+                3 => "Cost 4 (Calamity)",
+                else => "Echo",
+            };
+            if (!idMatchesQuery(arena, p.ItemId, cost_lbl, q) and !idMatchesQuery(arena, p.MonsterId, cost_lbl, q)) continue;
+            try rows.append(arena, .{ .id = p.ItemId, .mon = p.MonsterId, .star = p.QualityId, .cost_hint = cost_lbl, .fetters = p.FetterGroup });
             if (rows.items.len >= max_rows) break;
         }
         try out.writer.print("{f}", .{std.json.fmt(.{ .items = rows.items }, .{})});
@@ -586,7 +624,7 @@ fn buildCatalogJson(arena: Allocator, assets: *const Assets, query: []const u8) 
     const ItemCat = struct { id: i32, star: i32, kind: []const u8 };
     var rows: std.ArrayList(ItemCat) = .empty;
     for (assets.tables.item_info.items) |it| {
-        const tag = std.fmt.allocPrint(arena, "Type {d}/{d}", .{ it.MainTypeId, it.ItemType }) catch "Item";
+        const tag = gm_i18n.itemKindName(it.MainTypeId, it.ItemType);
         if (!idMatchesQuery(arena, it.Id, tag, q)) continue;
         try rows.append(arena, .{ .id = it.Id, .star = it.QualityId, .kind = tag });
         if (rows.items.len >= max_rows) break;
@@ -646,7 +684,10 @@ fn canExtractType(comptime T: type) bool {
 const ActiveQuestSnapshot = struct {
     id: i32,
     type: i32,
-    key: []const u8,
+    type_name: []const u8,
+    chapter: []const u8,
+    region: []const u8,
+    title: []const u8,
     tracked: bool,
     active_nodes: []const i32,
 };
@@ -687,10 +728,17 @@ fn buildSnapshot(
     var aq_list: std.ArrayList(ActiveQuestSnapshot) = .empty;
     for (quest.active_quests) |aq| {
         const meta = if (state.assets.tables.quest_data.getDataById(aq.quest_id)) |qd| qd.Data else null;
+        const qtype = if (meta) |m| m.Type else 0;
+        const ch_id = if (meta) |m| m.ChapterId else 0;
+        const reg_id = if (meta) |m| m.RegionId else 0;
+        const raw_key = if (meta) |m| m.Key else "";
         try aq_list.append(arena, .{
             .id = aq.quest_id,
-            .type = if (meta) |m| m.Type else 0,
-            .key = if (meta) |m| m.Key else "",
+            .type = qtype,
+            .type_name = gm_i18n.questTypeName(qtype),
+            .chapter = gm_i18n.chapterName(ch_id),
+            .region = gm_i18n.regionName(reg_id),
+            .title = gm_i18n.resolveQuestTitle(arena, aq.quest_id, qtype, ch_id, reg_id, raw_key),
             .tracked = quest.tracked_quest_id == aq.quest_id,
             .active_nodes = aq.active_nodes,
         });
@@ -801,6 +849,10 @@ pub fn executeSessionJob(
         .reset_cd => invokeCommand(state, gpa, io, &events, js_cmd.reset_cd.call, .{}),
         .no_cd_mode => invokeCommand(state, gpa, io, &events, js_cmd.team_cd_controller.call, .{job.int_a}),
         .spawn_echo => commands.dispatch(state, gpa, io, &events, job.raw_cmd),
+        .repair_account => invokeCommand(state, gpa, io, &events, cheat_cmd.repair_account.call, .{}),
+        .switch_rover => invokeCommand(state, gpa, io, &events, cheat_cmd.switch_rover.call, .{
+            if (job.target_str.len > 0) job.target_str else @as([]const u8, "havoc"),
+        }),
         .reset_player, .rotate_gm_key => {},
     };
 

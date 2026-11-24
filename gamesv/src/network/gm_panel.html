@@ -291,6 +291,9 @@
                   <button onclick="exec('unlock_tp',{})">Unlock teleporters &amp; map</button>
                   <button onclick="exec('unlock_func',{})">Unlock all features</button>
                 </div>
+                <div class="stack">
+                  <button class="primary" onclick="exec('repair_account',{})">Repair account (fix skipped quests &amp; roles)</button>
+                </div>
                 <div class="stack" style="margin-bottom:0">
                   <button onclick="giveBundle()">Give upgrade materials</button>
                 </div>
@@ -391,9 +394,19 @@
           </div>
 
           <div class="sec">
-            <h2>Unlock characters</h2>
+            <h2>Unlock characters &amp; Rover element</h2>
+            <div class="field">
+              <span class="lbl">Rover element</span>
+              <div class="ctl grid-btns">
+                <button class="sm" onclick="exec('switch_rover',{target_str:'spectro'})">Spectro</button>
+                <button class="sm" onclick="exec('switch_rover',{target_str:'havoc'})">Havoc (Abby)</button>
+                <button class="sm" onclick="exec('switch_rover',{target_str:'aero'})">Aero</button>
+                <button class="sm" onclick="exec('switch_rover',{target_str:'electro'})">Electro</button>
+              </div>
+            </div>
             <div class="stack">
               <button class="primary" onclick="exec('unlock_roles',{target_str:'all'})">Unlock all characters</button>
+              <button onclick="exec('repair_account',{})">Repair RoleInfo &amp; weapons</button>
             </div>
             <div class="stack">
               <input id="directRoleId" class="grow" type="number" placeholder="Role ID (e.g. 1304)">
@@ -467,8 +480,14 @@
             <div class="stack">
               <button onclick="exec('quest_step',{})">Skip current objective</button>
               <button onclick="exec('quest_skip',{})">Skip tracked quest</button>
-              <button onclick="exec('quest_skip',{int_a:139000025})">Skip prologue (139000025)</button>
+              <button class="primary" onclick="exec('repair_account',{})">Repair skipped quests &amp; locks</button>
               <button onclick="refreshState()">Reload</button>
+            </div>
+            <div class="stack">
+              <span class="lbl" style="font-size:12px;opacity:.8">Quick Ch.1 milestones:</span>
+              <button class="sm" onclick="exec('quest_skip',{int_a:139000025})">Skip Prologue (139000025)</button>
+              <button class="sm" onclick="exec('quest_skip',{int_a:140800000})">Skip Ch.1 Finale (140800000)</button>
+              <button class="sm" onclick="exec('quest_pick',{int_a:880000013,flag:true})">Start Abby Appears (880000013)</button>
             </div>
             <div class="list" id="activeQuestList">
               <div class="empty">No active quests.</div>
@@ -476,21 +495,28 @@
           </div>
 
           <div class="sec">
-            <h2>Pick a quest</h2>
+            <h2>Pick or skip a quest</h2>
             <div class="stack">
-              <input id="questDirectId" type="number" placeholder="Quest ID (e.g. 139000025)" class="grow">
+              <input id="questDirectId" type="number" placeholder="Quest ID (e.g. 880000013)" class="grow">
               <button class="primary" onclick="exec('quest_pick',{int_a:+$('questDirectId').value,flag:true})">Pick &amp; start</button>
-              <button onclick="exec('quest_skip',{int_a:+$('questDirectId').value})">Mark complete</button>
+              <button onclick="exec('quest_skip',{int_a:+$('questDirectId').value})">Complete cleanly</button>
             </div>
             <div class="stack" style="margin-bottom:0">
-              <input id="questSearch" class="grow" placeholder="Search by ID, key or chapter" oninput="debounceCatalog('quests')">
+              <input id="questSearch" class="grow" placeholder="Search by English title, chapter, region or ID" oninput="debounceCatalog('quests')">
               <select id="questTypeFilter" aria-label="Quest type" onchange="loadCatalog('quests')">
-                <option value="">All types</option>
-                <option value="1">Main story (1)</option>
-                <option value="2">Side / world (2)</option>
-                <option value="3">Companion (3)</option>
-                <option value="9">Exploration (9)</option>
+                <option value="">All quests (priority order)</option>
+                <option value="1">Main Story (1)</option>
+                <option value="3">Companion Story (3)</option>
+                <option value="16">Collab Story (16)</option>
+                <option value="9">Exploration / POI (9)</option>
+                <option value="2">World / Side (2)</option>
+                <option value="7">Parkour / Challenge (7)</option>
                 <option value="10">Event (10)</option>
+                <option value="14">Character Encounter (14)</option>
+                <option value="15">Event Replay (15)</option>
+                <option value="17">Domain Exploration (17)</option>
+                <option value="4">Daily / Side (4)</option>
+                <option value="11">Logistics / Courier (11)</option>
               </select>
               <button onclick="loadCatalog('quests')">Search</button>
             </div>
@@ -848,14 +874,15 @@ function renderState(d){
       const div = document.createElement('div');
       div.className = 'item-row';
       const nodes = (q.active_nodes || []).join(', ') || '-';
+      const locMeta = [q.chapter, q.region].filter(Boolean).join(' · ');
       div.innerHTML = `
         <div>
           <div>
             ${q.tracked ? '<span class="tag tracked">Tracked</span>' : ''}
-            <span class="tag">T${q.type}</span>
-            <b>${esc(q.key || ('Quest '+q.id))}</b> <span class="muted">(${q.id})</span>
+            <span class="tag">${esc(q.type_name || ('T'+q.type))}</span>
+            <b>${esc(q.title || ('Quest '+q.id))}</b> <span class="muted">(${q.id})</span>
           </div>
-          <div class="item-meta">Active nodes: [${esc(nodes)}]</div>
+          <div class="item-meta">${locMeta ? esc(locMeta) + ' · ' : ''}Active nodes: [${esc(nodes)}]</div>
         </div>
         <div class="btns">
           <button class="sm" onclick="exec('quest_step',{int_a:${q.id}})">Step</button>
@@ -1037,7 +1064,11 @@ function renderQuestCat(items){
   items.forEach(q=>{
     const d = document.createElement('div');
     d.className = 'item-row';
-    d.innerHTML = `<div><span class="tag">T${q.type}</span><b>${esc(q.key||('Quest '+q.id))}</b> <span class="muted">(ID ${q.id}${q.ch?', Ch '+esc(q.ch):''})</span></div>
+    const sub = [q.chapter, q.region].filter(Boolean).join(' · ');
+    d.innerHTML = `<div>
+        <div><span class="tag">${esc(q.type_name || ('T'+q.type))}</span><b>${esc(q.title || ('Quest '+q.id))}</b> <span class="muted">(${q.id})</span></div>
+        ${sub ? `<div class="item-meta">${esc(sub)}</div>` : ''}
+      </div>
       <div class="btns">
         <button class="sm" onclick="exec('quest_pick',{int_a:${q.id},flag:true})">Pick</button>
         <button class="sm" onclick="exec('quest_skip',{int_a:${q.id}})">Skip</button>
@@ -1052,7 +1083,7 @@ function renderItemCat(items, kind){
   if(items.length===0){ list.innerHTML='<div class="empty">No matches.</div>'; return; }
   items.forEach(it=>{
     const d = document.createElement('div');
-    const lbl = KNOWN_ITEMS[it.id] ? `${KNOWN_ITEMS[it.id]} (${it.id})` : `${it.id}`;
+    const lbl = KNOWN_ITEMS[it.id] ? `${KNOWN_ITEMS[it.id]} (${it.id})` : `${it.kind || (kind==='weapons'?'Weapon':'Item')} #${it.id}`;
     d.className = 'item-row';
     d.innerHTML = `<div>${starTag(it.star)}<b>${esc(lbl)}</b> <span class="muted">${esc(it.kind||kind)}</span></div>
       <div class="btns">
@@ -1070,7 +1101,7 @@ function renderEchoCat(items){
   items.forEach(e=>{
     const d = document.createElement('div');
     d.className = 'item-row';
-    d.innerHTML = `<div>${starTag(e.star)}<b>${e.id}</b> <span class="muted">Monster ${e.mon} · Sonata [${(e.fetters||[]).join(',')}]</span></div>
+    d.innerHTML = `<div>${starTag(e.star)}<b>${esc(e.cost_hint||'Echo')} #${e.id}</b> <span class="muted">Monster ${e.mon} · Sonata [${(e.fetters||[]).join(',')}]</span></div>
       <div class="btns"><button class="sm" onclick="const f=${(e.fetters&&e.fetters[0])||1}; $('echoCmdInput').value='echo ${e.id} '+f+' cr cd atk% er atk'; runCmd($('echoCmdInput').value)">Spawn crit echo</button></div>`;
     list.appendChild(d);
   });

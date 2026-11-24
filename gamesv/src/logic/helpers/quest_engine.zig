@@ -136,6 +136,7 @@ const resolveVarInt = quest_types.resolveVarInt;
 pub fn syncOnLogin(ctx: QuestContext) !void {
     // Ensure Synthesis (10035) is marked unlocked so synthesis menu RPCs are not gated.
     _ = try ctx.quest_comp.info.unlockSystem(ctx.alloc.gpa, 10035);
+    _ = reconcileAccountState(ctx, false) catch |err| logHookErr("reconcileAccountState", err);
     _ = try refreshAvailableQuests(ctx, false);
     _ = try refreshDailyQuests(ctx, false);
 
@@ -2812,6 +2813,515 @@ pub fn gmSkipQuestNode(ctx: QuestContext, quest_id_opt: ?i32) !i32 {
     return quest_id;
 }
 
+pub const AccountRepairReport = struct {
+    repaired_quests: usize = 0,
+    unlocked_systems: usize = 0,
+    removed_trial_roles: usize = 0,
+    unlocked_locks: usize = 0,
+    left_dungeon: bool = false,
+    role_summary: RoleHelper.RoleRepairSummary = .{},
+};
+
+fn collectQuestActionsRecursive(
+    out: *std.ArrayList(std.json.Value),
+    arena: std.mem.Allocator,
+    val: std.json.Value,
+    depth: usize,
+) !void {
+    if (depth > 16) return;
+    switch (val) {
+        .array => |arr| {
+            for (arr.items) |item| {
+                if (item == .object and item.object.get("Name") != null) {
+                    try out.append(arena, item);
+                } else {
+                    try collectQuestActionsRecursive(out, arena, item, depth + 1);
+                }
+            }
+        },
+        .object => |obj| {
+            if (obj.get("Name") != null and obj.get("Params") != null) {
+                try out.append(arena, val);
+                return;
+            }
+            var it = obj.iterator();
+            while (it.next()) |kv| {
+                // Avoid diving into nested QuestFailed branches
+                if (std.mem.eql(u8, kv.key_ptr.*, "FailedCondition")) continue;
+                try collectQuestActionsRecursive(out, arena, kv.value_ptr.*, depth + 1);
+            }
+        },
+        else => {},
+    }
+}
+
+fn isSkipSafeActionName(
+    name: []const u8,
+    params_opt: ?std.json.ObjectMap,
+    reconcile_only: bool,
+    allow_world_layers: bool,
+) bool {
+    if (std.mem.eql(u8, name, "OpenSystemFunction") or
+        std.mem.eql(u8, name, "UnlockSystemItem") or
+        std.mem.eql(u8, name, "UnlockTeleportTrigger") or
+        std.mem.eql(u8, name, "CompleteGuide") or
+        std.mem.eql(u8, name, "GuideTrigger") or
+        std.mem.eql(u8, name, "RunActions"))
+    {
+        return true;
+    }
+    if (std.mem.eql(u8, name, "EnableFunction")) {
+        if (reconcile_only) {
+            if (params_opt) |p| {
+                if (jsonBool(p.get("Enable"))) |en| {
+                    if (!en) return false;
+                }
+                if (jsonStr(p.get("Type"))) |ty| {
+                    if (std.mem.eql(u8, ty, "InteractiveItems") or
+                        std.mem.eql(u8, ty, "MotorRadioUI") or
+                        std.mem.eql(u8, ty, "TeleportDungeon"))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, name, "EnableSystem")) {
+        if (params_opt) |p| {
+            const en = jsonBool(p.get("IsEnable")) orelse true;
+            if (reconcile_only and !en) return false;
+        }
+        return true;
+    }
+    if (std.mem.eql(u8, name, "SwitchDataLayers") or std.mem.eql(u8, name, "SwitchSubLevels")) {
+        return allow_world_layers;
+    }
+    if (reconcile_only) return false;
+
+    if (std.mem.eql(u8, name, "SetTimeLockState") or std.mem.eql(u8, name, "SetWeatherLockState")) {
+        if (params_opt) |p| {
+            const lock_str = jsonStr(p.get("LockState")) orelse "Unlock";
+            return !std.mem.eql(u8, lock_str, "Lock");
+        }
+        return true;
+    }
+
+    const extra_skip_actions = [_][]const u8{
+        "SetVar",
+        "CalculateVar",
+        "RandomVar",
+        "SetAreaState",
+        "EnableLevelPlay",
+        "ChangeEntityState",
+        "ChangeSelfEntityState",
+        "HideGroup",
+        "ShowHidedGroup",
+        "HideSpecificEntities",
+        "ShowSpecificEntities",
+        "LockEntity",
+        "UnlockEntity",
+        "RemoveTrialCharacter",
+        "RestoreTrialCharacter",
+        "RemoveGuestCharacter",
+        "ExitDungeon",
+        "DestroyQuestItem",
+        "DestroyQuest",
+        "SendNpcMail",
+        "PhoneSystemInteract",
+        "ToggleMapMarkState",
+        "FinishCondition",
+        "GetItem",
+    };
+    for (extra_skip_actions) |ok_name| {
+        if (std.mem.eql(u8, name, ok_name)) return true;
+    }
+    return false;
+}
+
+fn replayFlowSafeActionsForSkip(
+    ctx: QuestContext,
+    quest_id: i32,
+    node_id: i32,
+    flow_name: []const u8,
+    flow_id: i32,
+    initial_state_id: i32,
+    reconcile_only: bool,
+    allow_world_layers: bool,
+) !void {
+    if (flow_name.len == 0 or flow_id <= 0) return;
+    var visited_states: [16]i32 = undefined;
+    var visited_len: usize = 0;
+    var state_id: i32 = initial_state_id;
+    var step_idx: usize = 0;
+
+    while (step_idx < 16 and state_id > 0) : (step_idx += 1) {
+        var seen = false;
+        for (visited_states[0..visited_len]) |vs| {
+            if (vs == state_id) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) break;
+        if (visited_len < visited_states.len) {
+            visited_states[visited_len] = state_id;
+            visited_len += 1;
+        }
+
+        const state_val = (ctx.assets.flow_states.getFlowState(
+            ctx.io,
+            ctx.alloc.arena,
+            flow_name,
+            flow_id,
+            state_id,
+        ) catch null) orelse break;
+        if (state_val != .object) break;
+
+        var flow_acts: std.ArrayList(std.json.Value) = .empty;
+        if (state_val.object.get("Actions")) |acts_val| {
+            try collectQuestActionsRecursive(&flow_acts, ctx.alloc.arena, acts_val, 0);
+        }
+
+        var next_state: i32 = 0;
+        for (flow_acts.items) |act| {
+            if (act != .object) continue;
+            const aname = jsonStr(act.object.get("Name")) orelse continue;
+            const params_obj = if (act.object.get("Params")) |p| (if (p == .object) p.object else null) else null;
+            if (std.mem.eql(u8, aname, "ChangeState")) {
+                if (params_obj) |po| {
+                    if (jsonInt(po.get("StateId"))) |ns| next_state = ns;
+                }
+                continue;
+            }
+            if (!isSkipSafeActionName(aname, params_obj, reconcile_only, allow_world_layers)) continue;
+            var cbs = actionCallbacks();
+            cbs.is_flow_action = true;
+            cbs.defer_flow_transition = true;
+            QuestActions.executeAction(ctx, cbs, quest_id, node_id, act) catch {};
+        }
+        state_id = next_state;
+    }
+}
+
+fn executeSkipSafeNodeActions(
+    ctx: QuestContext,
+    quest_id: i32,
+    node_id: i32,
+    actions: []const std.json.Value,
+    reconcile_only: bool,
+    allow_world_layers: bool,
+) !void {
+    for (actions) |act| {
+        if (act != .object) continue;
+        const aname = jsonStr(act.object.get("Name")) orelse continue;
+        const params_obj = if (act.object.get("Params")) |p| (if (p == .object) p.object else null) else null;
+        if (std.mem.eql(u8, aname, "PlayFlow")) {
+            if (params_obj) |po| {
+                const fln = jsonStr(po.get("FlowListName")) orelse "";
+                const fid = jsonInt(po.get("FlowId")) orelse 0;
+                const sid = jsonInt(po.get("StateId")) orelse 1;
+                try replayFlowSafeActionsForSkip(ctx, quest_id, node_id, fln, fid, sid, reconcile_only, allow_world_layers);
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, aname, "RunActions")) {
+            if (params_obj) |po| {
+                if (po.get("ActionList")) |al| {
+                    if (al == .array) {
+                        try executeSkipSafeNodeActions(ctx, quest_id, node_id, al.array.items, reconcile_only, allow_world_layers);
+                    }
+                }
+            }
+            continue;
+        }
+        if (!isSkipSafeActionName(aname, params_obj, reconcile_only, allow_world_layers)) continue;
+        QuestActions.executeAction(ctx, actionCallbacks(), quest_id, node_id, act) catch {};
+    }
+}
+
+fn visitSkipTreeNodes(
+    nodes: []const LazyNodeStore.NodeEntry,
+    node: LazyNodeStore.NodeEntry,
+    out: *std.ArrayList(LazyNodeStore.NodeEntry),
+    visited: *std.ArrayList(i32),
+    arena: std.mem.Allocator,
+) !void {
+    if (out.items.len >= 1024) return;
+    if (std.mem.eql(u8, node.node_type, "QuestFailed")) return;
+    for (visited.items) |vid| {
+        if (vid == node.id) return;
+    }
+    try visited.append(arena, node.id);
+
+    if (std.mem.eql(u8, node.node_type, "ConditionSelector")) {
+        if (node.data == .object) {
+            if (node.data.object.get("Slots")) |slots_val| {
+                if (slots_val == .array) {
+                    for (slots_val.array.items) |slot| {
+                        if (slot != .object) continue;
+                        const sn = slot.object.get("Node") orelse continue;
+                        if (sn != .object) continue;
+                        const cid = jsonInt(sn.object.get("Id")) orelse continue;
+                        const cnode = findNodeById(nodes, cid) orelse continue;
+                        try visitSkipTreeNodes(nodes, cnode.*, out, visited, arena);
+                        break;
+                    }
+                }
+            }
+        }
+        try out.append(arena, node);
+        return;
+    }
+
+    const is_select = std.mem.eql(u8, node.node_type, "Select");
+    var picked_select_branch = false;
+    for (nodes) |child| {
+        if (child.parent_id != node.id) continue;
+        if (std.mem.eql(u8, child.node_type, "QuestFailed")) continue;
+        if (is_select and picked_select_branch) continue;
+        try visitSkipTreeNodes(nodes, child, out, visited, arena);
+        if (is_select) picked_select_branch = true;
+    }
+    try out.append(arena, node);
+}
+
+fn collectQuestSkipTraversal(
+    arena: std.mem.Allocator,
+    nodes: []const LazyNodeStore.NodeEntry,
+) ![]const LazyNodeStore.NodeEntry {
+    var out: std.ArrayList(LazyNodeStore.NodeEntry) = .empty;
+    var visited: std.ArrayList(i32) = .empty;
+    if (nodes.len == 0) return &.{};
+    const root = findRootNode(nodes) orelse nodes[0];
+    try visitSkipTreeNodes(nodes, root, &out, &visited, arena);
+    // Append any disconnected non-Failed ChildQuest/Action nodes just in case a quest tree has floating islands
+    for (nodes) |n| {
+        if (std.mem.eql(u8, n.node_type, "QuestFailed")) continue;
+        var seen = false;
+        for (visited.items) |vid| {
+            if (vid == n.id) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) {
+            try visited.append(arena, n.id);
+            try out.append(arena, n);
+        }
+    }
+    return out.items;
+}
+
+fn activeQuestsReferenceAction(ctx: QuestContext, target_names: []const []const u8) bool {
+    for (ctx.quest_comp.info.active_quests) |aq| {
+        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, aq.quest_id) catch continue;
+        for (nodes) |node| {
+            var acts: std.ArrayList(std.json.Value) = .empty;
+            collectQuestActionsRecursive(&acts, ctx.alloc.arena, node.data, 0) catch continue;
+            for (acts.items) |act| {
+                if (act != .object) continue;
+                const aname = jsonStr(act.object.get("Name")) orelse continue;
+                for (target_names) |want| {
+                    if (std.mem.eql(u8, aname, want)) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+pub fn cleanupOrphanedQuestEnvironment(ctx: QuestContext, force_trials: bool) !AccountRepairReport {
+    var report: AccountRepairReport = .{};
+    var quest_dirty = false;
+
+    if (ctx.quest_comp.info.env.trial_roles.len > 0) {
+        const in_non_overworld = if (ctx.scene) |sc| sc.instance_id != 8 else false;
+        const needed_by_active = !in_non_overworld and activeQuestsReferenceAction(ctx, &.{"AddTrialCharacter", "UpdateTrialCharacter"});
+        const needed_by_dungeon = in_non_overworld;
+        if (force_trials or (!needed_by_active and !needed_by_dungeon)) {
+            report.removed_trial_roles = ctx.quest_comp.info.env.trial_roles.len;
+            try QuestActions.removeTrialRoles(ctx, &.{});
+            quest_dirty = true;
+        }
+    }
+
+    if (ctx.scene != null and ctx.scene.?.plot_added_rover_slot != null) {
+        if (force_trials or !activeQuestsReferenceAction(ctx, &.{"PlayFlow"})) {
+            restorePlotMainRole(ctx);
+        }
+    }
+
+    if (ctx.quest_comp.info.env.time_locked) {
+        if (force_trials or !activeQuestsReferenceAction(ctx, &.{"SetTimeLockState", "SetAreaTimeState"})) {
+            try QuestActions.applyTimeLockState(ctx, false, ctx.quest_comp.info.env.time_lock_hour, ctx.quest_comp.info.env.time_lock_minute);
+            report.unlocked_locks += 1;
+            quest_dirty = true;
+        }
+    }
+
+    if (ctx.quest_comp.info.env.weather_locked) {
+        if (force_trials or !activeQuestsReferenceAction(ctx, &.{"SetWeatherLockState"})) {
+            ctx.quest_comp.info.env.weather_locked = false;
+            report.unlocked_locks += 1;
+            quest_dirty = true;
+        }
+    }
+
+    if (ctx.quest_comp.info.world.active_guests.len > 0) {
+        if (force_trials or !activeQuestsReferenceAction(ctx, &.{"AddGuestCharacter"})) {
+            for (ctx.quest_comp.info.world.active_guests) |gid| {
+                ctx.conn.pushBestEffort(ctx.alloc.gpa, ctx.io, pb.RemoveGuestNotify{ .GuestId = gid });
+            }
+            ctx.alloc.gpa.free(ctx.quest_comp.info.world.active_guests);
+            ctx.quest_comp.info.world.active_guests = &.{};
+            report.unlocked_locks += 1;
+            quest_dirty = true;
+        }
+    }
+
+    if (quest_dirty) {
+        try ctx.quest_comp.save(ctx.fs, ctx.alloc.arena);
+    }
+    return report;
+}
+
+fn replayQuestProgressionEffects(
+    ctx: QuestContext,
+    quest_id: i32,
+    reconcile_only: bool,
+    mark_nodes_finished: bool,
+) !void {
+    const q_opt = ctx.assets.tables.quest_data.getDataById(quest_id);
+    const qtype: i32 = if (q_opt) |q| q.Data.Type else 0;
+    const allow_world_layers = qtype == 1 or qtype == 3 or qtype == 9 or qtype == 16;
+
+    if (q_opt) |q| {
+        if (q.Data.ActiveActions.len > 0) {
+            try executeSkipSafeNodeActions(ctx, quest_id, 0, q.Data.ActiveActions, reconcile_only, allow_world_layers);
+        }
+        if (q.Data.AcceptActions.len > 0) {
+            try executeSkipSafeNodeActions(ctx, quest_id, 0, q.Data.AcceptActions, reconcile_only, allow_world_layers);
+        }
+    }
+
+    const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, quest_id) catch &.{};
+    const ordered_nodes = try collectQuestSkipTraversal(ctx.alloc.arena, nodes);
+    for (ordered_nodes) |node| {
+        var node_acts: std.ArrayList(std.json.Value) = .empty;
+        try collectQuestActionsRecursive(&node_acts, ctx.alloc.arena, node.data, 0);
+        if (node_acts.items.len > 0) {
+            try executeSkipSafeNodeActions(ctx, quest_id, node.id, node_acts.items, reconcile_only, allow_world_layers);
+        }
+
+        if (mark_nodes_finished) {
+            try ctx.quest_comp.info.recordChildQuestFinished(ctx.alloc.gpa, quest_id, node.id);
+            if (ctx.quest_comp.info.findActiveQuestPtr(quest_id)) |aq_ptr| {
+                const newly_done = try ctx.quest_comp.info.markNodeFinished(aq_ptr, ctx.alloc.gpa, node.id);
+                if (newly_done) {
+                    try pushNodeStatus(ctx, quest_id, node.id, .CompletedSuccess, .Finished);
+                    runNodeFinishEffects(ctx, quest_id, node) catch {};
+                }
+            }
+            if (ctx.scene) |scene| {
+                scene.releaseOccupationsForNode(ctx.alloc.gpa, quest_id, node.id);
+            }
+        } else if (std.mem.eql(u8, node.node_type, "ChildQuest") or
+            std.mem.eql(u8, node.node_type, "Action") or
+            std.mem.eql(u8, node.node_type, "QuestSucceed"))
+        {
+            try ctx.quest_comp.info.recordChildQuestFinished(ctx.alloc.gpa, quest_id, node.id);
+        }
+    }
+
+    if (q_opt) |q| {
+        if (q.Data.FinishActions.len > 0) {
+            try executeSkipSafeNodeActions(ctx, quest_id, 0, q.Data.FinishActions, reconcile_only, allow_world_layers);
+        }
+    }
+}
+
+pub fn reconcileAccountState(ctx: QuestContext, deep_repair: bool) !AccountRepairReport {
+    var report: AccountRepairReport = .{};
+    const prev_sys_len = ctx.quest_comp.info.unlocked_systems.len;
+
+    // 1. Repair permanent RoleInfo, Rover consistency, and weapons BEFORE restoring trial formations
+    if (ctx.role_comp) |role_comp| {
+        report.role_summary = try RoleHelper.repairAccountRolesAndWeapons(
+            ctx.alloc,
+            ctx.fs,
+            ctx.assets,
+            ctx.scene,
+            ctx.basic_comp,
+            role_comp,
+            ctx.weapon_comp,
+            ctx.echo_comp,
+        );
+    }
+
+    // 2. Clean up orphaned trial roles, locks, and guests once real roles & weapons are valid
+    const env_rep = try cleanupOrphanedQuestEnvironment(ctx, deep_repair);
+    report.removed_trial_roles += env_rep.removed_trial_roles;
+    report.unlocked_locks += env_rep.unlocked_locks;
+
+    if (deep_repair) {
+        if (ctx.scene) |scene| {
+            if (scene.instance_id != 8) {
+                var owned_by_finished = false;
+                for (ctx.quest_comp.info.finished_quests) |fq| {
+                    if (ctx.quest_comp.info.hasActiveQuest(fq)) continue;
+                    if (ctx.assets.tables.quest_data.getDataById(fq)) |q| {
+                        if (q.Data.DungeonId == scene.instance_id) {
+                            owned_by_finished = true;
+                            break;
+                        }
+                    }
+                }
+                if (owned_by_finished) {
+                    try QuestActions.leaveCurrentDungeon(ctx, 0);
+                    report.left_dungeon = true;
+                }
+            }
+        }
+    }
+
+    // 3. Reconcile missing ChildQuest completions and unlocks from previously skipped finished quests
+    const finished_snap = try ctx.alloc.arena.dupe(i32, ctx.quest_comp.info.finished_quests);
+    var progress_dirty = false;
+    for (finished_snap) |qid| {
+        if (qid <= 0) continue;
+        const rkey = try std.fmt.allocPrint(ctx.alloc.arena, "reconcile:q:{d}", .{qid});
+        const already = if (ctx.progress_comp) |pc| pc.info.getKeyInt(rkey) != 0 else false;
+        if (!deep_repair and already) continue;
+
+        try replayQuestProgressionEffects(ctx, qid, true, false);
+        report.repaired_quests += 1;
+        if (ctx.progress_comp) |pc| {
+            try pc.info.setKeyInt(ctx.alloc.gpa, rkey, 1);
+            progress_dirty = true;
+        }
+    }
+
+    if (ctx.quest_comp.info.unlocked_systems.len > prev_sys_len) {
+        report.unlocked_systems = ctx.quest_comp.info.unlocked_systems.len - prev_sys_len;
+    }
+
+    if (deep_repair) {
+        _ = try refreshAvailableQuests(ctx, false);
+        ensureTrackedFocusValid(ctx);
+        try QuestActions.pushFuncOpen(ctx);
+        try pushQuestStateNotifies(ctx);
+        ensureActiveQuestTargetsSpawned(ctx);
+    }
+
+    if (progress_dirty) {
+        if (ctx.progress_comp) |pc| try pc.save(ctx.fs, ctx.alloc.arena);
+    }
+    try ctx.quest_comp.save(ctx.fs, ctx.alloc.arena);
+    return report;
+}
+
 pub fn gmSkipQuest(ctx: QuestContext, quest_id_opt: ?i32) !i32 {
     const quest_id = if (quest_id_opt) |qid|
         if (qid > 0) qid else resolveGmTargetQuestId(ctx, null)
@@ -2825,25 +3335,53 @@ pub fn gmSkipQuest(ctx: QuestContext, quest_id_opt: ?i32) !i32 {
         ctx.quest_comp.info.hasFinishedQuest(quest_id);
     if (!exists) return 0;
 
-    if (!ctx.quest_comp.info.hasActiveQuest(quest_id) and !ctx.quest_comp.info.hasFinishedQuest(quest_id)) {
-        _ = try ctx.quest_comp.info.getOrAddActiveQuest(ctx.alloc.gpa, quest_id);
-        if (ctx.assets.tables.quest_data.getDataById(quest_id)) |q| {
-            try executeActions(ctx, quest_id, 0, q.Data.ActiveActions);
-            try executeActions(ctx, quest_id, 0, q.Data.AcceptActions);
+    if (ctx.scene) |scene| {
+        scene.releaseOccupationsForTree(ctx.alloc.gpa, quest_id, quest_id);
+        if (scene.active_flow_inc_id != 0 and scene.active_flow_quest_id == quest_id) {
+            scene.clearActiveFlow(ctx.alloc.gpa);
         }
     }
 
+    if (!ctx.quest_comp.info.hasActiveQuest(quest_id) and !ctx.quest_comp.info.hasFinishedQuest(quest_id)) {
+        _ = try ctx.quest_comp.info.getOrAddActiveQuest(ctx.alloc.gpa, quest_id);
+    }
+
+    // Replay non-blocking progression/unlock actions across the entire quest tree before succeeding
+    try replayQuestProgressionEffects(ctx, quest_id, false, true);
+
     if (ctx.quest_comp.info.hasActiveQuest(quest_id)) {
-        if (ctx.quest_comp.info.findActiveQuest(quest_id)) |aq| {
-            const active_snap = try ctx.alloc.arena.dupe(i32, aq.active_nodes);
-            for (active_snap) |nid| {
-                if (ctx.quest_comp.info.findActiveQuestPtr(quest_id)) |aq_ptr| {
-                    _ = try ctx.quest_comp.info.markNodeFinished(aq_ptr, ctx.alloc.gpa, nid);
-                    try pushNodeStatus(ctx, quest_id, nid, .CompletedSuccess, .Finished);
+        try succeedQuest(ctx, quest_id);
+    }
+
+    // Mark reconciled so subsequent logins do not needlessly re-walk it
+    if (ctx.progress_comp) |pc| {
+        const rkey = try std.fmt.allocPrint(ctx.alloc.arena, "reconcile:q:{d}", .{quest_id});
+        try pc.info.setKeyInt(ctx.alloc.gpa, rkey, 1);
+    }
+
+    // Exit quest-only dungeon if we skipped the quest while standing inside its instance
+    if (ctx.scene) |scene| {
+        if (scene.instance_id != 8) {
+            if (ctx.assets.tables.quest_data.getDataById(quest_id)) |q| {
+                if (q.Data.DungeonId == scene.instance_id) {
+                    try QuestActions.leaveCurrentDungeon(ctx, 0);
                 }
             }
         }
-        try succeedQuest(ctx, quest_id);
+    }
+
+    _ = try cleanupOrphanedQuestEnvironment(ctx, false);
+    if (ctx.role_comp) |role_comp| {
+        _ = try RoleHelper.repairAccountRolesAndWeapons(
+            ctx.alloc,
+            ctx.fs,
+            ctx.assets,
+            ctx.scene,
+            ctx.basic_comp,
+            role_comp,
+            ctx.weapon_comp,
+            ctx.echo_comp,
+        );
     }
 
     try pushQuestStateNotifies(ctx);

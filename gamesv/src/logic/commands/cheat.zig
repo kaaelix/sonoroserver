@@ -235,7 +235,36 @@ pub const unlock_roles = struct {
                 try respond(events, alloc.arena, "unknown role id: {d}", .{rid});
                 return;
             }
-            if (!role_comp.role_map.contains(rid)) {
+            const rc = assets.tables.role_info.getDataById(rid) orelse {
+                try respond(events, alloc.arena, "unknown role id {d}", .{rid});
+                return;
+            };
+            if (rc.IsTrial or rc.RoleType != 1 or rid < 1000 or rid > 1999) {
+                try respond(events, alloc.arena, "role id {d} is not a playable character", .{rid});
+                return;
+            }
+            if (role_comp.isTrialRole(rid)) {
+                _ = role_comp.trial_roles.remove(rid);
+            }
+            if (RoleHelper.isMainRole(assets, rid)) {
+                const target_main = RoleHelper.mainRoleIdForElement(assets, basic_comp.info.attributes.sex, rc.ElementId) orelse rid;
+                const fallback_main: i32 = if (basic_comp.info.attributes.sex == 0) 1502 else 1501;
+                const src_main = RoleHelper.selectedMainRoleId(assets, role_comp, basic_comp.info.attributes.sex, basic_comp.info.selected_main_role_id) orelse fallback_main;
+                _ = try RoleHelper.transferMainRoleState(
+                    alloc,
+                    fs,
+                    assets,
+                    null,
+                    basic_comp,
+                    role_comp,
+                    weapon_comp,
+                    echo_comp,
+                    src_main,
+                    target_main,
+                );
+                try RoleHelper.saveBasicInfo(fs, alloc.arena, basic_comp);
+                added = 1;
+            } else if (!role_comp.role_map.contains(rid)) {
                 const new_role = try RoleInfo.createDefault(alloc.gpa, assets, rid);
                 try role_comp.role_map.put(alloc.gpa, rid, new_role);
                 try saveRole(fs, alloc.arena, role_comp.player_id, rid, new_role);
@@ -275,6 +304,9 @@ pub const unlock_roles = struct {
                 } else if (!RoleHelper.isMainRoleForGender(assets, basic_comp.info.attributes.sex, rc.Id)) {
                     continue;
                 }
+            }
+            if (role_comp.isTrialRole(rc.Id)) {
+                _ = role_comp.trial_roles.remove(rc.Id);
             }
             if (!role_comp.role_map.contains(rc.Id)) {
                 const new_role = RoleInfo.createDefault(alloc.gpa, assets, rc.Id) catch continue;
@@ -707,5 +739,117 @@ pub const time_set = struct {
         try QuestEngine.setSceneTime(ctx, h, m, true);
         try ctx.quest_comp.save(ctx.fs, alloc.arena);
         try respond(events, alloc.arena, "set in-game time to {d:0>2}:{d:0>2}", .{ h, m });
+    }
+};
+
+pub const repair_account = struct {
+    pub const alias = "repair";
+    pub const description = "repairs broken quest unlocks, orphaned trial roles/locks, Rover & RoleInfo weapons.\nusage: repair_account";
+
+    pub fn call(
+        state: *State,
+        events: *EventQueue,
+        alloc: mem.Alloc,
+        io: std.Io,
+    ) !void {
+        const ctx = state.questContext(alloc.gpa, io, events);
+        const rep = try QuestEngine.reconcileAccountState(ctx, true);
+        try RoleHelper.pushRoleMetadataNotifies(
+            state.conn,
+            alloc,
+            state.assets,
+            &state.player_components.basic,
+            &state.player_components.role,
+            io,
+        );
+        try pushAllOwnedRoles(
+            state.conn,
+            alloc,
+            state.assets,
+            &state.player_components.basic,
+            &state.player_components.role,
+            &state.player_components.weapon,
+            &state.player_components.echo,
+            io,
+        );
+        try respond(
+            events,
+            alloc.arena,
+            "repaired account: quests={d}, systems=+{d}, trials_cleared={d}, locks_cleared={d}, leaked_roles_removed={d}, roles_fixed={d}, weapons_fixed={d}",
+            .{
+                rep.repaired_quests,
+                rep.unlocked_systems,
+                rep.removed_trial_roles,
+                rep.unlocked_locks,
+                rep.role_summary.removed_leaks,
+                rep.role_summary.fixed_roles,
+                rep.role_summary.fixed_weapons,
+            },
+        );
+    }
+};
+
+pub const switch_rover = struct {
+    pub const alias = "rover";
+    pub const description = "switches Rover element safely (spectro|havoc|aero|electro).\nusage: switch_rover [spectro|havoc|aero|electro]";
+
+    pub fn call(
+        state: *State,
+        events: *EventQueue,
+        alloc: mem.Alloc,
+        io: std.Io,
+        element_arg: []const u8,
+    ) !void {
+        const elem_id: i32 = if (std.ascii.eqlIgnoreCase(element_arg, "spectro") or std.mem.eql(u8, element_arg, "1501") or std.mem.eql(u8, element_arg, "1502"))
+            5
+        else if (std.ascii.eqlIgnoreCase(element_arg, "havoc") or std.mem.eql(u8, element_arg, "1604") or std.mem.eql(u8, element_arg, "1605"))
+            6
+        else if (std.ascii.eqlIgnoreCase(element_arg, "aero") or std.mem.eql(u8, element_arg, "1406") or std.mem.eql(u8, element_arg, "1408"))
+            4
+        else if (std.ascii.eqlIgnoreCase(element_arg, "electro") or std.mem.eql(u8, element_arg, "1309") or std.mem.eql(u8, element_arg, "1310"))
+            3
+        else {
+            try respond(events, alloc.arena, "unknown Rover element '{s}' (use spectro|havoc|aero|electro)", .{element_arg});
+            return;
+        };
+
+        const basic_comp = &state.player_components.basic;
+        const role_comp = &state.player_components.role;
+        const weapon_comp = &state.player_components.weapon;
+        const echo_comp = &state.player_components.echo;
+        const gender = if (basic_comp.info.attributes.sex == 0) @as(i32, 0) else @as(i32, 1);
+
+        const target_id = RoleHelper.mainRoleIdForElement(state.assets, gender, elem_id) orelse {
+            try respond(events, alloc.arena, "Rover element {d} not found for gender {d}", .{ elem_id, gender });
+            return;
+        };
+        const default_main: i32 = if (gender == 0) 1502 else 1501;
+        const source_id = RoleHelper.selectedMainRoleId(
+            state.assets,
+            role_comp,
+            gender,
+            basic_comp.info.selected_main_role_id,
+        ) orelse default_main;
+        const scene_ptr: ?*Scene = if (state.scene) |*sc| sc else null;
+        const res = try RoleHelper.transferMainRoleState(
+            alloc,
+            state.fs,
+            state.assets,
+            scene_ptr,
+            basic_comp,
+            role_comp,
+            weapon_comp,
+            echo_comp,
+            source_id,
+            target_id,
+        );
+        if (res.basic_changed) try RoleHelper.saveBasicInfo(state.fs, alloc.arena, basic_comp);
+        if (res.formation_changed) {
+            if (scene_ptr) |sc| sc.savePersistent(state.fs, alloc.gpa) catch {};
+        }
+
+        try RoleHelper.pushRoleMetadataNotifies(state.conn, alloc, state.assets, basic_comp, role_comp, io);
+        try pushAllOwnedRoles(state.conn, alloc, state.assets, basic_comp, role_comp, weapon_comp, echo_comp, io);
+        try respond(events, alloc.arena, "switched Rover from {d} to {d} ({s})", .{ source_id, target_id, element_arg });
     }
 };

@@ -871,3 +871,289 @@ pub fn healFormationIfNearNexus(
         }
     }
 }
+
+pub const RoleRepairSummary = struct {
+    removed_leaks: usize = 0,
+    fixed_roles: usize = 0,
+    fixed_weapons: usize = 0,
+    fixed_main_role: bool = false,
+    fixed_formation: bool = false,
+};
+
+fn isRoverGenderValid(assets: *const Assets, gender: i32, role_id: i32) bool {
+    return isMainRole(assets, role_id) and isMainRoleForGender(assets, gender, role_id);
+}
+
+pub fn repairAccountRolesAndWeapons(
+    alloc: mem.Alloc,
+    fs: *FileSystem,
+    assets: *const Assets,
+    scene: ?*Scene,
+    basic_comp: *PlayerBasicComponent,
+    role_comp: *PlayerRoleComponent,
+    weapon_comp: *PlayerWeaponComponent,
+    echo_comp: *PlayerEchoComponent,
+) !RoleRepairSummary {
+    var summary: RoleRepairSummary = .{};
+    var basic_dirty = false;
+    var weapon_dirty = false;
+    var echo_dirty = false;
+
+    // 1. Normalize gender (0 = female, 1 = male)
+    if (basic_comp.info.attributes.sex != 0 and basic_comp.info.attributes.sex != 1) {
+        basic_comp.info.attributes.sex = 1;
+        basic_dirty = true;
+        summary.fixed_main_role = true;
+    }
+    const gender = basic_comp.info.attributes.sex;
+
+    // 2. Purge leaked trial/invalid roles saved into permanent role_map
+    var leak_ids: std.ArrayList(i32) = .empty;
+    {
+        var it = role_comp.role_map.iterator();
+        while (it.next()) |kv| {
+            const rid = kv.key_ptr.*;
+            if (role_comp.isTrialRole(rid)) continue;
+            const is_trial_entry = assets.tables.trial_role_info.getDataById(rid) != null;
+            const rc_opt = assets.tables.role_info.getDataById(rid);
+            const invalid_rc = rc_opt == null or rc_opt.?.IsTrial or rc_opt.?.RoleType != 1 or rid < 1000 or rid > 1999;
+            if (is_trial_entry or invalid_rc) {
+                try leak_ids.append(alloc.arena, rid);
+            }
+        }
+    }
+    for (leak_ids.items) |rid| {
+        if (role_comp.role_map.fetchSwapRemove(rid)) |removed| {
+            var val = removed.value;
+            val.deinit(alloc.gpa);
+            summary.removed_leaks += 1;
+        }
+        removeEquipmentCache(role_comp, alloc.gpa, rid);
+        const rpath = std.fmt.allocPrint(alloc.arena, "player/{d}/{s}/{d}", .{ role_comp.player_id, RoleInfo.data_dir, rid }) catch null;
+        if (rpath) |p| {
+            fs.deleteFile(p) catch {};
+        }
+        var wit = weapon_comp.weapon_map.iterator();
+        while (wit.next()) |wkv| {
+            if (wkv.value_ptr.role_id != null and wkv.value_ptr.role_id.? == rid) {
+                wkv.value_ptr.role_id = null;
+                weapon_dirty = true;
+            }
+        }
+        var eit = echo_comp.echo_map.iterator();
+        while (eit.next()) |ekv| {
+            if (ekv.value_ptr.role_id == rid) {
+                ekv.value_ptr.role_id = 0;
+                ekv.value_ptr.equipped_pos = 0;
+                echo_dirty = true;
+            }
+        }
+    }
+
+    // 3. Ensure valid matching-gender selected_main_role_id exists in role_map
+    const default_main: i32 = if (gender == 0) 1502 else 1501;
+    var valid_main: i32 = 0;
+    if (basic_comp.info.selected_main_role_id != 0 and
+        role_comp.role_map.contains(basic_comp.info.selected_main_role_id) and
+        isRoverGenderValid(assets, gender, basic_comp.info.selected_main_role_id))
+    {
+        valid_main = basic_comp.info.selected_main_role_id;
+    } else {
+        if (selectedMainRoleId(assets, role_comp, gender, basic_comp.info.selected_main_role_id)) |candidate_sel| {
+            if (role_comp.role_map.contains(candidate_sel) and isRoverGenderValid(assets, gender, candidate_sel)) {
+                valid_main = candidate_sel;
+            }
+        }
+    }
+
+    if (valid_main == 0) {
+        // Check if an opposite-gender Rover was accidentally unlocked and transfer progression cleanly
+        var opp_rover: ?i32 = null;
+        var it = role_comp.role_map.iterator();
+        while (it.next()) |kv| {
+            if (!role_comp.isTrialRole(kv.key_ptr.*) and isMainRole(assets, kv.key_ptr.*)) {
+                opp_rover = kv.key_ptr.*;
+                break;
+            }
+        }
+        if (opp_rover) |src_id| {
+            const elem = if (assets.tables.role_info.getDataById(src_id)) |rc| rc.ElementId else 5;
+            const target_id = mainRoleIdForElement(assets, gender, elem) orelse default_main;
+            _ = try transferMainRoleState(alloc, fs, assets, scene, basic_comp, role_comp, weapon_comp, echo_comp, src_id, target_id);
+            valid_main = target_id;
+        } else {
+            var new_main = try RoleInfo.createDefault(alloc.gpa, assets, default_main);
+            errdefer new_main.deinit(alloc.gpa);
+            try role_comp.role_map.put(alloc.gpa, default_main, new_main);
+            try saveRoleInfo(fs, alloc.arena, role_comp, default_main);
+            valid_main = default_main;
+        }
+        summary.fixed_main_role = true;
+    }
+
+    if (basic_comp.info.selected_main_role_id != valid_main) {
+        basic_comp.info.selected_main_role_id = valid_main;
+        basic_dirty = true;
+        summary.fixed_main_role = true;
+    }
+
+    // 4. Clean role_show_list of dead/trial/mismatched-Rover entries
+    for (basic_comp.info.role_show_list) |*sr| {
+        if (sr.* == 0) continue;
+        if (!role_comp.role_map.contains(sr.*) or role_comp.isTrialRole(sr.*)) {
+            sr.* = 0;
+            basic_dirty = true;
+        } else if (isMainRole(assets, sr.*) and sr.* != valid_main) {
+            sr.* = valid_main;
+            basic_dirty = true;
+        }
+    }
+
+    // 5. Repair RoleInfo base_prop, skill_node_state, skin_id, and weapon links
+    var role_ids: std.ArrayList(i32) = .empty;
+    {
+        var it = role_comp.role_map.iterator();
+        while (it.next()) |kv| {
+            if (!role_comp.isTrialRole(kv.key_ptr.*)) {
+                try role_ids.append(alloc.arena, kv.key_ptr.*);
+            }
+        }
+    }
+    const max_attr = @intFromEnum(pb.EAttributeType.MAX);
+    for (role_ids.items) |rid| {
+        const rinfo = role_comp.role_map.getPtr(rid) orelse continue;
+        var r_dirty = false;
+        if (rinfo.base_prop.len != max_attr) {
+            try rinfo.resetProperties(alloc.gpa, assets, rid);
+            _ = try rinfo.refreshScaledProperties(alloc.gpa, assets, rid);
+            r_dirty = true;
+        }
+        if (rinfo.skill_node_state.len == 0) {
+            try rinfo.addDefaultSkills(alloc.gpa, assets, rid);
+            r_dirty = true;
+        }
+        if (rinfo.role_skin_id == 0) {
+            if (assets.tables.role_info.getDataById(rid)) |rc| {
+                if (rc.SkinId != 0) {
+                    rinfo.role_skin_id = rc.SkinId;
+                    r_dirty = true;
+                }
+            }
+        }
+        if (r_dirty) {
+            summary.fixed_roles += 1;
+            try saveRoleInfo(fs, alloc.arena, role_comp, rid);
+            removeEquipmentCache(role_comp, alloc.gpa, rid);
+        }
+        if (try ensureRoleWeapon(alloc, fs, assets, role_comp, weapon_comp, rid)) {
+            summary.fixed_weapons += 1;
+        }
+    }
+
+    // 6. Sanitize active formation slots so no missing/wrong-gender Rover remains
+    if (scene) |sc| {
+        var form_dirty = false;
+        for (&sc.formation_info.formations) |*form| {
+            var kept: [3]?FormationInfo.Formation.Role = .{ null, null, null };
+            var klen: usize = 0;
+            for (form.roles) |maybe_slot| {
+                const slot = maybe_slot orelse continue;
+                const keep_id = if (isMainRole(assets, slot.role_id) and slot.role_id != valid_main)
+                    valid_main
+                else
+                    slot.role_id;
+                if (!role_comp.role_map.contains(keep_id)) {
+                    form_dirty = true;
+                    continue;
+                }
+                var dup = false;
+                for (kept[0..klen]) |kslot| {
+                    if (kslot.?.role_id == keep_id) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (dup) {
+                    form_dirty = true;
+                    continue;
+                }
+                var next_slot = slot;
+                if (keep_id != slot.role_id) {
+                    next_slot.role_id = keep_id;
+                    next_slot.entity_id = -1;
+                    form_dirty = true;
+                }
+                kept[klen] = next_slot;
+                klen += 1;
+            }
+            if (klen == 0) {
+                kept[0] = .{ .role_id = valid_main };
+                form.cur_role = valid_main;
+                form_dirty = true;
+            } else {
+                var cur_ok = false;
+                for (kept[0..klen]) |kslot| {
+                    if (kslot.?.role_id == form.cur_role) {
+                        cur_ok = true;
+                        break;
+                    }
+                }
+                if (!cur_ok) {
+                    form.cur_role = kept[0].?.role_id;
+                    form_dirty = true;
+                }
+            }
+            form.roles = kept;
+        }
+        if (form_dirty) {
+            summary.fixed_formation = true;
+            sc.savePersistent(fs, alloc.gpa) catch {};
+        }
+    }
+
+    if (basic_dirty) try saveBasicInfo(fs, alloc.arena, basic_comp);
+    if (weapon_dirty) try PlayerWeaponComponent.saveAll(alloc.gpa, fs, weapon_comp.player_id, weapon_comp.weapon_map);
+    if (echo_dirty) try PlayerEchoComponent.saveAll(alloc.gpa, fs, echo_comp.player_id, echo_comp.echo_map);
+
+    return summary;
+}
+
+pub fn pushRoleMetadataNotifies(
+    conn: *Connection,
+    alloc: mem.Alloc,
+    assets: *const Assets,
+    basic_comp: *const PlayerBasicComponent,
+    role_comp: *PlayerRoleComponent,
+    io: std.Io,
+) !void {
+    try conn.push(alloc.gpa, io, pb.RoleChangeUnlockNotify{
+        .UnlockRoleIds = try mainRoleUnlockList(assets, basic_comp.info.attributes.sex, alloc.arena),
+    });
+
+    var favor_list: std.ArrayList(pb.RoleFavor) = .empty;
+    var motion_list: std.ArrayList(pb.RoleMotion) = .empty;
+    var it = role_comp.role_map.iterator();
+    while (it.next()) |kv| {
+        const rid = kv.key_ptr.*;
+        try favor_list.append(alloc.arena, .{
+            .RoleId = rid,
+            .Level = kv.value_ptr.favor,
+            .Exp = 0,
+        });
+
+        var rm: pb.RoleMotion = .{ .RoleId = rid };
+        for (assets.tables.motion.items) |motion| {
+            if (motion.RoleId == rid) {
+                try rm.MotionIds.append(alloc.arena, .{
+                    .Id = motion.Id,
+                    .Status = .ItemUnLocked,
+                });
+            }
+        }
+        if (rm.MotionIds.items.len > 0) {
+            try motion_list.append(alloc.arena, rm);
+        }
+    }
+    try conn.push(alloc.gpa, io, pb.RoleFavorListNotify{ .FavorList = favor_list });
+    try conn.push(alloc.gpa, io, pb.RoleMotionListNotify{ .MotionList = motion_list });
+}

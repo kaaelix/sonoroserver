@@ -23,6 +23,8 @@ pub const GmAction = enum {
     reset_cd,
     no_cd_mode,
     spawn_echo,
+    repair_account,
+    switch_rover,
     reset_player,
     rotate_gm_key,
 };
