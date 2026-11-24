@@ -359,6 +359,8 @@ fn isSpawnableItemConfig(
         .CustomAoiEditor,
         .DaemonHack,
         .DollGrabShowcase,
+        .DynamicSpawnMonster,
+        .DynamicSpawnMonsterPoint,
         .EntityBatchRefresh,
         .EntityList,
         .EntityPackage,
@@ -366,8 +368,10 @@ fn isSpawnableItemConfig(
         .FollowDecorationChair,
         .Furniture,
         .FurnitureSlot,
+        .GroupAi,
         .LevelPlay,
         .LevelPlay2,
+        .LevelPlayReward,
         .Monitor,
         .PerformanceOptimizer,
         .Position,
@@ -425,6 +429,7 @@ fn isSpawnableConfig(
     template_configs: []const DataTables.TemplateConfig,
     template_by_type: *const std.StringHashMapUnmanaged(u32),
 ) bool {
+    if (std.mem.startsWith(u8, cfg.BlueprintType, "Editor")) return false;
     if (blueprint_by_type.get(cfg.BlueprintType)) |bp_idx| {
         const bp = blueprint_configs[bp_idx];
         return switch (bp.EntityLogic) {

@@ -911,7 +911,7 @@ pub fn notifyJoinScene(
             var should_remove = QuestEngine.shouldHideWorldEntity(quest_comp.info, &active_quest_targets, cfg_id);
             if (!should_remove) {
                 if (assets.findLevelEntity(scene.instance_id, cfg_id)) |lcfg| {
-                    if (!QuestEngine.entityDataLayersActive(assets, quest_comp.info, scene.instance_id, lcfg)) {
+                    if (isBlockedWorldEntityConfig(assets, quest_comp.info, scene.instance_id, lcfg, is_quest_target, explicitly_shown)) {
                         should_remove = true;
                     }
                 }
@@ -1485,27 +1485,7 @@ fn considerSpawnCandidates(
             if (!is_quest_target and scene.instance.isOnRespawnCooldown(cfg_id32, now_ms)) continue;
         }
         const explicitly_shown = cfg_id32 > 0 and QuestInfo.containsInt(quest_info.world.shown_entities, cfg_id32);
-        const base_disabled = if (cfg.ComponentsData.BaseInfoComponent) |bi|
-            bi.Disabled
-        else if (assets.findTemplateConfig(cfg.BlueprintType)) |tpl|
-            if (tpl.ComponentsData.BaseInfoComponent) |tbi| tbi.Disabled else null
-        else
-            null;
-        if ((base_disabled orelse false) and !explicitly_shown and !is_quest_target) continue;
-        if (cfg_id32 > 0 and !explicitly_shown and !is_quest_target) {
-            var blocked_reward = false;
-            for (assets.indexes.levelPlayIndicesForRewardEntity(cfg_id32)) |lp_idx| {
-                const lp = assets.tables.level_play_data.items[lp_idx];
-                const lp_map = assets.resolveMapConfigId(if (lp.Data.InstanceId != 0) lp.Data.InstanceId else lp.Data.LevelId);
-                const scene_map = assets.resolveMapConfigId(scene.instance_id);
-                if (lp.Data.InstanceId != scene.instance_id and lp.Data.LevelId != scene.instance_id and lp_map != scene_map) continue;
-                if (!QuestInfo.containsInt(quest_info.completed_level_plays, lp.LevelPlayId)) {
-                    blocked_reward = true;
-                    break;
-                }
-            }
-            if (blocked_reward) continue;
-        }
+        if (isBlockedWorldEntityConfig(assets, quest_info, scene.instance_id, &cfg, is_quest_target, explicitly_shown)) continue;
         if ((cfg.InSleep or cfg.IsHidden) and !explicitly_shown and !is_quest_target) continue;
         if (QuestEngine.shouldHideWorldEntity(quest_info, active_quest_targets, cfg.EntityId)) continue;
 
@@ -1522,6 +1502,74 @@ fn considerSpawnCandidates(
             insertSpawnCandidate(best_buf, best_len, cap, cand);
         }
     }
+}
+
+pub fn isBlockedWorldEntityConfig(
+    assets: *const Assets,
+    quest_info: QuestInfo,
+    instance_id: i32,
+    lcfg: *const Assets.DataTables.LevelEntityConfig,
+    is_quest_target: bool,
+    explicitly_shown: bool,
+) bool {
+    if (!QuestEngine.entityDataLayersActive(assets, quest_info, instance_id, lcfg)) return true;
+    if (is_quest_target or explicitly_shown) return false;
+
+    if (std.mem.startsWith(u8, lcfg.BlueprintType, "Editor")) return true;
+
+    const tpl_opt = assets.findTemplateConfig(lcfg.BlueprintType);
+    const bp_opt = assets.indexes.findBlueprintConfig(&assets.tables, lcfg.BlueprintType);
+    if (bp_opt) |bp| {
+        switch (bp.EntityType) {
+            .DynamicSpawnMonster, .DynamicSpawnMonsterPoint, .GroupAi, .LevelPlay, .LevelPlay2, .LevelPlayReward => return true,
+            .TriggerConditionListener, .HitConditionListener, .InteractiveConditionListener, .TargetGearWithConditionListener => {
+                const cl_disabled = if (lcfg.ComponentsData.ConditionListenerComponent) |cl|
+                    cl.Disabled
+                else if (tpl_opt) |tpl|
+                    if (tpl.ComponentsData.ConditionListenerComponent) |tcl| tcl.Disabled else null
+                else
+                    null;
+                if (cl_disabled orelse false) return true;
+            },
+            else => {},
+        }
+    }
+
+    const base_disabled = if (lcfg.ComponentsData.BaseInfoComponent) |bi|
+        bi.Disabled
+    else if (tpl_opt) |tpl|
+        if (tpl.ComponentsData.BaseInfoComponent) |tbi| tbi.Disabled else null
+    else
+        null;
+    if (base_disabled orelse false) return true;
+
+    const cfg_id32 = std.math.cast(i32, lcfg.EntityId) orelse 0;
+    if (cfg_id32 > 0) {
+        const scene_map = assets.resolveMapConfigId(instance_id);
+        for (assets.indexes.levelPlayIndicesForRewardEntity(cfg_id32)) |lp_idx| {
+            const lp = assets.tables.level_play_data.items[lp_idx];
+            const lp_map = assets.resolveMapConfigId(if (lp.Data.InstanceId != 0) lp.Data.InstanceId else lp.Data.LevelId);
+            if (lp.Data.InstanceId != instance_id and lp.Data.LevelId != instance_id and lp_map != scene_map) continue;
+            if (!QuestInfo.containsInt(quest_info.completed_level_plays, lp.LevelPlayId)) return true;
+        }
+        for (assets.indexes.levelPlayIndicesForRefEntity(cfg_id32)) |lp_idx| {
+            const lp = assets.tables.level_play_data.items[lp_idx];
+            const lp_map = assets.resolveMapConfigId(if (lp.Data.InstanceId != 0) lp.Data.InstanceId else lp.Data.LevelId);
+            if (lp.Data.InstanceId != instance_id and lp.Data.LevelId != instance_id and lp_map != scene_map) continue;
+            if (lp.Data.LevelPlayEntityId == cfg_id32) continue;
+            if (std.mem.eql(u8, lp.Data.Type, "Quest") or
+                std.mem.eql(u8, lp.Data.Type, "Dungeon") or
+                std.mem.eql(u8, lp.Data.Type, "LordGym"))
+            {
+                if (!QuestInfo.containsInt(quest_info.progress.entered_level_plays, lp.LevelPlayId) and
+                    !QuestInfo.containsInt(quest_info.completed_level_plays, lp.LevelPlayId))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 fn isUnlockedTeleporterEntity(
