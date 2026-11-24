@@ -345,7 +345,7 @@ pub fn isSpawnableBlueprint(bp: []const u8) bool {
         std.mem.indexOf(u8, bp, "AirWall") != null;
 }
 
-fn isSpawnableItemConfig(
+pub fn isSpawnableItemConfig(
     cfg: *const DataTables.LevelEntityConfig,
     entity_type: @FieldType(DataTables.BlueprintConfig, "EntityType"),
 ) bool {
@@ -427,6 +427,39 @@ pub fn cellCoord(coord: f32) ?i32 {
     return @intFromFloat(scaled);
 }
 
+pub fn isSpawnableBlueprintAndTemplate(
+    cfg: *const DataTables.LevelEntityConfig,
+    bp: DataTables.BlueprintConfig,
+    tpl_opt: ?*const DataTables.TemplateConfig,
+) bool {
+    return switch (bp.EntityLogic) {
+        .Monster, .Animal, .Npc, .Vision, .Vehicle, .SimpleCombat => true,
+        .Custom => switch (bp.EntityType) {
+            .ClientTrigger, .EnrichmentArea, .LocationSafety => true,
+            else => false,
+        },
+        .Item => blk: {
+            if (isSpawnableItemConfig(cfg, bp.EntityType)) break :blk true;
+            if (tpl_opt) |tpl| {
+                if (bp.EntityType == .TreasureBox or
+                    bp.EntityType == .HookTreasureBox or
+                    bp.EntityType == .VisionTreasureBox or
+                    bp.EntityType == .Destructible or
+                    bp.EntityType == .DestructibleWithHook or
+                    bp.EntityType == .DestructibleExploreInteractor)
+                {
+                    break :blk tpl.ComponentsData.RewardComponent != null or tpl.ComponentsData.TreasureBoxComponent != null;
+                }
+                if (tpl.ComponentsData.RewardComponent != null and std.mem.indexOf(u8, cfg.BlueprintType, "Treasure") != null) {
+                    break :blk true;
+                }
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
 fn isSpawnableConfig(
     cfg: *const DataTables.LevelEntityConfig,
     blueprint_configs: []const DataTables.BlueprintConfig,
@@ -437,33 +470,11 @@ fn isSpawnableConfig(
     if (std.mem.startsWith(u8, cfg.BlueprintType, "Editor")) return false;
     if (blueprint_by_type.get(cfg.BlueprintType)) |bp_idx| {
         const bp = blueprint_configs[bp_idx];
-        return switch (bp.EntityLogic) {
-            .Monster, .Animal, .Npc, .Vision, .Vehicle, .SimpleCombat => true,
-            .Custom => switch (bp.EntityType) {
-                .ClientTrigger, .EnrichmentArea, .LocationSafety => true,
-                else => false,
-            },
-            .Item => blk: {
-                if (isSpawnableItemConfig(cfg, bp.EntityType)) break :blk true;
-                if (template_by_type.get(cfg.BlueprintType)) |tpl_idx| {
-                    const tpl = template_configs[tpl_idx];
-                    if (bp.EntityType == .TreasureBox or
-                        bp.EntityType == .HookTreasureBox or
-                        bp.EntityType == .VisionTreasureBox or
-                        bp.EntityType == .Destructible or
-                        bp.EntityType == .DestructibleWithHook or
-                        bp.EntityType == .DestructibleExploreInteractor)
-                    {
-                        break :blk tpl.ComponentsData.RewardComponent != null or tpl.ComponentsData.TreasureBoxComponent != null;
-                    }
-                    if (tpl.ComponentsData.RewardComponent != null and std.mem.indexOf(u8, cfg.BlueprintType, "Treasure") != null) {
-                        break :blk true;
-                    }
-                }
-                break :blk false;
-            },
-            else => false,
-        };
+        const tpl_opt: ?*const DataTables.TemplateConfig = if (template_by_type.get(cfg.BlueprintType)) |tpl_idx|
+            &template_configs[tpl_idx]
+        else
+            null;
+        return isSpawnableBlueprintAndTemplate(cfg, bp, tpl_opt);
     }
     return isSpawnableBlueprint(cfg.BlueprintType);
 }

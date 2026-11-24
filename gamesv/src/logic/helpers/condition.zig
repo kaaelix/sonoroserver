@@ -1359,23 +1359,9 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
             .string => |s| s,
             else => return false,
         } else return false;
-        const cmp = if (obj.get("Compare")) |v| switch (v) {
-            .string => |s| s,
-            else => "Eq",
-        } else "Eq";
-        const hour: i32 = if (ctx.quest_comp.info.env.time_locked)
-            ctx.quest_comp.info.env.time_lock_hour
-        else if (ctx.scene) |scene|
-            scene.instance.map_time.hour
-        else
-            ctx.quest_comp.info.env.time_lock_hour;
-        const minute: i32 = if (ctx.quest_comp.info.env.time_locked)
-            ctx.quest_comp.info.env.time_lock_minute
-        else if (ctx.scene) |scene|
-            scene.instance.map_time.minute
-        else
-            ctx.quest_comp.info.env.time_lock_minute;
-        const total_minute = hour * 60 + minute;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
+        const hm = currentMapHourMinute(ctx);
+        const total_minute = hm.hour * 60 + hm.minute;
         const is_day = total_minute >= 360 and total_minute < 1080;
         const matches = if (std.mem.eql(u8, period, "DayTime"))
             is_day
@@ -1386,7 +1372,20 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
         if (std.mem.eql(u8, cmp, "Eq")) return matches;
         if (std.mem.eql(u8, cmp, "Ne")) return !matches;
         return false;
-    } else if (std.mem.eql(u8, ct, "CheckConditionGroup")) {
+    } else if (std.mem.eql(u8, ct, "Clock")) {
+        const hm = currentMapHourMinute(ctx);
+        const start_h = jsonInt(obj.get("Start")) orelse 0;
+        const end_h = jsonInt(obj.get("End")) orelse 24;
+        const in_span = if (start_h == end_h)
+            hm.hour == start_h
+        else if (start_h < end_h)
+            hm.hour >= start_h and hm.hour < end_h
+        else
+            hm.hour >= start_h or hm.hour < end_h;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
+        const is_ne = std.mem.eql(u8, cmp, "Ne") or std.mem.eql(u8, cmp, "NotEq") or std.mem.eql(u8, cmp, "!=");
+        return if (is_ne) !in_span else in_span;
+    } else if (std.mem.eql(u8, ct, "CheckConditionGroup") or std.mem.eql(u8, ct, "CheckClientConditionGroup")) {
         if (obj.get("Condition")) |sub| return evalInlineConditionBlock(ctx, sub);
         if (jsonInt(obj.get("GroupId"))) |gid| return evalConditionGroup(ctx, gid);
         return true;
@@ -1411,7 +1410,7 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
         } else "Eq";
         const cur_st = questStateValue(ctx, qid);
         return compareInts(cur_st, want_st, cmp);
-    } else if (std.mem.eql(u8, ct, "CheckNodeStatus")) {
+    } else if (std.mem.eql(u8, ct, "CheckNodeStatus") or std.mem.eql(u8, ct, "CheckChildQuestStatus")) {
         const nid = jsonInt(obj.get("NodeId")) orelse return false;
         const want_st = jsonInt(obj.get("Status")) orelse 4;
         const qid = jsonInt(obj.get("QuestId")) orelse if (ctx.owner_quest_id > 0) ctx.owner_quest_id else ctx.quest_comp.info.tracked_quest_id;
@@ -1436,19 +1435,8 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
     } else if (std.mem.eql(u8, ct, "HourToHour")) {
         const start_obj = if (obj.get("Start")) |v| if (v == .object) v.object else null else null;
         const end_obj = if (obj.get("End")) |v| if (v == .object) v.object else null else null;
-        const cur_hour: i32 = if (ctx.quest_comp.info.env.time_locked)
-            ctx.quest_comp.info.env.time_lock_hour
-        else if (ctx.scene) |s|
-            s.instance.map_time.hour
-        else
-            ctx.quest_comp.info.env.time_lock_hour;
-        const cur_min: i32 = if (ctx.quest_comp.info.env.time_locked)
-            ctx.quest_comp.info.env.time_lock_minute
-        else if (ctx.scene) |s|
-            s.instance.map_time.minute
-        else
-            ctx.quest_comp.info.env.time_lock_minute;
-        const cur_total: i32 = cur_hour * 60 + cur_min;
+        const hm = currentMapHourMinute(ctx);
+        const cur_total: i32 = hm.hour * 60 + hm.minute;
         const s_h = if (start_obj) |so| jsonInt(so.get("Hour")) orelse 0 else 0;
         const s_m = if (start_obj) |so| jsonInt(so.get("Min")) orelse 0 else 0;
         const e_h = if (end_obj) |eo| jsonInt(eo.get("Hour")) orelse 24 else 24;
@@ -1610,9 +1598,9 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
             }
         }
         return if (is_ne) !open else open;
-    } else if (std.mem.eql(u8, ct, "CompareWeather")) {
+    } else if (std.mem.eql(u8, ct, "CompareWeather") or std.mem.eql(u8, ct, "Weather")) {
         const wid = jsonInt(obj.get("WeatherId")) orelse return false;
-        const cmp = if (obj.get("Compare")) |v| (if (v == .string) v.string else "Eq") else "Eq";
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
         return compareInts(ctx.quest_comp.info.env.weather_id, wid, cmp);
     } else if (std.mem.eql(u8, ct, "CheckLevelPlayState")) {
         const lpid = jsonInt(obj.get("LevelId")) orelse jsonInt(obj.get("LevelPlayId")) orelse return false;
@@ -1654,13 +1642,14 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
             }
         }
         return collected == want_col;
-    } else if (std.mem.eql(u8, ct, "CheckCollectedSunSpiritCount")) {
+    } else if (std.mem.eql(u8, ct, "CheckCollectedSunSpiritCount") or std.mem.eql(u8, ct, "CheckAvailableSunSpiritCount")) {
         const dungeon_id = jsonInt(obj.get("DungeonId")) orelse 0;
         const area_id = jsonInt(obj.get("AreaId")) orelse 0;
         const cmp = getParamStr(obj, "Compare") orelse "Eq";
         const req_count = jsonInt(obj.get("Count")) orelse 0;
-        const collected = countCollectedSunSpirits(ctx, dungeon_id, area_id);
-        return compareInts(collected, req_count, cmp);
+        const want_collected = std.mem.eql(u8, ct, "CheckCollectedSunSpiritCount");
+        const count = countSunSpiritsFiltered(ctx, dungeon_id, area_id, want_collected);
+        return compareInts(count, req_count, cmp);
     } else if (std.mem.eql(u8, ct, "CheckIsSupportedWalking")) {
         const want_supported = if (obj.get("IsSupported")) |v| switch (v) {
             .bool => |b| b,
@@ -2010,6 +1999,118 @@ pub fn evalSingleInlineCondition(ctx: EvalContext, c_val: std.json.Value) bool {
             if (key.len > 0) cur = @intCast(std.math.clamp(pc.info.getKeyInt(key), 0, std.math.maxInt(i32)));
         }
         return compareInts(cur, count, cmp);
+    } else if (std.mem.eql(u8, ct, "CompareLevelPlayRewardState")) {
+        const cfg_id = jsonInt(obj.get("EntityId")) orelse ctx.self_entity_config_id;
+        const want_state = jsonInt(obj.get("State")) orelse 3;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
+        var cur_state: i32 = 0;
+        if (cfg_id > 0 and ctx.quest_comp.info.hasOpenedChest(cfg_id)) {
+            cur_state = 3;
+        } else if (cfg_id > 0) {
+            if (ctx.assets) |assets| {
+                const map_id: i32 = if (ctx.scene) |sc| sc.instance_id else 8;
+                const scene_map = assets.resolveMapConfigId(map_id);
+                for (assets.indexes.levelPlayIndicesForRewardEntity(cfg_id)) |lp_idx| {
+                    const lp = assets.tables.level_play_data.items[lp_idx];
+                    const lp_map = assets.resolveMapConfigId(if (lp.Data.InstanceId != 0) lp.Data.InstanceId else lp.Data.LevelId);
+                    if (lp.Data.InstanceId != map_id and lp.Data.LevelId != map_id and lp_map != scene_map) continue;
+                    if (containsInt(ctx.quest_comp.info.completed_level_plays, lp.LevelPlayId)) {
+                        cur_state = 3;
+                    } else if (containsInt(ctx.quest_comp.info.progress.entered_level_plays, lp.LevelPlayId)) {
+                        cur_state = 2;
+                    } else {
+                        cur_state = 1;
+                    }
+                    break;
+                }
+            }
+        }
+        return compareInts(cur_state, want_state, cmp);
+    } else if (std.mem.eql(u8, ct, "TargetEntityInvisible")) {
+        const eid = jsonInt(obj.get("EntityId")) orelse return false;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
+        const invisible = isEntityTargetInvisible(ctx, eid);
+        const want_inv = if (obj.get("Invisible")) |v| (if (v == .bool) v.bool else true) else true;
+        const matches = (invisible == want_inv);
+        return if (std.mem.eql(u8, cmp, "Ne") or std.mem.eql(u8, cmp, "NotEq")) !matches else matches;
+    } else if (std.mem.eql(u8, ct, "CompareEntityGroupState")) {
+        const gc = obj.get("GroupCondition") orelse return false;
+        if (gc != .object) return false;
+        const conds = gc.object.get("Conditions") orelse return false;
+        if (conds != .array) return false;
+        var matched: i32 = 0;
+        for (conds.array.items) |entry| {
+            if (entry != .object) continue;
+            const eid = jsonInt(entry.object.get("EntityId")) orelse continue;
+            const want_state = getParamStr(entry.object, "State") orelse continue;
+            const cur = ctx.quest_comp.info.getEntityState(eid) orelse "关卡.Common.状态.常态";
+            if (std.mem.eql(u8, cur, want_state)) matched += 1;
+        }
+        const need = jsonInt(gc.object.get("Count")) orelse @as(i32, @intCast(conds.array.items.len));
+        const cmp = getParamStr(gc.object, "Compare") orelse "Ge";
+        return compareInts(matched, need, cmp);
+    } else if (std.mem.eql(u8, ct, "CheckEntityPosition")) {
+        const eid = jsonInt(obj.get("EntityId")) orelse ctx.self_entity_config_id;
+        const ent_pos = resolveEntityWorldPos(ctx, eid) orelse return false;
+        const range_val = obj.get("Range") orelse return false;
+        if (range_val != .object) return false;
+        const center = parseJsonVectorPos(range_val.object.get("Pos")) orelse return false;
+        const radius = jsonFloatVal(range_val.object.get("Radius")) orelse 0.0;
+        const dx = ent_pos[0] - center[0];
+        const dy = ent_pos[1] - center[1];
+        const dz = ent_pos[2] - center[2];
+        const in_range = (dx * dx + dy * dy + dz * dz) <= (radius * radius);
+        const want_on = if (obj.get("IsOnRange")) |v| (if (v == .bool) v.bool else true) else true;
+        return in_range == want_on;
+    } else if (std.mem.eql(u8, ct, "CheckPlayerRelativeDistance")) {
+        const eid = jsonInt(obj.get("TargetEntityId")) orelse jsonInt(obj.get("EntityId")) orelse ctx.self_entity_config_id;
+        const ent_pos = resolveEntityWorldPos(ctx, eid) orelse return false;
+        const player_pos = currentPlayerPos3D(ctx) orelse return false;
+        const dx = player_pos[0] - ent_pos[0];
+        const dy = player_pos[1] - ent_pos[1];
+        const dz = player_pos[2] - ent_pos[2];
+        const dist = @sqrt(dx * dx + dy * dy + dz * dz);
+        const ranges = obj.get("ValidDistanceRanges") orelse return false;
+        if (ranges != .array or ranges.array.items.len == 0) return false;
+        for (ranges.array.items) |r| {
+            if (r != .object) continue;
+            const min_d = jsonFloatVal(r.object.get("Min")) orelse 0.0;
+            const max_d = jsonFloatVal(r.object.get("Max")) orelse std.math.floatMax(f32);
+            if (dist >= min_d and dist <= max_d) return true;
+        }
+        return false;
+    } else if (std.mem.eql(u8, ct, "CheckHonamiStoryPlayerCorruptedLevel")) {
+        const cur: i32 = if (ctx.progress_comp) |pc| @intCast(std.math.clamp(pc.info.getKeyInt("honami:corrupted_lv"), 0, std.math.maxInt(i32))) else 0;
+        const target = jsonInt(obj.get("Level")) orelse 0;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
+        return compareInts(cur, target, cmp);
+    } else if (std.mem.eql(u8, ct, "CheckHonamiStorySuccessfulEvacuation")) {
+        const want = if (obj.get("IsSuccessful")) |v| (if (v == .bool) v.bool else true) else true;
+        const cur = if (ctx.progress_comp) |pc| pc.info.getKeyInt("honami:safe_leave") > 0 else false;
+        return cur == want;
+    } else if (std.mem.eql(u8, ct, "CheckHonamiStoryGetItem") or std.mem.eql(u8, ct, "CheckHonamiStoryEquipItem")) {
+        const iid = jsonInt(obj.get("ItemId")) orelse return false;
+        const need = jsonInt(obj.get("Count")) orelse 1;
+        const pc = ctx.progress_comp orelse return false;
+        var kbuf: [48]u8 = undefined;
+        const k = std.fmt.bufPrint(&kbuf, "honami:item:{d}", .{iid}) catch return false;
+        return pc.info.getKeyInt(k) >= need;
+    } else if (std.mem.eql(u8, ct, "CheckHonamiStoryChestOpenTime")) {
+        const cur: i32 = if (ctx.progress_comp) |pc| @intCast(std.math.clamp(pc.info.getKeyInt("honami:corrupted_chest_cnt"), 0, std.math.maxInt(i32))) else 0;
+        const target = jsonInt(obj.get("Time")) orelse 1;
+        const cmp = getParamStr(obj, "Compare") orelse "Ge";
+        return compareInts(cur, target, cmp);
+    } else if (std.mem.eql(u8, ct, "CheckBvbActivityRank")) {
+        const cur: i32 = if (ctx.progress_comp) |pc| @intCast(@max(1, pc.info.getKeyInt("bvb:rank"))) else 1;
+        const target = jsonInt(obj.get("Rank")) orelse 1;
+        const cmp = getParamStr(obj, "Compare") orelse "Ge";
+        return compareInts(cur, target, cmp);
+    } else if (std.mem.eql(u8, ct, "CheckLevelPlayChildQuestFinished")) {
+        const nid = jsonInt(obj.get("ChildQuestId")) orelse return false;
+        const cmp = getParamStr(obj, "Compare") orelse "Eq";
+        const done = isLevelPlayNodeMarkedFinished(ctx, nid);
+        const cur: i32 = @intFromBool(done);
+        return compareInts(cur, 1, cmp);
     }
     return false;
 }
@@ -2886,7 +2987,45 @@ fn isSunSpiritCollected(ctx: EvalContext, eid: i64) bool {
 }
 
 fn countCollectedSunSpirits(ctx: EvalContext, dungeon_id: i32, area_id: i32) i32 {
+    return countSunSpiritsFiltered(ctx, dungeon_id, area_id, true);
+}
+
+fn sunSpiritRowMatchesArea(assets: *const Assets, map_id: i32, entity_id: i64, row_area_id: i32, req_area_id: i32, collect_only: bool) bool {
+    const lcfg = assets.findLevelEntity(map_id, entity_id) orelse {
+        return !collect_only and (req_area_id <= 0 or row_area_id == req_area_id);
+    };
+    if (std.mem.indexOf(u8, lcfg.BlueprintType, "PPV") != null) return false;
+    var comps = lcfg.ComponentsData;
+    if (assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+        tpl.ComponentsData.mergeInto(&comps);
+    }
+    var has_collect = false;
+    var comp_area: ?i64 = null;
+    for ([2][]const @import("../../data/tables/entity_components/Extra.zig").Entry{
+        comps.extra,
+        comps.template_extra,
+    }) |extra_slice| {
+        for (extra_slice) |entry| {
+            switch (entry) {
+                .SunSpiritCollectComponent => |sc| {
+                    has_collect = true;
+                    if (sc.AreaId) |aid| comp_area = aid;
+                },
+                .SunSpiritLauncherComponent => |sl| {
+                    if (!collect_only and comp_area == null) comp_area = sl.AreaId;
+                },
+                else => {},
+            }
+        }
+    }
+    if (collect_only and !has_collect) return false;
+    if (req_area_id <= 0) return true;
+    return row_area_id == req_area_id or (comp_area != null and comp_area.? == req_area_id);
+}
+
+fn countSunSpiritsFiltered(ctx: EvalContext, dungeon_id: i32, area_id: i32, want_collected: bool) i32 {
     const assets = ctx.assets orelse return 0;
+    const collect_only = !want_collected;
     var count: i32 = 0;
     if (assets.getDb()) |db| {
         var scratch = std.heap.ArenaAllocator.init(assets.tables.arena.child_allocator);
@@ -2894,19 +3033,97 @@ fn countCollectedSunSpirits(ctx: EvalContext, dungeon_id: i32, area_id: i32) i32
         const rows = db.querySunSpiritEntities(scratch.allocator()) catch return 0;
         for (rows) |row| {
             if (dungeon_id > 0 and row.map_id != dungeon_id) continue;
-            if (area_id > 0 and row.area_id != area_id) continue;
-            if (isSunSpiritCollected(ctx, row.entity_id)) count += 1;
+            if (!sunSpiritRowMatchesArea(assets, row.map_id, row.entity_id, row.area_id, area_id, collect_only)) continue;
+            if (isSunSpiritCollected(ctx, row.entity_id) == want_collected) count += 1;
         }
         return count;
     }
     for (assets.tables.level_entity_config.items) |cfg| {
         if (dungeon_id > 0 and cfg.MapId != dungeon_id) continue;
-        if (area_id > 0 and cfg.AreaId != area_id) continue;
         if (std.mem.indexOf(u8, cfg.BlueprintType, "RiLing") == null and
             std.mem.indexOf(u8, cfg.BlueprintType, "SunSpirit") == null) continue;
-        if (isSunSpiritCollected(ctx, cfg.EntityId)) count += 1;
+        if (!sunSpiritRowMatchesArea(assets, cfg.MapId, cfg.EntityId, cfg.AreaId, area_id, collect_only)) continue;
+        if (isSunSpiritCollected(ctx, cfg.EntityId) == want_collected) count += 1;
     }
     return count;
+}
+
+fn currentMapHourMinute(ctx: EvalContext) struct { hour: i32, minute: i32 } {
+    if (ctx.quest_comp.info.env.time_locked) {
+        return .{ .hour = ctx.quest_comp.info.env.time_lock_hour, .minute = ctx.quest_comp.info.env.time_lock_minute };
+    }
+    if (ctx.scene) |scene| {
+        return .{ .hour = scene.instance.map_time.hour, .minute = scene.instance.map_time.minute };
+    }
+    return .{ .hour = ctx.quest_comp.info.env.time_lock_hour, .minute = ctx.quest_comp.info.env.time_lock_minute };
+}
+
+fn parseJsonVectorPos(val_opt: ?std.json.Value) ?[3]f32 {
+    const v = val_opt orelse return null;
+    if (v != .object) return null;
+    const x = jsonFloatVal(v.object.get("X")) orelse return null;
+    const y = jsonFloatVal(v.object.get("Y")) orelse return null;
+    const z = jsonFloatVal(v.object.get("Z")) orelse 0.0;
+    return .{ x, y, z };
+}
+
+fn resolveEntityWorldPos(ctx: EvalContext, cfg_id_raw: i64) ?[3]f32 {
+    if (cfg_id_raw <= 0) return null;
+    if (ctx.scene) |scene| {
+        const slice = scene.entities.slice();
+        for (slice.items(.config), slice.items(.position)) |cfg, pos_opt| {
+            if (cfg.config_id == cfg_id_raw) {
+                if (pos_opt) |p| return p.location;
+            }
+        }
+    }
+    if (ctx.assets) |assets| {
+        const map_id: i32 = if (ctx.scene) |sc| sc.instance_id else 8;
+        if (assets.findLevelEntity(map_id, cfg_id_raw)) |lcfg| {
+            return Assets.AssetIndexes.entityWorldPos(lcfg);
+        }
+    }
+    return null;
+}
+
+fn isEntityTargetInvisible(ctx: EvalContext, eid: i32) bool {
+    if (eid <= 0) return false;
+    if (ctx.scene) |scene| {
+        if (scene.findEntityNetIdByConfigId(eid)) |nid| {
+            if (scene.net_id_map.get(nid)) |idx| {
+                return scene.entities.items(.visible)[idx] == null;
+            }
+        }
+    }
+    if (containsInt(ctx.quest_comp.info.world.hidden_entities, eid)) return true;
+    if (containsInt(ctx.quest_comp.info.world.shown_entities, eid)) return false;
+    if (ctx.assets) |assets| {
+        const map_id: i32 = if (ctx.scene) |sc| sc.instance_id else 8;
+        if (assets.findLevelEntity(map_id, eid)) |lcfg| {
+            return lcfg.IsHidden or lcfg.InSleep;
+        }
+    }
+    return true;
+}
+
+fn isLevelPlayNodeMarkedFinished(ctx: EvalContext, nid: i32) bool {
+    if (nid <= 0) return false;
+    const pc = ctx.progress_comp orelse return false;
+    var suf_buf: [32]u8 = undefined;
+    const suffix = std.fmt.bufPrint(&suf_buf, ":{d}", .{nid}) catch return false;
+    for (pc.info.dynamic.claims) |c| {
+        if ((std.mem.startsWith(u8, c, "lp_done:") or std.mem.startsWith(u8, c, "lp_fin:")) and
+            std.mem.endsWith(u8, c, suffix))
+        {
+            return true;
+        }
+    }
+    for (pc.info.dynamic.ints) |entry| {
+        if (std.mem.startsWith(u8, entry.key, "lp_node_fin:") and std.mem.endsWith(u8, entry.key, suffix) and entry.val != 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn evalPlayerSkillReady(ctx: EvalContext, obj: std.json.ObjectMap) bool {

@@ -107,7 +107,7 @@ pub fn executeAction(
         try applyRemoveTrialCharacter(ctx, params);
     } else if (std.mem.eql(u8, name, "AddBuffToPlayer") or std.mem.eql(u8, name, "AddBuffToTriggeredEntity")) {
         try applyQuestBuffAction(ctx, params, true, false);
-    } else if (std.mem.eql(u8, name, "RemoveBuffFromPlayer") or std.mem.eql(u8, name, "RemoveBuffFromTriggeredEntity")) {
+    } else if (std.mem.eql(u8, name, "RemoveBuffFromPlayer") or std.mem.eql(u8, name, "RemoveBuffFromTriggeredEntity") or std.mem.eql(u8, name, "RemoveBuffToTriggeredEntity")) {
         try applyQuestBuffAction(ctx, params, true, true);
     } else if (std.mem.eql(u8, name, "AddBuffToEntity")) {
         try applyQuestBuffAction(ctx, params, false, false);
@@ -494,6 +494,52 @@ pub fn executeAction(
         try applyElementalBoxAction(ctx, name, params);
     } else if (std.mem.eql(u8, name, "ToggleEntityElementalAbility")) {
         try applyToggleElementalAbility(ctx, params);
+    } else if (std.mem.eql(u8, name, "Collect") or std.mem.eql(u8, name, "CollectSunSpirit") or std.mem.eql(u8, name, "GetRewardByInteract") or std.mem.eql(u8, name, "ClaimLevelPlayReward") or std.mem.eql(u8, name, "ClaimDynamicEntityReward")) {
+        try applyInteractCollectOrReward(ctx, callbacks, name, params);
+    } else if (std.mem.eql(u8, name, "SetInteractionLockState")) {
+        const locked = quest_types.jsonBool(params.get("IsLock")) orelse quest_types.jsonBool(params.get("IsLocked")) orelse true;
+        if (resolveActionEntityCfgId(ctx.scene, params)) |eid| {
+            try setEntityLocked(ctx, eid, locked);
+            const k = try std.fmt.allocPrint(ctx.alloc.arena, "interact_lock:{d}", .{eid});
+            try recordProgressInt(ctx, k, @intFromBool(locked), false);
+        }
+    } else if (std.mem.eql(u8, name, "ActivateResetPoint") or std.mem.eql(u8, name, "TeleportToLatestResetPoint")) {
+        try applyResetPointAction(ctx, std.mem.eql(u8, name, "ActivateResetPoint"));
+    } else if (std.mem.eql(u8, name, "ResetLevelPlay")) {
+        try applyResetLevelPlayAction(ctx, params);
+    } else if (std.mem.eql(u8, name, "MowingTowerGotoNextFloor")) {
+        _ = try recordProgressAdd(ctx, "mow:floor", 1);
+    } else if (std.mem.eql(u8, name, "SlashAndTowerGotoNextFloor")) {
+        _ = try recordProgressAdd(ctx, "slash:floor", 1);
+    } else if (std.mem.eql(u8, name, "BossPilingEnterNextInst")) {
+        _ = try recordProgressAdd(ctx, "bp:inst_step", 1);
+    } else if (std.mem.eql(u8, name, "DangoAbyssReceiveReward")) {
+        _ = try recordProgressAdd(ctx, "abyss:reward_cnt", 1);
+    } else if (std.mem.eql(u8, name, "RogueSelectRoom")) {
+        _ = try recordProgressAdd(ctx, "rogue:room_sel", 1);
+    } else if (std.mem.eql(u8, name, "RogueReceiveReward")) {
+        _ = try recordProgressAdd(ctx, "rogue:reward_cnt", 1);
+    } else if (std.mem.eql(u8, name, "RollBlockGetReward")) {
+        _ = try recordProgressAdd(ctx, "rb_blk:rw", 1);
+    } else if (std.mem.eql(u8, name, "HonamiStoryActivateSafeEvacuation")) {
+        try recordProgressInt(ctx, "honami:safe_leave", 1, false);
+    } else if (std.mem.eql(u8, name, "RoverRogueActivate")) {
+        _ = try recordProgressAdd(ctx, "rover_rogue:activate", 1);
+    } else if (std.mem.eql(u8, name, "RecoverDurability")) {
+        if (resolveActionEntityCfgId(ctx.scene, params)) |eid| {
+            const k = try std.fmt.allocPrint(ctx.alloc.arena, "durability:{d}", .{eid});
+            try recordProgressInt(ctx, k, 100, false);
+        }
+    } else if (std.mem.eql(u8, name, "ScanEnrichmentArea")) {
+        const eid = quest_types.jsonInt(params.get("EnrichmentAreaEntityId")) orelse resolveActionEntityCfgId(ctx.scene, params) orelse 0;
+        if (eid > 0) {
+            const k = try std.fmt.allocPrint(ctx.alloc.arena, "enrichment:scan:{d}", .{eid});
+            try recordProgressInt(ctx, k, 1, true);
+        }
+    } else if (std.mem.eql(u8, name, "SummonEntity")) {
+        try applySummonEntityAction(ctx, params);
+    } else if (std.mem.eql(u8, name, "DestroySummonedEntities") or std.mem.eql(u8, name, "DestroyDynamicEntities")) {
+        try applyDestroySummonedAction(ctx, name, params);
     } else if (std.mem.eql(u8, name, "SetEntityClientVisibleSave") or std.mem.eql(u8, name, "SetEntityClientVisible")) {
         const vis = quest_types.jsonBool(params.get("Visible")) orelse true;
         try applyEntityVisibilityList(ctx, params.get("EntityIds"), vis);
@@ -1810,33 +1856,71 @@ fn applyResetPlayerPosPresentation(ctx: QuestContext, params: std.json.ObjectMap
 
 fn isTrackedOrClientAction(name: []const u8) bool {
     const names = [_][]const u8{
+        "ActiveAntiGravitySafePoint",
+        "AdjustPlayerCameraGravity",
         "BvbPlayDialog",
         "BvbPlayerOperationConstraint",
+        "BvbSendAiEvent",
         "BvbSendSystemEvent",
+        "ChangeNpcAbpState",
+        "ClearFishingCabinInSaleItems",
         "ClientPreEnableSubLevels",
+        "ClientSetPlayerOperationRestriction",
         "ClientSetSeasonState",
+        "ClientVehicleTeleport",
+        "CloseWalkingOverlayMontage",
         "DisableEntityLookAt",
         "EnableAoiNotify",
         "EnableKey4Func",
+        "EnableTakePhotoClip",
         "EndCommonTip",
         "EnterOrbitalCamera",
+        "ExecBpActorFunc",
         "ExitOrbitalCamera",
+        "FireBullet",
         "FireBulletEffect",
+        "ModifyActorMaterial",
+        "ModifyActorMedia",
+        "MotorSoarInWindField",
         "OpenQte",
         "OpenQuickHackSystem",
         "PlayLevelSequence",
+        "PlayWalkingOverlayMontage",
         "PlayerInput",
+        "PlayerLookTowards",
         "RemovePreloadResource",
         "ReportTrackingEvent",
+        "RequestSystemFunction",
         "ResumeSystemRewardPopup",
         "RunActorCustomEvent",
+        "SendAiEvent",
+        "SendClientEvent",
+        "SendSceneActorsEvent",
+        "SeqEventAddTagToSelf",
         "SeqEventFireBullet",
         "SetActorVar",
+        "SetAudioEnable",
+        "SetJigsawFoundation",
+        "SetJigsawItem",
+        "SetSkillButtonEffect",
         "SetSportsState",
+        "SetTargetElementalAbility",
+        "SlidePerformStart",
+        "SlideRailStart",
+        "SpecialOpModifyActorMaterialParamBySplineProgress",
+        "StartMotorCruise",
+        "TetrisThrowBlock",
+        "TetrisTriggerDelayFall",
         "TrapDefenseChangeMiniMap",
         "TrapDefensePlayerOperationConstraint",
+        "TriggerDeadeyeMode",
         "TriggerSpecificScanEffect",
         "UsePhantomSkill",
+        "VehicleEnterNpc",
+        "VehiclePlayPassengerVoice",
+        "VehicleSetSpeedImmediately",
+        "VehicleSprint",
+        "VehicleWaterfallClimbing",
         "VisionDisplayTarget",
     };
     for (names) |candidate| {
@@ -2547,16 +2631,26 @@ fn applyDestroySelf(ctx: QuestContext) !void {
     }) catch {};
 }
 
+fn resolveActionEntityCfgId(scene_opt: ?*Scene, params: std.json.ObjectMap) ?i32 {
+    const is_self = quest_types.jsonBool(params.get("IsSelf")) orelse false;
+    const param_eid = quest_types.jsonInt(params.get("EntityId")) orelse 0;
+    if (!is_self and param_eid > 0) return param_eid;
+    if (scene_opt) |scene| {
+        if (scene.active_flow_owner_entity_id != 0) {
+            if (scene.findConfigIdByNetId(scene.active_flow_owner_entity_id)) |oc| {
+                if (std.math.cast(i32, oc)) |c32| {
+                    if (c32 > 0) return c32;
+                }
+            }
+        }
+    }
+    return if (param_eid > 0) param_eid else null;
+}
+
 fn applyToggleElementalAbility(ctx: QuestContext, params: std.json.ObjectMap) !void {
     const scene = ctx.scene orelse return;
     const enable = quest_types.jsonBool(params.get("Enable")) orelse true;
-    const param_eid = quest_types.jsonInt(params.get("EntityId")) orelse 0;
-    const cfg_id: i32 = if (param_eid > 0)
-        std.math.cast(i32, param_eid) orelse 0
-    else if (scene.active_flow_owner_entity_id != 0)
-        if (scene.findConfigIdByNetId(scene.active_flow_owner_entity_id)) |c| std.math.cast(i32, c) orelse 0 else 0
-    else
-        0;
+    const cfg_id = resolveActionEntityCfgId(ctx.scene, params) orelse 0;
     const net_id: ?i64 = if (cfg_id > 0)
         scene.findEntityNetIdByConfigId(cfg_id)
     else if (scene.active_flow_owner_entity_id != 0)
@@ -2571,6 +2665,181 @@ fn applyToggleElementalAbility(ctx: QuestContext, params: std.json.ObjectMap) !v
     if (cfg_id > 0) {
         const k = try std.fmt.allocPrint(ctx.alloc.arena, "elem_ability:{d}", .{cfg_id});
         try recordProgressInt(ctx, k, if (enable) 1 else 0, false);
+    }
+}
+
+fn applyInteractCollectOrReward(ctx: QuestContext, callbacks: ActionCallbacks, name: []const u8, params: std.json.ObjectMap) !void {
+    const scene = ctx.scene orelse return;
+    const cfg_id = resolveActionEntityCfgId(ctx.scene, params) orelse 0;
+    const is_collect = std.mem.eql(u8, name, "Collect");
+    const is_sun_spirit = std.mem.eql(u8, name, "CollectSunSpirit");
+    const is_lp_reward = std.mem.eql(u8, name, "ClaimLevelPlayReward");
+    const is_dyn_reward = std.mem.eql(u8, name, "ClaimDynamicEntityReward");
+
+    var reward_id: i32 = 0;
+    var tb_type: i32 = 0;
+    var has_refresh = false;
+    var completed_lp_id: ?i32 = null;
+
+    if (cfg_id > 0) {
+        if (ctx.assets.findLevelEntity(scene.instance_id, cfg_id)) |lcfg| {
+            var comps = lcfg.ComponentsData;
+            if (ctx.assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+                tpl.ComponentsData.mergeInto(&comps);
+            }
+            if (comps.RewardComponent) |rc| reward_id = rc.RewardId orelse 0;
+            has_refresh = comps.RefreshComponent != null;
+            if (comps.TreasureBoxComponent) |tb| tb_type = tb.TypeId orelse 0;
+        }
+        if (is_lp_reward) {
+            const scene_map = ctx.assets.resolveMapConfigId(scene.instance_id);
+            for (ctx.assets.indexes.levelPlayIndicesForRewardEntity(cfg_id)) |lp_idx| {
+                const lp = ctx.assets.tables.level_play_data.items[lp_idx];
+                const lp_map = ctx.assets.resolveMapConfigId(if (lp.Data.InstanceId != 0) lp.Data.InstanceId else lp.Data.LevelId);
+                if (lp.Data.InstanceId != scene.instance_id and lp.Data.LevelId != scene.instance_id and lp_map != scene_map) continue;
+                if (lp.Data.LevelPlayRewardConfig) |rc| {
+                    if (reward_id == 0 and rc.RewardId > 0) reward_id = rc.RewardId;
+                }
+                completed_lp_id = lp.LevelPlayId;
+                break;
+            }
+        }
+    }
+
+    const now_ms = (std.Io.Clock.awake).now(ctx.io).toMilliseconds();
+    const already_taken = cfg_id > 0 and (ctx.quest_comp.info.hasOpenedChest(cfg_id) or scene.instance.isOnRespawnCooldown(cfg_id, now_ms));
+
+    if (!already_taken) {
+        if (is_lp_reward or tb_type > 0) {
+            _ = try RewardService.grantTreasureBoxReward(quest_types.makeRewardContext(ctx), tb_type, reward_id, 7000);
+        } else if (reward_id > 0) {
+            const res = try RewardService.grantDropPackage(quest_types.makeRewardContext(ctx), reward_id, 1);
+            if (res.granted_count == 0 and is_collect) {
+                const fallback = [_]RewardService.RewardItem{.{ .item_id = 2, .count = 150 }};
+                _ = try RewardService.grantItems(quest_types.makeRewardContext(ctx), 0, false, &fallback, 1);
+            }
+        } else if (is_collect or is_sun_spirit) {
+            const fallback = [_]RewardService.RewardItem{.{ .item_id = 2, .count = 150 }};
+            _ = try RewardService.grantItems(quest_types.makeRewardContext(ctx), 0, false, &fallback, 1);
+        }
+
+        if (cfg_id > 0) {
+            if (is_sun_spirit) {
+                const k = try std.fmt.allocPrint(ctx.alloc.arena, "sun_spirit:{d}", .{cfg_id});
+                try recordProgressClaim(ctx, k);
+                _ = try ctx.quest_comp.info.markChestOpened(ctx.alloc.gpa, cfg_id);
+            } else if (is_lp_reward or tb_type > 0 or !has_refresh) {
+                _ = try ctx.quest_comp.info.markChestOpened(ctx.alloc.gpa, cfg_id);
+            } else {
+                try scene.instance.setRespawnCooldown(ctx.alloc.gpa, cfg_id, now_ms, now_ms + 300_000);
+                try scene.savePersistent(ctx.fs, ctx.alloc.gpa);
+            }
+            if (is_dyn_reward) {
+                const dk = try std.fmt.allocPrint(ctx.alloc.arena, "dyn_rw:{d}", .{cfg_id});
+                try recordProgressClaim(ctx, dk);
+            }
+        }
+    }
+
+    if (completed_lp_id) |lp_id| {
+        _ = try QuestInfo.removeIntValue(&ctx.quest_comp.info.progress.entered_level_plays, ctx.alloc.gpa, lp_id);
+        try ctx.quest_comp.info.markLevelPlayCompleted(ctx.alloc.gpa, lp_id);
+        const lpk = try std.fmt.allocPrint(ctx.alloc.arena, "lp_state:{d}", .{lp_id});
+        try recordProgressInt(ctx, lpk, 3, false);
+    }
+
+    if (is_lp_reward and cfg_id > 0) {
+        try applyEntityStateChange(ctx, callbacks, cfg_id, "关卡.Common.状态.激活");
+    }
+    if (is_collect or is_sun_spirit) {
+        try applyDestroySelf(ctx);
+    }
+}
+
+fn applyResetPointAction(ctx: QuestContext, is_activate: bool) !void {
+    const scene = ctx.scene orelse return;
+    if (is_activate) {
+        const cfg_id = resolveActionEntityCfgId(ctx.scene, .empty) orelse 0;
+        var pos_opt: ?[3]f32 = null;
+        if (cfg_id > 0) {
+            if (ctx.assets.findLevelEntity(scene.instance_id, cfg_id)) |lcfg| {
+                pos_opt = Assets.AssetIndexes.entityWorldPos(lcfg);
+            }
+        }
+        if (pos_opt == null and scene.instance.players.len > 0) {
+            pos_opt = scene.instance.players[0].location;
+        }
+        try recordProgressInt(ctx, "reset_point:cfg", cfg_id, false);
+        if (pos_opt) |pos| {
+            try recordProgressInt(ctx, "reset_point:x", @as(i64, @as(i32, @bitCast(pos[0]))), false);
+            try recordProgressInt(ctx, "reset_point:y", @as(i64, @as(i32, @bitCast(pos[1]))), false);
+            try recordProgressInt(ctx, "reset_point:z", @as(i64, @as(i32, @bitCast(pos[2]))), false);
+        }
+        return;
+    }
+
+    var target_pos: ?[3]f32 = null;
+    if (ctx.progress_comp) |pc| {
+        const cfg_id = std.math.cast(i32, pc.info.getKeyInt("reset_point:cfg")) orelse 0;
+        const xb = pc.info.getKeyInt("reset_point:x");
+        const yb = pc.info.getKeyInt("reset_point:y");
+        const zb = pc.info.getKeyInt("reset_point:z");
+        if (xb != 0 or yb != 0 or zb != 0) {
+            target_pos = .{
+                @bitCast(@as(u32, @truncate(@as(u64, @bitCast(xb))))),
+                @bitCast(@as(u32, @truncate(@as(u64, @bitCast(yb))))),
+                @bitCast(@as(u32, @truncate(@as(u64, @bitCast(zb))))),
+            };
+        } else if (cfg_id > 0) {
+            if (ctx.assets.findLevelEntity(scene.instance_id, cfg_id)) |lcfg| {
+                target_pos = Assets.AssetIndexes.entityWorldPos(lcfg);
+            }
+        }
+    }
+    if (target_pos) |pos| {
+        try updatePlayerSceneState(ctx, pos, null);
+        ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.TeleportNotify{
+            .MapId = scene.instance_id,
+            .Pos = .{ .X = pos[0], .Y = pos[1], .Z = pos[2] },
+            .Reason = .Action,
+        }) catch {};
+    }
+}
+
+fn applyResetLevelPlayAction(ctx: QuestContext, params: std.json.ObjectMap) !void {
+    const ids = try quest_types.parseIntList(ctx.alloc.arena, params.get("ResetLevelPlayList"));
+    var dirty_q = false;
+    for (ids) |lpid| {
+        if (lpid <= 0) continue;
+        if (try QuestInfo.removeIntValue(&ctx.quest_comp.info.completed_level_plays, ctx.alloc.gpa, lpid)) dirty_q = true;
+        if (try QuestInfo.removeIntValue(&ctx.quest_comp.info.progress.entered_level_plays, ctx.alloc.gpa, lpid)) dirty_q = true;
+        const lpk = try std.fmt.allocPrint(ctx.alloc.arena, "lp_state:{d}", .{lpid});
+        try recordProgressInt(ctx, lpk, 0, false);
+    }
+    if (dirty_q) try ctx.quest_comp.save(ctx.fs, ctx.alloc.arena);
+}
+
+fn applySummonEntityAction(ctx: QuestContext, params: std.json.ObjectMap) !void {
+    const cfg_val = params.get("SummonEntityConfig") orelse return;
+    if (cfg_val != .object) return;
+    const tpl_id = quest_types.jsonStr(cfg_val.object.get("TemplateId")) orelse return;
+    const pos_eid = quest_types.jsonInt(cfg_val.object.get("PositionEntityId")) orelse 0;
+    const k = try std.fmt.allocPrint(ctx.alloc.arena, "summon:{s}", .{tpl_id});
+    try recordProgressInt(ctx, k, if (pos_eid > 0) pos_eid else 1, true);
+}
+
+fn applyDestroySummonedAction(ctx: QuestContext, name: []const u8, params: std.json.ObjectMap) !void {
+    const cfg_val = params.get("DestroyEntitiesConfig") orelse return;
+    if (cfg_val != .object) return;
+    if (quest_types.jsonStr(cfg_val.object.get("TemplateId"))) |tpl_id| {
+        const k = try std.fmt.allocPrint(ctx.alloc.arena, "summon:{s}", .{tpl_id});
+        try recordProgressInt(ctx, k, 0, false);
+        return;
+    }
+    if (std.mem.eql(u8, name, "DestroyDynamicEntities")) {
+        const dtype = quest_types.jsonStr(cfg_val.object.get("Type")) orelse "dynamic";
+        const k = try std.fmt.allocPrint(ctx.alloc.arena, "dyn_ent:{s}", .{dtype});
+        try recordProgressInt(ctx, k, 0, false);
     }
 }
 
@@ -3540,17 +3809,7 @@ fn applyServerMoveAction(ctx: QuestContext, name: []const u8, params: std.json.O
             }) catch {};
         }
     } else if (std.mem.eql(u8, name, "ChangeLiftTarget")) {
-        const is_self = quest_types.jsonBool(params.get("IsSelf")) orelse false;
-        const param_eid = quest_types.jsonInt(params.get("EntityId")) orelse 0;
-        const resolved_cfg: ?i32 = if (!is_self and param_eid > 0)
-            std.math.cast(i32, param_eid)
-        else if (scene.active_flow_owner_entity_id != 0)
-            if (scene.findConfigIdByNetId(scene.active_flow_owner_entity_id)) |oc| std.math.cast(i32, oc) else null
-        else if (param_eid > 0)
-            std.math.cast(i32, param_eid)
-        else
-            null;
-        if (resolved_cfg) |cfg_id| {
+        if (resolveActionEntityCfgId(scene, params)) |cfg_id| {
             const loc = quest_types.jsonInt(params.get("Location")) orelse 0;
             const k = try std.fmt.allocPrint(ctx.alloc.arena, "lift_target:{d}", .{cfg_id});
             try recordProgressInt(ctx, k, loc, false);
