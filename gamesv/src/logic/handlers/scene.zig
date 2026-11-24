@@ -1521,7 +1521,18 @@ pub fn isBlockedWorldEntityConfig(
     const bp_opt = assets.indexes.findBlueprintConfig(&assets.tables, lcfg.BlueprintType);
     if (bp_opt) |bp| {
         switch (bp.EntityType) {
-            .DynamicSpawnMonster, .DynamicSpawnMonsterPoint, .GroupAi, .LevelPlay, .LevelPlay2, .LevelPlayReward => return true,
+            .DynamicSpawnMonster,
+            .DynamicSpawnMonsterPoint,
+            .FlowerPollutionManager,
+            .GroupAi,
+            .LevelPlay,
+            .LevelPlay2,
+            .LevelPlayReward,
+            .PathDrivenActorSpawner,
+            .SpawnMonster,
+            .SpawnPasserbyNpc,
+            .TemplateEntitySpawner,
+            => return true,
             .TriggerConditionListener, .HitConditionListener, .InteractiveConditionListener, .TargetGearWithConditionListener => {
                 const cl_disabled = if (lcfg.ComponentsData.ConditionListenerComponent) |cl|
                     cl.Disabled

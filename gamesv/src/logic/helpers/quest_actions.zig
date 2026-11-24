@@ -60,6 +60,8 @@ pub fn executeAction(
         try applyAwakeEntity(ctx, params);
     } else if (std.mem.eql(u8, name, "DestroyEntity")) {
         try applyDestroyEntity(ctx, params);
+    } else if (std.mem.eql(u8, name, "DestroySelf")) {
+        try applyDestroySelf(ctx);
     } else if (std.mem.eql(u8, name, "ChangeEntityState")) {
         try applyChangeEntityState(ctx, callbacks, params);
     } else if (std.mem.eql(u8, name, "ChangeSelfEntityState")) {
@@ -375,8 +377,12 @@ pub fn executeAction(
         try applySettlementDungeon(ctx);
     } else if (std.mem.eql(u8, name, "RogueActivatePortal")) {
         try recordProgressInt(ctx, "rogue:portal_active", 1, false);
+    } else if (std.mem.eql(u8, name, "RogueGotoNextFloor")) {
+        _ = try recordProgressAdd(ctx, "rogue:floor", 1);
     } else if (std.mem.eql(u8, name, "DangoAbyssActivatePortal")) {
         try recordProgressInt(ctx, "abyss:portal_active", 1, false);
+    } else if (std.mem.eql(u8, name, "DangoAbyssGotoNextFloor")) {
+        _ = try recordProgressAdd(ctx, "abyss:floor", 1);
     } else if (std.mem.eql(u8, name, "DangoAbyssCreateRewardTreasureBox")) {
         _ = try recordProgressAdd(ctx, "abyss:reward_box", 1);
     } else if (std.mem.eql(u8, name, "ChangeTimer") or std.mem.eql(u8, name, "ToggleTimerPauseState")) {
@@ -440,6 +446,18 @@ pub fn executeAction(
             const k = try std.fmt.allocPrint(ctx.alloc.arena, "honami:item:{d}", .{iid});
             _ = try recordProgressAdd(ctx, k, 1);
         }
+    } else if (std.mem.eql(u8, name, "HonamiStoryInteractPickUp")) {
+        _ = try recordProgressAdd(ctx, "honami:pickup", 1);
+        try applyDestroySelf(ctx);
+    } else if (std.mem.eql(u8, name, "HonamiStoryReceiveCorruptedChestReward")) {
+        _ = try recordProgressAdd(ctx, "honami:corrupted_chest_cnt", 1);
+        if (ctx.scene) |sc| {
+            if (sc.active_flow_owner_entity_id != 0) {
+                if (sc.findConfigIdByNetId(sc.active_flow_owner_entity_id)) |cid| {
+                    if (cid > 0) _ = try ctx.quest_comp.info.markChestOpened(ctx.alloc.gpa, cid);
+                }
+            }
+        }
     } else if (std.mem.eql(u8, name, "DrinksRollRoleRequirement")) {
         const rid = quest_types.jsonInt(params.get("RoleId")) orelse 0;
         const req_id = quest_types.jsonInt(params.get("RequirementId")) orelse 1;
@@ -474,6 +492,8 @@ pub fn executeAction(
         try applyModifySceneTagAction(ctx, params);
     } else if (std.mem.eql(u8, name, "SetElementalBoxToTarget") or std.mem.eql(u8, name, "ChangeElementalBoxState")) {
         try applyElementalBoxAction(ctx, name, params);
+    } else if (std.mem.eql(u8, name, "ToggleEntityElementalAbility")) {
+        try applyToggleElementalAbility(ctx, params);
     } else if (std.mem.eql(u8, name, "SetEntityClientVisibleSave") or std.mem.eql(u8, name, "SetEntityClientVisible")) {
         const vis = quest_types.jsonBool(params.get("Visible")) orelse true;
         try applyEntityVisibilityList(ctx, params.get("EntityIds"), vis);
@@ -1801,19 +1821,23 @@ fn isTrackedOrClientAction(name: []const u8) bool {
         "EndCommonTip",
         "EnterOrbitalCamera",
         "ExitOrbitalCamera",
+        "FireBulletEffect",
         "OpenQte",
         "OpenQuickHackSystem",
+        "PlayLevelSequence",
         "PlayerInput",
         "RemovePreloadResource",
         "ReportTrackingEvent",
         "ResumeSystemRewardPopup",
         "RunActorCustomEvent",
+        "SeqEventFireBullet",
         "SetActorVar",
         "SetSportsState",
         "TrapDefenseChangeMiniMap",
         "TrapDefensePlayerOperationConstraint",
         "TriggerSpecificScanEffect",
         "UsePhantomSkill",
+        "VisionDisplayTarget",
     };
     for (names) |candidate| {
         if (std.mem.eql(u8, name, candidate)) return true;
@@ -2497,9 +2521,63 @@ fn applyDestroyEntity(ctx: QuestContext, params: std.json.ObjectMap) !void {
             try ids.append(ctx.alloc.arena, eid);
         }
     }
-    if (ids.items.len == 0) return;
+    try destroyConfigIds(ctx, ids.items);
+}
 
-    for (ids.items) |target_cfg| {
+fn applyDestroySelf(ctx: QuestContext) !void {
+    const scene = ctx.scene orelse return;
+    if (scene.active_flow_owner_entity_id == 0) return;
+    if (scene.findConfigIdByNetId(scene.active_flow_owner_entity_id)) |cfg_raw| {
+        if (std.math.cast(i32, cfg_raw)) |cfg_id| {
+            if (cfg_id > 0) {
+                try destroyConfigIds(ctx, &.{cfg_id});
+                return;
+            }
+        }
+    }
+    try scene.remove(ctx.alloc.gpa, ctx.fs, scene.active_flow_owner_entity_id);
+    var remove_infos: std.ArrayList(pb.EntityRemoveInfo) = .empty;
+    try remove_infos.append(ctx.alloc.arena, .{
+        .EntityId = scene.active_flow_owner_entity_id,
+        .Type = .RemoveTypeNormal,
+    });
+    ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.EntityRemoveNotify{
+        .RemoveInfos = remove_infos,
+        .IsRemove = true,
+    }) catch {};
+}
+
+fn applyToggleElementalAbility(ctx: QuestContext, params: std.json.ObjectMap) !void {
+    const scene = ctx.scene orelse return;
+    const enable = quest_types.jsonBool(params.get("Enable")) orelse true;
+    const param_eid = quest_types.jsonInt(params.get("EntityId")) orelse 0;
+    const cfg_id: i32 = if (param_eid > 0)
+        std.math.cast(i32, param_eid) orelse 0
+    else if (scene.active_flow_owner_entity_id != 0)
+        if (scene.findConfigIdByNetId(scene.active_flow_owner_entity_id)) |c| std.math.cast(i32, c) orelse 0 else 0
+    else
+        0;
+    const net_id: ?i64 = if (cfg_id > 0)
+        scene.findEntityNetIdByConfigId(cfg_id)
+    else if (scene.active_flow_owner_entity_id != 0)
+        scene.active_flow_owner_entity_id
+    else
+        null;
+    if (net_id) |nid| {
+        if (scene.net_id_map.get(nid)) |idx| {
+            scene.entities.items(.world_item)[idx].elemental_holder_enable = enable;
+        }
+    }
+    if (cfg_id > 0) {
+        const k = try std.fmt.allocPrint(ctx.alloc.arena, "elem_ability:{d}", .{cfg_id});
+        try recordProgressInt(ctx, k, if (enable) 1 else 0, false);
+    }
+}
+
+fn destroyConfigIds(ctx: QuestContext, ids: []const i32) !void {
+    if (ids.len == 0) return;
+
+    for (ids) |target_cfg| {
         _ = try QuestInfo.appendUniqueInt(&ctx.quest_comp.info.world.hidden_entities, ctx.alloc.gpa, target_cfg);
         _ = try QuestInfo.removeIntValue(&ctx.quest_comp.info.world.shown_entities, ctx.alloc.gpa, target_cfg);
     }
@@ -2507,7 +2585,7 @@ fn applyDestroyEntity(ctx: QuestContext, params: std.json.ObjectMap) !void {
     const scene = ctx.scene orelse return;
     var to_remove: std.ArrayList(i64) = .empty;
     const slice = scene.entities.slice();
-    for (ids.items) |target_cfg| {
+    for (ids) |target_cfg| {
         for (slice.items(.config), slice.items(.entity_id)) |cfg, nid| {
             if (cfg.config_id == target_cfg) {
                 to_remove.append(ctx.alloc.arena, nid.net_id) catch {};
