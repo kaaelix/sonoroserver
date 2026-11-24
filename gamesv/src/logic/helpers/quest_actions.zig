@@ -103,9 +103,9 @@ pub fn executeAction(
         try applyAddTrialCharacter(ctx, params);
     } else if (std.mem.eql(u8, name, "RemoveTrialCharacter")) {
         try applyRemoveTrialCharacter(ctx, params);
-    } else if (std.mem.eql(u8, name, "AddBuffToPlayer")) {
+    } else if (std.mem.eql(u8, name, "AddBuffToPlayer") or std.mem.eql(u8, name, "AddBuffToTriggeredEntity")) {
         try applyQuestBuffAction(ctx, params, true, false);
-    } else if (std.mem.eql(u8, name, "RemoveBuffFromPlayer")) {
+    } else if (std.mem.eql(u8, name, "RemoveBuffFromPlayer") or std.mem.eql(u8, name, "RemoveBuffFromTriggeredEntity")) {
         try applyQuestBuffAction(ctx, params, true, true);
     } else if (std.mem.eql(u8, name, "AddBuffToEntity")) {
         try applyQuestBuffAction(ctx, params, false, false);
@@ -3462,12 +3462,23 @@ fn applyServerMoveAction(ctx: QuestContext, name: []const u8, params: std.json.O
             }) catch {};
         }
     } else if (std.mem.eql(u8, name, "ChangeLiftTarget")) {
-        if (quest_types.jsonInt(params.get("EntityId"))) |cfg_id| {
+        const is_self = quest_types.jsonBool(params.get("IsSelf")) orelse false;
+        const param_eid = quest_types.jsonInt(params.get("EntityId")) orelse 0;
+        const resolved_cfg: ?i32 = if (!is_self and param_eid > 0)
+            std.math.cast(i32, param_eid)
+        else if (scene.active_flow_owner_entity_id != 0)
+            if (scene.findConfigIdByNetId(scene.active_flow_owner_entity_id)) |oc| std.math.cast(i32, oc) else null
+        else if (param_eid > 0)
+            std.math.cast(i32, param_eid)
+        else
+            null;
+        if (resolved_cfg) |cfg_id| {
             const loc = quest_types.jsonInt(params.get("Location")) orelse 0;
             const k = try std.fmt.allocPrint(ctx.alloc.arena, "lift_target:{d}", .{cfg_id});
             try recordProgressInt(ctx, k, loc, false);
             const ek = try std.fmt.allocPrint(ctx.alloc.arena, "elevator:{d}", .{cfg_id});
             try recordProgressInt(ctx, ek, loc, false);
+            ensureQuestEntitySpawned(ctx, cfg_id);
             if (scene.findEntityNetIdByConfigId(cfg_id)) |net_id| {
                 if (scene.net_id_map.get(net_id)) |index| {
                     scene.entities.items(.world_item)[index].lift = .{ .location = std.math.cast(i32, loc) orelse 0 };

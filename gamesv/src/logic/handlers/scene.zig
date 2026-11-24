@@ -964,6 +964,9 @@ pub fn notifyJoinScene(
         .TransitionOption = .{},
     });
     scene.join_scene_pushed = true;
+    scene.scene_loading_finished = false;
+    scene.deferred_join_sync_pending = true;
+    scene.clearDeferredJoinFlow(alloc.gpa);
 
     try events.enqueue(.after_scene_join, .{
         .pending_flow = event.data.pending_flow,
@@ -1100,10 +1103,18 @@ pub fn afterSceneJoin(
     try conn.push(alloc.gpa, io, pb.SwitchBattleModeNotify{});
     try notifyTransportRoadways(fs, alloc, scene, conn, assets, io);
     try notifyInfrastructureRoadData(alloc, conn, assets, io);
-    try QuestEngine.syncWorldStateOnJoin(qctx);
     try QuestEngine.pushReadyQuestList(qctx);
-    if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
-        try LevelPlayHelper.syncOnLogin(lp_ctx);
+    // Defer entity/LevelPlay/quest-world spawns until SceneLoadingFinishRequest so clients
+    // finish PreloadCommon (CDT_CharacterFightInfo, DT_EntityProperty, CT_MoveFAcceleration)
+    // before receiving post-join spawns or FlowStartNotify.
+    if (scene.scene_loading_finished) {
+        scene.deferred_join_sync_pending = false;
+        try QuestEngine.syncWorldStateOnJoin(qctx);
+        if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+            try LevelPlayHelper.syncOnLogin(lp_ctx);
+        }
+    } else {
+        scene.deferred_join_sync_pending = true;
     }
 
     const rtc: Io.Clock = .real;
@@ -1185,12 +1196,16 @@ pub fn afterSceneJoin(
 
     // shitty solution for a shitty problem...
     if (event.data.pending_flow) |flow| {
-        try conn.push(alloc.gpa, io, pb.FlowStartNotify{
-            .FlowIncId = flow.inc_id,
-            .FlowListName = flow.namespace,
-            .FlowId = flow.id,
-            .StateId = flow.state,
-        });
+        if (scene.scene_loading_finished) {
+            try conn.push(alloc.gpa, io, pb.FlowStartNotify{
+                .FlowIncId = flow.inc_id,
+                .FlowListName = flow.namespace,
+                .FlowId = flow.id,
+                .StateId = flow.state,
+            });
+        } else {
+            try scene.setDeferredJoinFlow(alloc.gpa, flow);
+        }
     }
 }
 
@@ -1470,6 +1485,27 @@ fn considerSpawnCandidates(
             if (!is_quest_target and scene.instance.isOnRespawnCooldown(cfg_id32, now_ms)) continue;
         }
         const explicitly_shown = cfg_id32 > 0 and QuestInfo.containsInt(quest_info.world.shown_entities, cfg_id32);
+        const base_disabled = if (cfg.ComponentsData.BaseInfoComponent) |bi|
+            bi.Disabled
+        else if (assets.findTemplateConfig(cfg.BlueprintType)) |tpl|
+            if (tpl.ComponentsData.BaseInfoComponent) |tbi| tbi.Disabled else null
+        else
+            null;
+        if ((base_disabled orelse false) and !explicitly_shown and !is_quest_target) continue;
+        if (cfg_id32 > 0 and !explicitly_shown and !is_quest_target) {
+            var blocked_reward = false;
+            for (assets.indexes.levelPlayIndicesForRewardEntity(cfg_id32)) |lp_idx| {
+                const lp = assets.tables.level_play_data.items[lp_idx];
+                const lp_map = assets.resolveMapConfigId(if (lp.Data.InstanceId != 0) lp.Data.InstanceId else lp.Data.LevelId);
+                const scene_map = assets.resolveMapConfigId(scene.instance_id);
+                if (lp.Data.InstanceId != scene.instance_id and lp.Data.LevelId != scene.instance_id and lp_map != scene_map) continue;
+                if (!QuestInfo.containsInt(quest_info.completed_level_plays, lp.LevelPlayId)) {
+                    blocked_reward = true;
+                    break;
+                }
+            }
+            if (blocked_reward) continue;
+        }
         if ((cfg.InSleep or cfg.IsHidden) and !explicitly_shown and !is_quest_target) continue;
         if (QuestEngine.shouldHideWorldEntity(quest_info, active_quest_targets, cfg.EntityId)) continue;
 

@@ -204,6 +204,14 @@ pub fn onSceneLoadingFinishRequest(
 ) !void {
     txn.respond(.{ .ErrorCode = .Success });
     if (scene_opt.*) |*scene| {
+        scene.scene_loading_finished = true;
+        if (scene.deferred_join_sync_pending) {
+            scene.deferred_join_sync_pending = false;
+            try QuestEngine.syncWorldStateOnJoin(qctx);
+            if (LevelPlayHelper.fromQuestContext(qctx)) |lp_ctx| {
+                try LevelPlayHelper.syncOnLogin(lp_ctx);
+            }
+        }
         if (scene.instance.players.len > 0) {
             scene.last_spatial_check_loc = scene.instance.players[0].location;
             events.enqueueBestEffort(.spatial_spawns_check, .{
@@ -213,6 +221,15 @@ pub fn onSceneLoadingFinishRequest(
         try QuestEngine.onSceneLoadingFinish(qctx);
         if (scene.instance_id != 8) {
             try QuestEngine.onDungeonEvent(qctx, scene.instance_id, false);
+        }
+        if (scene.deferred_join_flow) |flow| {
+            try qctx.conn.push(qctx.alloc.gpa, qctx.io, pb.FlowStartNotify{
+                .FlowIncId = flow.inc_id,
+                .FlowListName = flow.namespace,
+                .FlowId = flow.id,
+                .StateId = flow.state,
+            });
+            scene.clearDeferredJoinFlow(qctx.alloc.gpa);
         }
     }
 }

@@ -62,9 +62,9 @@ pub const GameplayState = struct {
     }
 };
 
-const gameplay_event_limit = 64;
-const gameplay_time_limit_ns = 2 * std.time.ns_per_ms;
-const inbound_batch_limit = 32;
+const gameplay_event_limit = 256;
+const gameplay_time_limit_ns = 8 * std.time.ns_per_ms;
+const inbound_batch_limit = 128;
 
 // Binary search sorted 3.8.11 tables at runtime instead of materializing 65k comptime slots.
 fn lookupResponseId(msg_id: u32) ?u16 {

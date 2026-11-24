@@ -13,9 +13,9 @@ pub const pre_auth_idle_timeout_ms: i64 = 30_000;
 pub const authenticated_idle_timeout_ms: i64 = 5 * 60_000;
 pub const overhead = kcp_module.overhead;
 const send_failure_limit = 3;
-const action_limit = 256;
-const time_limit_ns = 4 * std.time.ns_per_ms;
-const outbound_batch_limit = 16;
+const action_limit = 2048;
+const time_limit_ns = 16 * std.time.ns_per_ms;
+const outbound_batch_limit = 128;
 
 const StreamAssembler = struct {
     gpa: Allocator,
@@ -170,7 +170,8 @@ const Session = struct {
         session.kcp.setOutput(kcpOutput);
         session.kcp.dead_link = 40;
         _ = session.kcp.noDelay(1, 10, 2, 1);
-        _ = session.kcp.wndSize(256, 256);
+        session.kcp.rx_minrto = 20;
+        _ = session.kcp.wndSize(512, 512);
     }
 
     fn deinit(session: *Session, gpa: Allocator) void {

@@ -744,6 +744,13 @@ pub const spawn = struct {
         if (components_data.TriggerComponent != null) {
             scene.entities.items(.world_item)[entity.index].trigger_present = true;
         }
+        if (components_data.LiftComponent) |lc| {
+            if (!(lc.Disabled orelse false)) {
+                scene.entities.items(.world_item)[entity.index].lift = .{
+                    .location = lc.InitialFloor orelse 1,
+                };
+            }
+        }
         if (components_data.AiComponent) |aic| {
             scene.entities.items(.world_item)[entity.index].patrol_dir = false;
             if (aic.WeaponId) |wid_val| {

@@ -64,6 +64,9 @@ pending_transition_instance_id: ?i32 = null,
 next_action_inc_id: i32 = 1,
 client_black_screen_open: bool = false,
 join_scene_pushed: bool = false,
+scene_loading_finished: bool = false,
+deferred_join_sync_pending: bool = false,
+deferred_join_flow: ?DeferredJoinFlow = null,
 next_entity_id: i64 = 1,
 plot_added_rover_slot: ?usize = null,
 plot_saved_cur_role: i32 = 0,
@@ -88,6 +91,18 @@ async_flows: std.ArrayListUnmanaged(AsyncFlowEntry) = .empty,
 action_node_next_idx: std.AutoHashMapUnmanaged(u64, usize) = .empty,
 last_server_rollback_quest_id: i32 = 0,
 last_server_rollback_ms: i64 = 0,
+
+pub const DeferredJoinFlow = struct {
+    inc_id: i32,
+    namespace: []u8,
+    id: i32,
+    state: i32,
+
+    pub fn deinit(self: *DeferredJoinFlow, gpa: Allocator) void {
+        if (self.namespace.len > 0) gpa.free(self.namespace);
+        self.namespace = &.{};
+    }
+};
 
 pub const KilledRemovalEntry = struct {
     entity_id: i64,
@@ -468,6 +483,7 @@ pub fn deinit(scene: *Scene, gpa: Allocator, fs: *FileSystem) void {
     scene.fsm_wakes.deinit(gpa);
     scene.clearActiveFlow(gpa);
     scene.executed_flow_action_ids.deinit(gpa);
+    scene.clearDeferredJoinFlow(gpa);
     scene.clearPendingFlows(gpa);
     scene.pending_flows.deinit(gpa);
     scene.quest_timers.deinit(gpa);
@@ -671,6 +687,26 @@ pub fn popPendingFlow(scene: *Scene) ?PendingFlow {
 pub fn clearPendingFlows(scene: *Scene, gpa: Allocator) void {
     for (scene.pending_flows.items) |*flow| flow.deinit(gpa);
     scene.pending_flows.clearRetainingCapacity();
+}
+
+/// Stores a scene-join flow (from `@flow` / switch) to start once client scene preload finishes.
+pub fn setDeferredJoinFlow(scene: *Scene, gpa: Allocator, flow: anytype) !void {
+    scene.clearDeferredJoinFlow(gpa);
+    const dup_ns = if (flow.namespace.len > 0) try gpa.dupe(u8, flow.namespace) else @as([]u8, &.{});
+    scene.deferred_join_flow = .{
+        .inc_id = flow.inc_id,
+        .namespace = dup_ns,
+        .id = flow.id,
+        .state = flow.state,
+    };
+}
+
+/// Frees any buffered scene-join flow.
+pub fn clearDeferredJoinFlow(scene: *Scene, gpa: Allocator) void {
+    if (scene.deferred_join_flow) |*flow| {
+        flow.deinit(gpa);
+        scene.deferred_join_flow = null;
+    }
 }
 
 pub fn spawn(scene: *Scene, gpa: Allocator, fs: *FileSystem, components: anytype) !Entity {

@@ -725,12 +725,83 @@ pub fn onEntityBuffProducerOperateRequest(
     txn: *Transaction(pb.EntityBuffProducerOperateRequest),
     alloc: mem.Alloc,
     fs: *FileSystem,
+    assets: *const Assets,
+    events: *EventQueue,
+    scene_opt: *?Scene,
     progress_comp: *PlayerProgressComponent,
 ) !void {
     const key = try std.fmt.allocPrint(alloc.arena, "buff_prod:op:{d}", .{txn.message.OpEntityId});
     const op_val: i64 = if (txn.message.OpType) |ot| @intFromEnum(ot) else 0;
     try progress_comp.info.setKeyInt(alloc.gpa, key, op_val);
     try progress_comp.save(fs, alloc.arena);
+
+    if (scene_opt.*) |*scene| {
+        const resolved_cfg = scene.findConfigIdByNetId(txn.message.OpEntityId) orelse txn.message.OpEntityId;
+        if (assets.findLevelEntity(scene.instance_id, resolved_cfg)) |lcfg| {
+            var comps = lcfg.ComponentsData;
+            if (assets.findTemplateConfig(lcfg.BlueprintType)) |tpl| {
+                tpl.ComponentsData.mergeInto(&comps);
+            }
+            var buff_id: i64 = 0;
+            for ([2][]const @import("../../data/tables/entity_components/Extra.zig").Entry{
+                comps.extra,
+                comps.template_extra,
+            }) |extra_slice| {
+                for (extra_slice) |entry| {
+                    switch (entry) {
+                        .BuffProducerComponent => |bp| {
+                            if (!(bp.Disabled orelse false)) {
+                                if (bp.BuffId) |bid| {
+                                    if (bid > 0) buff_id = bid;
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
+            if (buff_id > 0) {
+                const use_player_target = if (assets.tables.buff.getDataById(buff_id)) |bd|
+                    (bd.FormationPolicy == .FormationBuff or bd.FormationPolicy == .SharedByFormation)
+                else
+                    false;
+                var target_ent: ?Scene.Entity = null;
+                if (use_player_target) {
+                    const slice = scene.entities.slice();
+                    for (slice.items(.config), slice.items(.entity_id), 0..) |cfg, nid, idx| {
+                        if (cfg.entity_type == .player) {
+                            target_ent = .{ .index = idx, .net_id = nid.net_id };
+                            break;
+                        }
+                    }
+                }
+                if (target_ent == null) {
+                    const role_nid = scene.currentRoleEntityId();
+                    if (scene.net_id_map.get(role_nid)) |ridx| {
+                        target_ent = .{ .index = ridx, .net_id = role_nid };
+                    }
+                }
+                if (target_ent) |ent| {
+                    const op_type = txn.message.OpType orelse .AddBuff;
+                    if (op_type == .AddBuff) {
+                        const entries = try alloc.arena.alloc(@import("../../logic/events.zig").BuffAdditionEntry, 1);
+                        entries[0] = .{ .id = buff_id, .stack_count = 1, .is_active = true };
+                        try events.enqueue(.buff_addition, .{
+                            .target = ent,
+                            .instigator = ent,
+                            .buffs = entries,
+                        });
+                    } else {
+                        try events.enqueue(.buff_removal_by_id, .{
+                            .entity = ent,
+                            .buff_id = buff_id,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     txn.respond(.{
         .ErrorCode = .Success,
         .OpEntityId = txn.message.OpEntityId,

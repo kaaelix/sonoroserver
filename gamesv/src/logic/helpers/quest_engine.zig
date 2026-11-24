@@ -166,7 +166,10 @@ pub fn resyncOnReconnect(ctx: QuestContext) !void {
     if (ctx.scene) |scene| scene.current_quest_id = ctx.quest_comp.info.tracked_quest_id;
     syncSceneCurrentNode(ctx);
 
-    ensureActiveQuestTargetsSpawned(ctx);
+    const client_loaded = if (ctx.scene) |scene| scene.scene_loading_finished else false;
+    if (client_loaded) {
+        ensureActiveQuestTargetsSpawned(ctx);
+    }
     if (ctx.scene) |scene| {
         for (ctx.quest_comp.info.active_quests) |aq| {
             const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, aq.quest_id) catch continue;
@@ -176,8 +179,10 @@ pub fn resyncOnReconnect(ctx: QuestContext) !void {
             }
         }
     }
-    if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
-        try LevelPlayHelper.syncOnLogin(lp_ctx);
+    if (client_loaded) {
+        if (LevelPlayHelper.fromQuestContext(ctx)) |lp_ctx| {
+            try LevelPlayHelper.syncOnLogin(lp_ctx);
+        }
     }
     try ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.TraceQuestNotify{ .QuestId = ctx.quest_comp.info.tracked_quest_id });
     if (ctx.quest_comp.info.focus_quest_id > 0) {
