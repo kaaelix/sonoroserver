@@ -17,6 +17,25 @@ public static class ActivityHandler
         public int Id { get; set; }
         public int Type { get; set; }
         public int OpenType { get; set; }
+        public List<string>? TabTexture { get; set; }
+    }
+
+    private static bool HasMissingBuildAsset(ActivityConfigItem def)
+    {
+        if (def.TabTexture == null) return false;
+        foreach (var tex in def.TabTexture)
+        {
+            if (tex.Contains("SignIn32", StringComparison.Ordinal) ||
+                tex.Contains("SignIn33", StringComparison.Ordinal) ||
+                tex.Contains("SignIn34", StringComparison.Ordinal) ||
+                tex.Contains("Activity32/", StringComparison.Ordinal) ||
+                tex.Contains("Activity33/", StringComparison.Ordinal) ||
+                tex.Contains("Activity34/", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Legacy/seasonal minigames whose PhraseEx or UI expects complex stage matrices, collab assets,
@@ -328,6 +347,7 @@ public static class ActivityHandler
         foreach (var def in CachedConfig)
         {
             if (ExcludedTypes.Contains(def.Type)) continue;
+            if (HasMissingBuildAsset(def)) continue;
 
             var actType = (ActivityType)def.Type;
             var act = new ActivityData

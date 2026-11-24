@@ -42,13 +42,17 @@ const default_pay_catalog = [_]PayCatalogItem{
     .{ .id = 40004, .shop_id = 4, .tab_id = 2, .item_id = 50001, .item_count = 1, .price_id = 50003, .price_count = 70, .buy_limit = 7 },
     .{ .id = 40005, .shop_id = 4, .tab_id = 2, .item_id = 50005, .item_count = 1, .price_id = 50003, .price_count = 70, .buy_limit = 7 },
     .{ .id = 40006, .shop_id = 4, .tab_id = 2, .item_id = 50002, .item_count = 1, .price_id = 50003, .price_count = 70, .buy_limit = 7 },
+    .{ .id = 30001, .shop_id = 3, .tab_id = 1, .item_id = 50014, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = 5 },
+    .{ .id = 30002, .shop_id = 3, .tab_id = 2, .item_id = 50015, .item_count = 1, .price_id = 3, .price_count = 320, .buy_limit = 5 },
+    .{ .id = 30003, .shop_id = 3, .tab_id = 3, .item_id = 51006, .item_count = 1, .price_id = 4, .price_count = 300, .buy_limit = 5 },
+    .{ .id = 30004, .shop_id = 3, .tab_id = 4, .item_id = 51007, .item_count = 1, .price_id = 4, .price_count = 680, .buy_limit = 5 },
     .{ .id = 104300001, .shop_id = 4, .tab_id = 3, .item_id = 50002, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
     .{ .id = 104300002, .shop_id = 4, .tab_id = 3, .item_id = 50005, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
     .{ .id = 104300003, .shop_id = 4, .tab_id = 3, .item_id = 50001, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
     .{ .id = 104300004, .shop_id = 4, .tab_id = 3, .item_id = 50007, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
     .{ .id = 104300005, .shop_id = 4, .tab_id = 3, .item_id = 50008, .item_count = 1, .price_id = 3, .price_count = 160, .buy_limit = -1 },
-    .{ .id = 106100007, .shop_id = 6, .tab_id = 3, .item_id = 81011508, .item_count = 1, .price_id = 4, .price_count = 1680, .buy_limit = 1 },
-    .{ .id = 106100008, .shop_id = 6, .tab_id = 3, .item_id = 81011509, .item_count = 1, .price_id = 4, .price_count = 1680, .buy_limit = 1 },
+    .{ .id = 106100007, .shop_id = 6, .tab_id = 3, .item_id = 53009, .item_count = 1, .price_id = 4, .price_count = 1680, .buy_limit = 1 },
+    .{ .id = 106100008, .shop_id = 6, .tab_id = 3, .item_id = 53010, .item_count = 1, .price_id = 4, .price_count = 1680, .buy_limit = 1 },
 };
 
 fn recommendTabImage(r: Assets.DataTables.PayShopRecommend) []const u8 {
@@ -78,7 +82,7 @@ fn buildPayShopItemPb(entry: PayCatalogItem, bought_count: i32) pb.PayShopItem {
         .ShopId = entry.shop_id,
         .SoldOut = sold_out,
         .Show = true,
-        .Quality = 5,
+        .Quality = 0,
         .IsBuyMaxButton = true,
     };
 }

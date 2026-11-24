@@ -131,7 +131,7 @@ public static class StoreCardHandler
                 StageImage = item.StageImage,
                 ProductId = item.ProductId,
                 Amount = item.Amount,
-                Quality = 5
+                Quality = 0
             });
         }
         return AkiResult.Ok(EMessageId.PayInfoResponse, resp);
@@ -238,13 +238,17 @@ public static class StoreCardHandler
                 BuyTimeStamp = nowS,
                 EndTimeStamp = nowS + 7 * 86_400
             };
-            info.WeekCardContentInfos.Add(new WeekCardContentInfo
+            for (int day = 1; day <= 3; day++)
             {
-                WeekCardContentId = wid,
-                UnlockDay = 1,
-                UnlockTimeStamp = nowS,
-                Status = claims.Contains($"week_card:{wid}") ? 2 : 1
-            });
+                int cid = wid * 100 + day;
+                info.WeekCardContentInfos.Add(new WeekCardContentInfo
+                {
+                    WeekCardContentId = cid,
+                    UnlockDay = day,
+                    UnlockTimeStamp = nowS,
+                    Status = claims.Contains($"week_card:{cid}") ? 2 : 1
+                });
+            }
             resp.WeekCardInfos.Add(info);
         }
 

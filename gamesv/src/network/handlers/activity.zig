@@ -20,11 +20,20 @@ const aki_logic_bridge = @import("../aki_logic_bridge.zig");
 
 const ActivityUnion = @typeInfo(@FieldType(pb.ActivityData, "Data")).optional.child;
 
+fn hasMissingBuildAsset(act_id: i32) bool {
+    return switch (act_id) {
+        // 3.2/3.3/3.4 SignIn32..34 and Activity32..34 tab icons missing in this client build.
+        100100019, 100100020, 100100021, 107100001, 107500003, 108200002, 108400002, 109000001, 109100001, 109100002, 109400001, 109500001, 109600001, 109900001, 110000001, 110100001, 110100002, 110300001, 110400001 => true,
+        else => false,
+    };
+}
+
 pub fn isActivityUnlocked(
     cond_ctx_opt: ?ConditionEvaluator.EvalContext,
     assets: *const Assets,
     act_id: i32,
 ) bool {
+    if (hasMissingBuildAsset(act_id)) return false;
     const cond_ctx = cond_ctx_opt orelse return true;
     if (!ConditionEvaluator.isFunctionOpen(cond_ctx, 10053)) return false;
     const def = assets.tables.activity.getDataById(act_id) orelse return false;

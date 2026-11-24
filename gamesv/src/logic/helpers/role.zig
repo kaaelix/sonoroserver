@@ -802,20 +802,6 @@ pub fn reviveAndHealFormation(
 
     if (pack_data.items.len != 0) {
         try conn.push(alloc.gpa, io, pb.CombatReceivePackNotify{ .Data = pack_data });
-        const cur_eid = scene.currentRoleEntityId();
-        if (cur_eid != 0) {
-            if (scene.net_id_map.get(cur_eid)) |idx| {
-                const target: Scene.Entity = .{ .index = idx, .net_id = cur_eid };
-                if (alloc.arena.alloc(Events.BuffAdditionEntry, 1)) |entries| {
-                    entries[0] = .{ .id = 640000001, .stack_count = 1, .is_active = true };
-                    events.enqueueBestEffort(.buff_addition, .{
-                        .target = target,
-                        .instigator = target,
-                        .buffs = entries,
-                    });
-                } else |_| {}
-            }
-        }
         conn.pushBestEffort(alloc.gpa, io, pb.JSPatchNotify{
             .Content = "try { const g = require('QuicklyRequire')('Game/Module/GenericPrompt/GenericPromptController'); if (g && g.GenericPromptController) g.GenericPromptController.ShowPromptByCode('30'); } catch (_) {}",
         });

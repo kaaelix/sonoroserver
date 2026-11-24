@@ -673,10 +673,17 @@ pub fn createRoleEntity(
         alloc.gpa.free(vision_skills);
     }
 
+    const prebaked_echo_buffs = try echo_comp.activeEchoBuffEffects(alloc.gpa, assets, role);
+    defer alloc.gpa.free(prebaked_echo_buffs);
+
     if (slice.items(.buffs)[entity.index]) |*buff_comp| {
         buff_comp.fight_buff_infos = fight_buff_infos_filtered;
         for (fight_buff_infos_filtered) |buff_info| {
-            try buff_comp.markPrebakedHandle(alloc.gpa, buff_info.HandleId);
+            // Only Echo/Fetter buffs already baked into RoleEquipment snapshot should be marked prebaked;
+            // marking getRoleAutoBuffs penalizes inactive passives (-1 * delta) and zeroes active combat bonuses.
+            if (buff_info.IsActive and std.mem.indexOfScalar(i64, prebaked_echo_buffs, buff_info.BuffId) != null) {
+                try buff_comp.markPrebakedHandle(alloc.gpa, buff_info.HandleId);
+            }
         }
         buff_comp.born_buff_ids = ornament_born_buff_ids;
         buff_comp.born_message_id = entity.net_id;

@@ -631,12 +631,17 @@ pub fn onWeekCardInfoRequest(
     if (txn.message.WeekCardIds.items.len > 0) {
         for (txn.message.WeekCardIds.items) |wid| {
             var contents: std.ArrayList(pb.WeekCardContentInfo) = .empty;
-            const k = try std.fmt.bufPrint(&kbuf, "week_card:{d}", .{wid});
-            try contents.append(alloc.arena, .{
-                .WeekCardContentId = wid,
-                .UnlockDay = 1,
-                .Status = if (progress_comp.info.hasClaim(k)) 2 else 1,
-            });
+            const days: i32 = 3;
+            var day: i32 = 1;
+            while (day <= days) : (day += 1) {
+                const cid = wid * 100 + day;
+                const k = try std.fmt.bufPrint(&kbuf, "week_card:{d}", .{cid});
+                try contents.append(alloc.arena, .{
+                    .WeekCardContentId = cid,
+                    .UnlockDay = day,
+                    .Status = if (progress_comp.info.hasClaim(k)) 2 else 1,
+                });
+            }
             try infos.append(alloc.arena, .{
                 .WeekCardId = wid,
                 .Days = 7,
