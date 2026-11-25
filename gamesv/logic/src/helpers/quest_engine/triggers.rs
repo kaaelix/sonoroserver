@@ -1882,6 +1882,45 @@ pub fn sync_dynamic_interact_options_for_entity<S: PushSink + ?Sized>(
     progress_comp: Option<&PlayerProgressComponent>,
     cfg_id: i64,
 ) -> io::Result<()> {
+    sync_dynamic_interact_options_for_entity_mode(
+        scene,
+        assets,
+        sink,
+        quest_info,
+        progress_comp,
+        cfg_id,
+        true,
+    )
+}
+
+pub fn register_dynamic_interact_options_for_entity(
+    scene: &mut Scene,
+    assets: &Assets,
+    quest_info: &QuestInfo,
+    progress_comp: Option<&PlayerProgressComponent>,
+    cfg_id: i64,
+) -> io::Result<()> {
+    let mut noop = crate::sink::NoopSink;
+    sync_dynamic_interact_options_for_entity_mode(
+        scene,
+        assets,
+        &mut noop,
+        quest_info,
+        progress_comp,
+        cfg_id,
+        false,
+    )
+}
+
+fn sync_dynamic_interact_options_for_entity_mode<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    assets: &Assets,
+    sink: &mut S,
+    quest_info: &QuestInfo,
+    progress_comp: Option<&PlayerProgressComponent>,
+    cfg_id: i64,
+    push_notifies: bool,
+) -> io::Result<()> {
     if cfg_id <= 0 {
         return Ok(());
     }
@@ -1891,17 +1930,26 @@ pub fn sync_dynamic_interact_options_for_entity<S: PushSink + ?Sized>(
         };
         for &nid in &aq.active_nodes {
             if let Some(node) = find_node_by_id(&nodes, nid) {
-                push_do_interact_options_for_node(scene, sink, aq.quest_id, node, Some(cfg_id))?;
+                push_do_interact_options_for_bt_node_mode(
+                    scene,
+                    sink,
+                    BtType::BtTypeQuest,
+                    aq.quest_id,
+                    node,
+                    Some(cfg_id),
+                    push_notifies,
+                )?;
             }
         }
     }
-    crate::helpers::level_play::sync_dynamic_interact_options_for_entity(
+    crate::helpers::level_play::sync_dynamic_interact_options_for_entity_mode(
         scene,
         assets,
         sink,
         quest_info,
         progress_comp,
         cfg_id,
+        push_notifies,
     )
 }
 
@@ -1930,6 +1978,26 @@ pub fn push_do_interact_options_for_bt_node<S: PushSink + ?Sized>(
     node: &NodeEntry,
     filter_cfg_id: Option<i64>,
 ) -> io::Result<()> {
+    push_do_interact_options_for_bt_node_mode(
+        scene,
+        sink,
+        bt_type,
+        owner_id,
+        node,
+        filter_cfg_id,
+        true,
+    )
+}
+
+pub fn push_do_interact_options_for_bt_node_mode<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    sink: &mut S,
+    bt_type: BtType,
+    owner_id: i32,
+    node: &NodeEntry,
+    filter_cfg_id: Option<i64>,
+    push_notifies: bool,
+) -> io::Result<()> {
     if node.node_type != "ChildQuest" {
         return Ok(());
     }
@@ -1952,20 +2020,40 @@ pub fn push_do_interact_options_for_bt_node<S: PushSink + ?Sized>(
                 node.id,
                 entry,
                 filter_cfg_id,
+                push_notifies,
             )?;
         }
     } else if ctype == "HandInItems" {
         if let Some(ao) = cond.get("AddOption") {
-            push_dynamic_interact_entry(scene, sink, bt_type, owner_id, node.id, ao, filter_cfg_id)?;
+            push_dynamic_interact_entry(
+                scene,
+                sink,
+                bt_type,
+                owner_id,
+                node.id,
+                ao,
+                filter_cfg_id,
+                push_notifies,
+            )?;
         } else if let Some(Value::Object(hi)) = cond.get("HandInItems")
             && let Some(ao) = hi.get("AddOption")
         {
-            push_dynamic_interact_entry(scene, sink, bt_type, owner_id, node.id, ao, filter_cfg_id)?;
+            push_dynamic_interact_entry(
+                scene,
+                sink,
+                bt_type,
+                owner_id,
+                node.id,
+                ao,
+                filter_cfg_id,
+                push_notifies,
+            )?;
         }
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_dynamic_interact_entry<S: PushSink + ?Sized>(
     scene: &mut Scene,
     sink: &mut S,
@@ -1974,6 +2062,7 @@ fn push_dynamic_interact_entry<S: PushSink + ?Sized>(
     node_id: i32,
     entry: &Value,
     filter_cfg_id: Option<i64>,
+    push_notifies: bool,
 ) -> io::Result<()> {
     let Value::Object(obj) = entry else {
         return Ok(());
@@ -2036,7 +2125,24 @@ fn push_dynamic_interact_entry<S: PushSink + ?Sized>(
         actions_json = "[]".to_string();
     }
 
-    if let Some(existing) = scene.find_dynamic_interact_option(guid)
+    let same_existing = scene.find_dynamic_interact_option(guid).is_some_and(|existing| {
+        existing.entity_net_id == net_id
+            && existing.bt_type == bt_type
+            && existing.quest_id == quest_id
+            && existing.node_id == node_id
+            && existing.kind == kind
+            && existing.flow_list_name == flow_name
+            && existing.flow_id == flow_id
+            && existing.state_id == state_id
+            && existing.actions_json == actions_json
+            && existing.text == text
+    });
+    if same_existing {
+        return Ok(());
+    }
+
+    if push_notifies
+        && let Some(existing) = scene.find_dynamic_interact_option(guid)
         && existing.entity_net_id == net_id
     {
         sink.push(
@@ -2060,26 +2166,29 @@ fn push_dynamic_interact_entry<S: PushSink + ?Sized>(
         flow_id,
         state_id,
         &actions_json,
+        text,
     );
 
-    sink.push(
-        EntityAddDynamicInteractNotify::MSG_ID,
-        &EntityAddDynamicInteractNotify {
-            GameCtx: Some(GameCtxPb {
-                CtxType: Some(GameCtxType::BehaviorTree),
-                CtxInfo: Some(GameCtxPbCtxInfoOneof::BehaviorTree(BehaviorTreeCtxPb {
-                    IncId: i64::from(quest_id),
-                    BtType: Some(bt_type),
-                    BtId: quest_id,
-                    NodeId: node_id,
-                })),
-            }),
-            EntityId: net_id,
-            DelayRemove: false,
-            Text: text.as_bytes().to_vec(),
-            OptionGuid: guid.as_bytes().to_vec(),
-        },
-    );
+    if push_notifies {
+        sink.push(
+            EntityAddDynamicInteractNotify::MSG_ID,
+            &EntityAddDynamicInteractNotify {
+                GameCtx: Some(GameCtxPb {
+                    CtxType: Some(GameCtxType::BehaviorTree),
+                    CtxInfo: Some(GameCtxPbCtxInfoOneof::BehaviorTree(BehaviorTreeCtxPb {
+                        IncId: i64::from(quest_id),
+                        BtType: Some(bt_type),
+                        BtId: quest_id,
+                        NodeId: node_id,
+                    })),
+                }),
+                EntityId: net_id,
+                DelayRemove: false,
+                Text: text.as_bytes().to_vec(),
+                OptionGuid: guid.as_bytes().to_vec(),
+            },
+        );
+    }
     Ok(())
 }
 
@@ -2499,6 +2608,12 @@ pub fn handle_interact_option<S: PushSink + ?Sized>(
         let tstr = json_str(tval.get("Type")).unwrap_or("");
         if tstr == "Flow" {
             if let Some(Value::Object(fv)) = tval.get("Flow") {
+                if !json_bool(fv.get("Async")).unwrap_or(false)
+                    && let Some(scene) = ctx.scene.as_deref_mut()
+                    && scene.active_flow_inc_id != 0
+                {
+                    scene.clear_active_flow();
+                }
                 start_flow_from_obj(ctx, quest_id, node.id, fv)?;
                 if let Some(scene) = ctx.scene.as_deref_mut()
                     && scene.active_flow_inc_id != 0

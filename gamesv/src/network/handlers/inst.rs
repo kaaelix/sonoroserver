@@ -149,9 +149,6 @@ pub fn handle_change_data_layer_finish_request(
         if let Err(err) = quest_engine::on_condition_state_changed(&mut qctx) {
             tracing::warn!("onChangeDataLayerFinish hook error: {err}");
         }
-        if let Err(err) = quest_engine::on_scene_loading_finish(&mut qctx) {
-            tracing::warn!("onSceneLoadingFinish hook error: {err}");
-        }
     }
     Ok(ChangeDataLayerFinishResponse {
         ErrorCode: Some(ErrorCode::Success),

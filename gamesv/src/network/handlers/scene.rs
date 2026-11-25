@@ -249,11 +249,17 @@ pub fn handle_scene_loading_finish_request(
         let inst_id = scene.instance_id;
         let deferred_flow = scene.deferred_join_flow.take();
 
+        super::flow::clear_client_black_screen_if_idle(state);
         if run_deferred {
             let mut qctx = state.quest_context(events);
             quest_actions::sync_world_state_on_join(&mut qctx).map_err(|e| e.to_string())?;
             if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx) {
                 level_play::sync_on_login(&mut lp_ctx).map_err(|e| e.to_string())?;
+            }
+        } else if inst_id != 8 {
+            let mut qctx = state.quest_context(events);
+            if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx) {
+                level_play::sync_dungeon_level_plays(&mut lp_ctx).map_err(|e| e.to_string())?;
             }
         }
         if player_loc.is_some() {
@@ -646,7 +652,7 @@ pub fn handle_move_package_push(
                     let dx = player.location[0] - scene.last_spatial_check_loc[0];
                     let dy = player.location[1] - scene.last_spatial_check_loc[1];
                     let dz = player.location[2] - scene.last_spatial_check_loc[2];
-                    if dx * dx + dy * dy + dz * dz >= 2500.0 * 2500.0 {
+                    if dx * dx + dy * dy + dz * dz >= 1200.0 * 1200.0 {
                         scene.last_spatial_check_loc = player.location;
                         events.enqueue(Event::SpatialSpawnsCheck {
                             player_id: sender_id,

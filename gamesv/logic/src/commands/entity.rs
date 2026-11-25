@@ -17,8 +17,12 @@ use sonoro_gamesv_data::tables::gameplay_tag_remap::GameplayTagRemap;
 use sonoro_gamesv_data::tables::level_entity_config::LevelEntityConfig;
 use sonoro_gamesv_data::tables::template_config::TemplateConfig;
 use sonoro_gamesv_fs::progress_info::ProgressInfo;
-use sonoro_proto::enums::{EAttributeType, VehicleSource};
-use sonoro_proto::pb::{EntityAddNotify, JSPatchNotify};
+use sonoro_proto::enums::{EAttributeType, GameCtxType, VehicleSource};
+use sonoro_proto::pb::{
+    BehaviorTreeCtxPb, DynamicInteractInfo, EntityAddNotify, EntityComponentPb,
+    EntityComponentPbComponentPbOneof, EntityCtxPb, EntityPb, GameCtxPb, GameCtxPbCtxInfoOneof,
+    InteractComponentPb, JSPatchNotify,
+};
 
 use crate::commands::respond;
 use crate::component::entity::fsm::FsmComponent;
@@ -395,12 +399,73 @@ fn append_configured_buff_ids(buff_ids: &mut Vec<i64>, components: &Components) 
     }
 }
 
+fn attach_dynamic_interact_infos(scene: &Scene, entity_pb: &mut EntityPb) {
+    let net_id = entity_pb.Id;
+    let mut infos = Vec::new();
+    for opt in &scene.dynamic_interact_options {
+        if opt.entity_net_id != net_id || opt.option_guid.is_empty() {
+            continue;
+        }
+        let game_ctx = if opt.quest_id > 0 {
+            GameCtxPb {
+                CtxType: Some(GameCtxType::BehaviorTree),
+                CtxInfo: Some(GameCtxPbCtxInfoOneof::BehaviorTree(BehaviorTreeCtxPb {
+                    IncId: i64::from(opt.quest_id),
+                    BtType: Some(opt.bt_type),
+                    BtId: opt.quest_id,
+                    NodeId: opt.node_id,
+                })),
+            }
+        } else {
+            GameCtxPb {
+                CtxType: Some(GameCtxType::Entity),
+                CtxInfo: Some(GameCtxPbCtxInfoOneof::Entity(EntityCtxPb {
+                    ConfigId: opt.entity_config_id,
+                    IncId: opt.entity_net_id,
+                })),
+            }
+        };
+        infos.push(DynamicInteractInfo {
+            OptionGuid: opt.option_guid.as_bytes().to_vec(),
+            GameCtx: Some(game_ctx),
+            Text: opt.text.as_bytes().to_vec(),
+            DelayRemove: false,
+        });
+    }
+    if infos.is_empty() {
+        return;
+    }
+    for comp in &mut entity_pb.ComponentPbs {
+        if let Some(EntityComponentPbComponentPbOneof::InteractComponent(ic)) = &mut comp.ComponentPb
+        {
+            for info in infos {
+                if !ic
+                    .DynamicInteractInfos
+                    .iter()
+                    .any(|cur| cur.OptionGuid == info.OptionGuid)
+                {
+                    ic.DynamicInteractInfos.push(info);
+                }
+            }
+            return;
+        }
+    }
+    entity_pb.ComponentPbs.push(EntityComponentPb {
+        ComponentPb: Some(EntityComponentPbComponentPbOneof::InteractComponent(
+            InteractComponentPb {
+                DynamicInteractInfos: infos,
+                ..Default::default()
+            },
+        )),
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
-fn publish_debug_spawn<S: PushSink + ?Sized>(
+fn prepare_debug_spawn<S: PushSink + ?Sized>(
     scene: &mut Scene,
     fs: &FileSystem,
     assets: &Assets,
-    sink: &mut S,
+    _sink: &mut S,
     entity: EntityHandle,
     config_id: i64,
     source_map_id: i32,
@@ -408,7 +473,7 @@ fn publish_debug_spawn<S: PushSink + ?Sized>(
     components: &Components,
     is_frozen: bool,
     is_tune_broken: bool,
-) -> Result<(), &'static str> {
+) -> Result<(EntityPb, String), &'static str> {
     scene.register_debug_spawn_route(entity.net_id, config_id, source_map_id, repeat_boss)?;
 
     let mut buff_ids = Vec::new();
@@ -439,20 +504,50 @@ fn publish_debug_spawn<S: PushSink + ?Sized>(
     }
 
     let now_ms = now_millis();
-    let entity_pb = scene
+    let mut entity_pb = scene
         .entity(entity.net_id)
         .ok_or("EntityNotFound")?
         .to_proto(assets, now_ms);
+    attach_dynamic_interact_infos(scene, &mut entity_pb);
+    let patch_js = format!(
+        "globalThis.__akiSetEntitySourceMap?.({config_id},{source_map_id},{},{});",
+        if repeat_boss { "true" } else { "false" },
+        entity.net_id
+    );
+    Ok((entity_pb, patch_js))
+}
+
+fn publish_debug_spawn<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    fs: &FileSystem,
+    assets: &Assets,
+    sink: &mut S,
+    entity: EntityHandle,
+    config_id: i64,
+    source_map_id: i32,
+    repeat_boss: bool,
+    components: &Components,
+    is_frozen: bool,
+    is_tune_broken: bool,
+) -> Result<(), &'static str> {
+    let (entity_pb, patch_js) = prepare_debug_spawn(
+        scene,
+        fs,
+        assets,
+        sink,
+        entity,
+        config_id,
+        source_map_id,
+        repeat_boss,
+        components,
+        is_frozen,
+        is_tune_broken,
+    )?;
 
     sink.push(
         JSPatchNotify::MSG_ID,
         &JSPatchNotify {
-            Content: format!(
-                "globalThis.__akiSetEntitySourceMap?.({config_id},{source_map_id},{},{});",
-                if repeat_boss { "true" } else { "false" },
-                entity.net_id
-            )
-            .into(),
+            Content: patch_js.into(),
         },
     );
     sink.push(
@@ -694,7 +789,8 @@ pub fn spawn_synthetic_template_entity<S: PushSink + ?Sized>(
     let handle = scene.spawn(storage);
     let _ = scene.save_entity(fs, handle);
     let now_ms = now_millis();
-    let entity_pb = scene.entity(handle.net_id)?.to_proto(assets, now_ms);
+    let mut entity_pb = scene.entity(handle.net_id)?.to_proto(assets, now_ms);
+    attach_dynamic_interact_infos(scene, &mut entity_pb);
     sink.push(
         EntityAddNotify::MSG_ID,
         &EntityAddNotify {
@@ -706,6 +802,101 @@ pub fn spawn_synthetic_template_entity<S: PushSink + ?Sized>(
 }
 
 #[allow(clippy::too_many_arguments)]
+const WORLD_SPAWN_BATCH_SIZE: usize = 25;
+
+pub fn publish_world_spawn_batch<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    fs: &FileSystem,
+    assets: &Assets,
+    sink: &mut S,
+    items: &[(EntityHandle, i64, i32)],
+) -> Vec<EntityHandle> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let mut prepared: Vec<(EntityHandle, EntityPb, String)> = Vec::with_capacity(items.len());
+    for &(entity, entity_id, source_map_id) in items {
+        let Some(selected) =
+            select_spawn_config(assets, entity_id, scene.instance_id, Some(source_map_id))
+        else {
+            prepared.push((entity, EntityPb::default(), String::new()));
+            continue;
+        };
+        let ai_id = selected
+            .entity_config
+            .ComponentsData
+            .AiComponent
+            .as_ref()
+            .and_then(|c| c.AiId);
+        let repeat_boss = use_repeat_boss_startup(ai_id, assets);
+        match prepare_debug_spawn(
+            scene,
+            fs,
+            assets,
+            sink,
+            entity,
+            entity_id,
+            selected.entity_config.MapId,
+            repeat_boss,
+            &selected.entity_config.ComponentsData,
+            false,
+            false,
+        ) {
+            Ok((pb, js)) => prepared.push((entity, pb, js)),
+            Err(_) => {
+                sink.push(
+                    JSPatchNotify::MSG_ID,
+                    &JSPatchNotify {
+                        Content: format!(
+                            "globalThis.__akiRemoveEntitySourceOwner?.({entity_id},{});",
+                            entity.net_id
+                        )
+                        .into(),
+                    },
+                );
+                scene.rollback_spawn(entity.net_id);
+            }
+        }
+    }
+
+    let mut published = Vec::with_capacity(prepared.len());
+    for chunk in prepared.chunks(WORLD_SPAWN_BATCH_SIZE) {
+        let mut js_batch = String::new();
+        let mut pbs = Vec::with_capacity(chunk.len());
+        for (handle, pb, js) in chunk {
+            published.push(*handle);
+            if pb.Id == 0 && js.is_empty() {
+                continue;
+            }
+            if !js.is_empty() {
+                if !js_batch.is_empty() {
+                    js_batch.push('\n');
+                }
+                js_batch.push_str(js);
+            }
+            pbs.push(pb.clone());
+        }
+        if !js_batch.is_empty() {
+            sink.push(
+                JSPatchNotify::MSG_ID,
+                &JSPatchNotify {
+                    Content: js_batch.into(),
+                },
+            );
+        }
+        if !pbs.is_empty() {
+            sink.push(
+                EntityAddNotify::MSG_ID,
+                &EntityAddNotify {
+                    EntityPbs: pbs,
+                    RemoveTagIds: false,
+                },
+            );
+        }
+    }
+    published
+}
+
 pub fn publish_world_spawn<S: PushSink + ?Sized>(
     scene: &mut Scene,
     fs: &FileSystem,
@@ -715,42 +906,10 @@ pub fn publish_world_spawn<S: PushSink + ?Sized>(
     entity_id: i64,
     source_map_id: i32,
 ) -> Result<(), &'static str> {
-    let Some(selected) = select_spawn_config(assets, entity_id, scene.instance_id, Some(source_map_id))
-    else {
-        return Ok(());
-    };
-    let ai_id = selected
-        .entity_config
-        .ComponentsData
-        .AiComponent
-        .as_ref()
-        .and_then(|c| c.AiId);
-    let repeat_boss = use_repeat_boss_startup(ai_id, assets);
-    if let Err(err) = publish_debug_spawn(
-        scene,
-        fs,
-        assets,
-        sink,
-        entity,
-        entity_id,
-        selected.entity_config.MapId,
-        repeat_boss,
-        &selected.entity_config.ComponentsData,
-        false,
-        false,
-    ) {
-        sink.push(
-            JSPatchNotify::MSG_ID,
-            &JSPatchNotify {
-                Content: format!(
-                    "globalThis.__akiRemoveEntitySourceOwner?.({entity_id},{});",
-                    entity.net_id
-                )
-                .into(),
-            },
-        );
-        scene.rollback_spawn(entity.net_id);
-        return Err(err);
+    if publish_world_spawn_batch(scene, fs, assets, sink, &[(entity, entity_id, source_map_id)])
+        .is_empty()
+    {
+        return Err("PublishWorldSpawnFailed");
     }
     Ok(())
 }

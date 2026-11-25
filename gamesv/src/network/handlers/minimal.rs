@@ -484,7 +484,10 @@ pub fn handle_role_develop_config_request(
 ) -> Result<RoleDevelopConfigResponse, String> {
     Ok(RoleDevelopConfigResponse {
         ErrorCode: Some(ErrorCode::Success),
-        ..Default::default()
+        Configs: Some(sonoro_proto::pb::RoleDevelopConfigs {
+            Version: vec![1],
+            ..Default::default()
+        }),
     })
 }
 

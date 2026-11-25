@@ -174,41 +174,57 @@ fn execute_normal_interact_actions<S: PushSink + ?Sized>(
     let mut state_changed = false;
     let mut started_flow = false;
 
+    let mut can_start_sync_flow = no_active_flow;
     for act in actions {
         if act.Name == "PlayFlow" {
             if !started_flow
-                && no_active_flow
                 && let Some(p) = &act.Params
             {
-                let flow_name = p
-                    .FlowListName
-                    .as_deref()
-                    .or_else(|| p.Flow.as_ref().and_then(|f| f.FlowListName.as_deref()))
-                    .or_else(|| p.Flows.as_ref().and_then(|f| f.FlowListName.as_deref()))
-                    .unwrap_or("");
-                let flow_id = p
-                    .FlowId
-                    .or_else(|| p.Flow.as_ref().and_then(|f| f.FlowId))
-                    .or_else(|| p.Flows.as_ref().and_then(|f| f.FlowId))
-                    .unwrap_or(0);
-                let state_id = p
-                    .StateId
-                    .or_else(|| p.Flow.as_ref().and_then(|f| f.StateId))
-                    .or_else(|| p.Flows.as_ref().and_then(|f| f.StateId))
-                    .unwrap_or(1)
-                    .max(1);
-                if !flow_name.is_empty() && flow_id > 0 {
-                    let _ = start_entity_interact_flow(
-                        ctx,
-                        entity_id,
-                        cfg_id,
-                        option_index,
-                        flow_name,
-                        flow_id,
-                        state_id,
-                        false,
-                    )?;
-                    started_flow = true;
+                let is_async = act
+                    .Raw
+                    .as_ref()
+                    .and_then(|v| v.get("Params"))
+                    .and_then(|vp| vp.get("Async"))
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false);
+                if !is_async
+                    && !can_start_sync_flow
+                    && let Some(scene) = ctx.scene.as_deref_mut()
+                {
+                    scene.clear_active_flow();
+                    can_start_sync_flow = true;
+                }
+                if is_async || can_start_sync_flow {
+                    let flow_name = p
+                        .FlowListName
+                        .as_deref()
+                        .or_else(|| p.Flow.as_ref().and_then(|f| f.FlowListName.as_deref()))
+                        .or_else(|| p.Flows.as_ref().and_then(|f| f.FlowListName.as_deref()))
+                        .unwrap_or("");
+                    let flow_id = p
+                        .FlowId
+                        .or_else(|| p.Flow.as_ref().and_then(|f| f.FlowId))
+                        .or_else(|| p.Flows.as_ref().and_then(|f| f.FlowId))
+                        .unwrap_or(0);
+                    let state_id = p
+                        .StateId
+                        .or_else(|| p.Flow.as_ref().and_then(|f| f.StateId))
+                        .or_else(|| p.Flows.as_ref().and_then(|f| f.StateId))
+                        .unwrap_or(1)
+                        .max(1);
+                    if !flow_name.is_empty() && flow_id > 0 {
+                        let _ = start_entity_interact_flow(
+                            ctx,
+                            entity_id,
+                            cfg_id,
+                            option_index,
+                            flow_name,
+                            flow_id,
+                            state_id,
+                            is_async,
+                        )?;
+                        started_flow = true;
+                    }
                 }
             }
         } else if act.Name == "ChangeSelfEntityState" {
@@ -358,37 +374,6 @@ pub fn on_interact_handled<S: PushSink + ?Sized>(
 
     let mut progressed = false;
 
-    if ctx.quest_comp.info.has_finished_quest(PROLOGUE_QUEST_ID) {
-        let candidates: Vec<i32> = {
-            let eval_ctx = ctx.make_eval_context();
-            ctx.assets
-                .tables
-                .quest_data
-                .items
-                .iter()
-                .filter_map(|q| {
-                    let d = &q.Data;
-                    if d.DistributeType != "Interact" {
-                        return None;
-                    }
-                    if !super::tree::is_eligible_quest(ctx, d, false) {
-                        return None;
-                    }
-                    if !matches_quest_interact_starter(ctx, d, entity_id, cfg_id) {
-                        return None;
-                    }
-                    condition::eval_quest_provide_conditions(&eval_ctx, d.ProvideType.as_ref())
-                        .then_some(d.Id)
-                })
-                .collect()
-        };
-        for qid in candidates {
-            if super::tree::activate_quest(ctx, qid, true)? {
-                progressed = true;
-            }
-        }
-    }
-
     let active_snapshot = snapshot_active_quest_ids(ctx);
     'active: for qid in active_snapshot {
         let Some(aq) = ctx.quest_comp.info.find_active_quest(qid).cloned() else {
@@ -425,6 +410,37 @@ pub fn on_interact_handled<S: PushSink + ?Sized>(
         }
     }
 
+    if !progressed && ctx.quest_comp.info.has_finished_quest(PROLOGUE_QUEST_ID) {
+        let candidates: Vec<i32> = {
+            let eval_ctx = ctx.make_eval_context();
+            ctx.assets
+                .tables
+                .quest_data
+                .items
+                .iter()
+                .filter_map(|q| {
+                    let d = &q.Data;
+                    if d.DistributeType != "Interact" {
+                        return None;
+                    }
+                    if !super::tree::is_eligible_quest(ctx, d, false) {
+                        return None;
+                    }
+                    if !matches_quest_interact_starter(ctx, d, entity_id, cfg_id) {
+                        return None;
+                    }
+                    condition::eval_quest_provide_conditions(&eval_ctx, d.ProvideType.as_ref())
+                        .then_some(d.Id)
+                })
+                .collect()
+        };
+        for qid in candidates {
+            if super::tree::activate_quest(ctx, qid, true)? {
+                progressed = true;
+            }
+        }
+    }
+
     if progressed {
         finalize_progression(ctx)?;
         return Ok(true);
@@ -442,9 +458,15 @@ pub fn on_interact_handled<S: PushSink + ?Sized>(
                 return Ok(false);
             }
         }
-        let no_active_flow = ctx.scene.as_deref().is_none_or(|s| s.active_flow_inc_id == 0);
+        let mut no_active_flow = ctx.scene.as_deref().is_none_or(|s| s.active_flow_inc_id == 0);
         if let Some(ot) = &opt.Type {
             if ot.Type == "Flow" {
+                if !no_active_flow
+                    && let Some(scene) = ctx.scene.as_deref_mut()
+                {
+                    scene.clear_active_flow();
+                    no_active_flow = true;
+                }
                 if no_active_flow && let Some(fl) = &ot.Flow {
                     let flow_name = fl.FlowListName.as_deref().unwrap_or("");
                     let flow_id = fl.FlowId.unwrap_or(0);

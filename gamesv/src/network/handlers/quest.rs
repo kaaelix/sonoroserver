@@ -286,7 +286,27 @@ pub fn handle_trace_quest_request(
     events: &mut EventQueue,
     req: TraceQuestRequest,
 ) -> Result<TraceQuestResponse, String> {
+    let cur_tracked = state.player_components.quest.info.tracked_quest_id;
+    let cur_focus = state.player_components.quest.info.focus_quest_id;
+    // Only ERequestTrackOperate::Manual (1) represents an explicit player track click;
+    // both None (0, e.g. QuestUpdateTipsController) and Auto (2) are automatic switches.
+    let is_auto = req.Operate != 1;
     let is_untrack = req.TraceType == 2 || (req.TraceType == 0 && req.Operate == 0);
+    if is_auto && !is_untrack && req.QuestId > 0 {
+        let blocked_by_focus = cur_focus > 0 && req.QuestId != cur_focus;
+        let blocked_by_existing_track = cur_tracked > 0 && req.QuestId != cur_tracked;
+        if blocked_by_focus || blocked_by_existing_track {
+            let _ = state.conn.push_msg(
+                TraceQuestNotify::MSG_ID,
+                &TraceQuestNotify {
+                    QuestId: cur_tracked,
+                },
+            );
+            return Ok(TraceQuestResponse {
+                ErrorId: Some(ErrorCode::Success),
+            });
+        }
+    }
     let qid = if is_untrack || req.QuestId <= 0 {
         0
     } else {

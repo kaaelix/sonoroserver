@@ -58,8 +58,8 @@ use sonoro_gamesv_logic::schedulers::quest_timer_queue::QuestTimerEntry;
 use sonoro_gamesv_logic::templates::role_entity_templates;
 use sonoro_proto::PbEnum;
 use sonoro_proto::enums::{
-    AccessRangeType, EAttributeType, EClientStorageSystemIdType, EDamageImmune, ESummonType,
-    ErrorCode, GravityFlipType, RangeType,
+    AccessRangeType, BtType, EAttributeType, EClientStorageSystemIdType, EDamageImmune,
+    ESummonType, ErrorCode, GravityFlipType, RangeType,
 };
 use sonoro_proto::pb::{
     AbyssRankListRequest, AchievementInfoRequest, AfterJoinSceneNotify, BabelTowerRankListRequest,
@@ -68,8 +68,9 @@ use sonoro_proto::pb::{
     CharacterDeathPush, ClientStorageInfo, ClientStorageInfoDataOneof, ClientStorageMapData,
     ClientStorageMapMapData, CombatNotifyDataMessageOneof, CombatReceiveData,
     CombatReceiveDataMessageOneof, DamageExecuteRequest, EntityAccessRangeRequest,
-    EntityAddNotify, EntityComponentPbComponentPbOneof, EntityPatrolChangeDirRequest,
-    EntityPositionRequest, FlowStartNotify, GachaInfoRequest, GachaPoolDetailRequest,
+    EntityAddDynamicInteractNotify, EntityAddNotify, EntityComponentPbComponentPbOneof,
+    EntityPatrolChangeDirRequest, EntityPositionRequest, EntityRemoveDynamicInteractNotify,
+    FlowStartNotify, GachaInfoRequest, GachaPoolDetailRequest,
     GravityFlipInteractRequest, GravityFlipUpdateTypeNotify, HoldHandRequest, HookLockPointRequest,
     ItemDisuseRequest, ItemExchangeInfoRequest, ItemRewardNotify, JoinSceneNotify,
     KurotatoSyncEntityDealDamagePush, LandingDamageRequest, LowMemoryChangeSceneFinishRequest,
@@ -3470,4 +3471,498 @@ fn audit_114_cross_instance_skip_clears_black_screen_on_scene_loading_finish() {
         after_finish.contains(&FlowServerSkipNotify::MSG_ID),
         "SceneLoadingFinishRequest must clear pre-transition SkipPlot black screen"
     );
+}
+
+#[test]
+fn audit_115_lift_initial_pos_dungeon_level_play_npc_priority_and_batch_spawn() {
+    use sonoro_proto::enums::{ElevatorState, LiftMoveType};
+    use sonoro_proto::pb::{
+        ChangeDataLayerFinishRequest, ElevatorMoveNotify, ElevatorStateChangeRequest,
+        EntityAddNotify, EnterLevelPlayNotify, JSPatchNotify, MapMarkInfoNotify,
+        RoleDevelopConfigRequest, UpdateNodeStatusNotify,
+    };
+
+    let mut h = TestHarness::new("audit115", None);
+    let mut events = EventQueue::new();
+
+    // Seed many active quests + off-map Jinzhou LevelPlay 200700001 + active tracked quest.
+    h.state
+        .player_components
+        .quest
+        .info
+        .get_or_add_active_quest(880_000_044)
+        .active_nodes
+        .push(4);
+    h.state
+        .player_components
+        .quest
+        .info
+        .get_or_add_active_quest(311_000_000)
+        .active_nodes
+        .push(5);
+    h.state
+        .player_components
+        .quest
+        .info
+        .get_or_add_active_quest(151_000_000)
+        .active_nodes
+        .push(2);
+    h.state.player_components.quest.info.tracked_quest_id = 880_000_044;
+    h.state
+        .player_components
+        .quest
+        .info
+        .progress
+        .entered_level_plays
+        .push(200_700_001);
+
+    // Enter Instance 1529 cleanly and run SceneLoadingFinishRequest + SpatialSpawnsCheck.
+    {
+        let mut sc = sonoro_gamesv_logic::scene::Scene::init(&h.state.fs, h.state.player_id, 1529)
+            .expect("init scene 1529");
+        sc.join_scene_pushed = true;
+        sc.deferred_join_sync_pending = true;
+        if let Some(p) = sc.instance.players.first_mut() {
+            p.location = [-14_610.0, 72_450.0, 5_250.0];
+        } else {
+            sc.instance.players.push(ScenePlayer {
+                id: h.state.player_id,
+                group_type: 1,
+                location: [-14_610.0, 72_450.0, 5_250.0],
+                rotation: [0.0; 3],
+            });
+        }
+        h.state.scene = Some(sc);
+    }
+    h.drain_count();
+
+    scene::handle_scene_loading_finish_request(
+        &mut h.state,
+        &mut events,
+        SceneLoadingFinishRequest::default(),
+    )
+    .expect("scene loading finish 1529");
+    while let Some(ev) = events.dequeue() {
+        let mut rt = h.state.as_runtime(&mut events, None);
+        sonoro_gamesv_logic::handlers::dispatch_event(&mut rt, ev)
+            .expect("drain spatial spawns in 1529");
+    }
+
+    // 1. Dungeon LevelPlay 880000003 (Map 900 PackId 1529) must enter and load DataLayer 850039,
+    // while unrelated Map 900 Dungeon LevelPlay 241750000 (PackId 1101008) must NOT enter.
+    let qinfo = &h.state.player_components.quest.info;
+    assert!(qinfo.progress.entered_level_plays.contains(&880000003));
+    assert!(!qinfo.progress.entered_level_plays.contains(&241750000));
+    assert!(qinfo.world.loaded_datalayers.contains(&850039));
+
+    // 2. Elevator 880850006 MUST spawn at base Transform (-335.0) so client HoverPoints stay
+    // [-335.0, +4365.0], with Floor 2 stored server-side and snapped via CustomSpeed notify.
+    let scene_ref = h.state.scene.as_ref().expect("scene 1529");
+    let lift_ent = scene_ref
+        .find_entity_net_id_by_config_id(880_850_006)
+        .and_then(|nid| scene_ref.entity(nid))
+        .expect("elevator 880850006 spawned in 1529");
+    let lift_net_id = lift_ent.net_id;
+    assert_eq!(lift_ent.world_item.lift.map(|l| l.location), Some(2));
+    let lift_z = lift_ent.position.expect("lift position").location[2];
+    assert!(
+        (lift_z - (-335.0)).abs() < 1.0,
+        "expected elevator 880850006 base pos Z ~-335.0, got {lift_z}"
+    );
+    assert!(
+        scene_ref.find_entity_net_id_by_config_id(880_850_034).is_some(),
+        "NPC 880850034 near spawn must spawn in 1529"
+    );
+    let cond_eq2: Value = serde_json::from_str(
+        r#"{"Type":"CompareLift","EntityId":880850006,"Location":2,"Compare":"Eq"}"#,
+    )
+    .unwrap();
+    let cond_eq1: Value = serde_json::from_str(
+        r#"{"Type":"CompareLift","EntityId":880850006,"Location":1,"Compare":"Eq"}"#,
+    )
+    .unwrap();
+    assert!(eval_single_inline_condition(
+        &h.state.eval_context(),
+        &cond_eq2,
+    ));
+    assert!(!eval_single_inline_condition(
+        &h.state.eval_context(),
+        &cond_eq1,
+    ));
+
+    // 3. Spatial world spawns must batch EntityAddNotify + JSPatchNotify, spawn lift via
+    // CustomSpeed ElevatorMoveNotify, and SceneLoadingFinishRequest must NOT flood active quest nodes.
+    let mut adds: Vec<EntityAddNotify> = Vec::new();
+    let mut lift_moves: Vec<ElevatorMoveNotify> = Vec::new();
+    let mut node_updates: Vec<UpdateNodeStatusNotify> = Vec::new();
+    while let Ok(frame) = h.rx.try_recv() {
+        if frame.len() < 3 {
+            continue;
+        }
+        if let Ok(msg) = super::Message::decode(&frame[3..]) {
+            let id = msg.header.message_id();
+            if id == EntityAddNotify::MSG_ID
+                && let Ok(v) = <EntityAddNotify as sonoro_proto::wire::PbMessage>::decode(&msg.payload)
+            {
+                adds.push(v);
+            } else if id == ElevatorMoveNotify::MSG_ID
+                && let Ok(v) = <ElevatorMoveNotify as sonoro_proto::wire::PbMessage>::decode(&msg.payload)
+            {
+                lift_moves.push(v);
+            } else if id == UpdateNodeStatusNotify::MSG_ID
+                && let Ok(v) = <UpdateNodeStatusNotify as sonoro_proto::wire::PbMessage>::decode(&msg.payload)
+            {
+                node_updates.push(v);
+            }
+        }
+    }
+    let total_added: usize = adds.iter().map(|n| n.EntityPbs.len()).sum();
+    assert!(
+        total_added > 1,
+        "expected multiple entities spawned in 1529, got {total_added}"
+    );
+    assert!(
+        adds.iter().any(|n| n.EntityPbs.len() > 1),
+        "expected batched EntityAddNotify with multiple EntityPbs per notify, got {} notifies for {total_added} entities",
+        adds.len()
+    );
+    assert!(
+        lift_moves.iter().any(|m| {
+            m.EntityId == lift_net_id
+                && m.Location == 2
+                && m.MoveType
+                    .as_ref()
+                    .and_then(|mt| mt.Type)
+                    == Some(LiftMoveType::CustomSpeed)
+        }),
+        "expected CustomSpeed ElevatorMoveNotify to snap lift 880850006 to floor 2"
+    );
+    assert!(
+        !node_updates
+            .iter()
+            .any(|u| u.TreeOwnerId == 311_000_000 || u.TreeOwnerId == 151_000_000),
+        "SceneLoadingFinishRequest must not flood UpdateNodeStatusNotify across unrelated active quests: {node_updates:?}"
+    );
+
+    // 4. ElevatorStateChangeRequest End on same floor must NOT echo ElevatorMoveNotify;
+    // Forward to Floor 1 MUST emit ElevatorMoveNotify { Location: 1 }, and End on Floor 1 must not.
+    world_puzzle::handle_elevator_state_change_request(
+        &mut h.state,
+        ElevatorStateChangeRequest {
+            EntityId: lift_net_id,
+            State: Some(ElevatorState::End),
+            TagState: 2,
+        },
+    )
+    .expect("elevator end at floor 2");
+    assert!(
+        h.drain_decoded::<ElevatorMoveNotify>(ElevatorMoveNotify::MSG_ID)
+            .is_empty(),
+        "ElevatorState::End must not echo ElevatorMoveNotify back to client"
+    );
+    world_puzzle::handle_elevator_state_change_request(
+        &mut h.state,
+        ElevatorStateChangeRequest {
+            EntityId: lift_net_id,
+            State: Some(ElevatorState::Forward),
+            TagState: 1,
+        },
+    )
+    .expect("elevator forward to floor 1");
+    let fwd_moves: Vec<ElevatorMoveNotify> = h.drain_decoded(ElevatorMoveNotify::MSG_ID);
+    assert_eq!(fwd_moves.len(), 1);
+    assert_eq!(fwd_moves[0].Location, 1);
+
+    // 5. Call-the-elevator 880850007 StateChangeBehaviors moves 880850006 back to Floor 2.
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = sonoro_gamesv_logic::helpers::quest_types::ActionCallbacks::default();
+        sonoro_gamesv_logic::helpers::quest_actions::apply_entity_state_change(
+            &mut qctx,
+            &mut cbs,
+            880_850_007,
+            "关卡.Common.状态.激活",
+        )
+        .expect("apply 880850007 active state");
+        sonoro_gamesv_logic::helpers::quest_actions::apply_entity_state_change(
+            &mut qctx,
+            &mut cbs,
+            880_850_007,
+            "关卡.Common.状态.常态",
+        )
+        .expect("apply 880850007 normal state");
+    }
+    let call_moves: Vec<ElevatorMoveNotify> = h.drain_decoded(ElevatorMoveNotify::MSG_ID);
+    assert_eq!(
+        call_moves.len(),
+        1,
+        "calling elevator 880850007 should emit exactly one ElevatorMoveNotify without duplicate NaN move"
+    );
+    assert_eq!(call_moves[0].Location, 2);
+
+    // 6. ChangeDataLayerFinishRequest in 1529 must NOT trigger off-map LevelPlay 200700001
+    // (Wait -> LevelEventWait key release) or flood active quest notifications.
+    crate::network::handlers::inst::handle_change_data_layer_finish_request(
+        &mut h.state,
+        &mut events,
+        ChangeDataLayerFinishRequest { InstId: 1529 },
+    )
+    .expect("change data layer finish");
+    let dl_updates: Vec<UpdateNodeStatusNotify> = h.drain_decoded(UpdateNodeStatusNotify::MSG_ID);
+    assert!(
+        !dl_updates.iter().any(|u| u.TreeOwnerId == 200_700_001),
+        "off-map LevelPlay 200700001 must not tick inside Instance 1529"
+    );
+    assert!(
+        !dl_updates.iter().any(|u| u.TreeOwnerId == 311_000_000),
+        "ChangeDataLayerFinishRequest must not flood unrelated quests"
+    );
+
+    // 7. TraceQuestRequest Operate=Auto(2) must not steal tracking from active tracked quest,
+    // build_map_mark_info_notify deduplicates MarkIds, PhantomFetterRecommend gives 2..=3 entries,
+    // and RoleDevelopConfigResponse includes Configs.
+    quest::handle_trace_quest_request(
+        &mut h.state,
+        &mut events,
+        TraceQuestRequest {
+            QuestId: 311_000_000,
+            TraceType: 1,
+            Operate: 2,
+        },
+    )
+    .expect("auto trace blocked");
+    quest::handle_trace_quest_request(
+        &mut h.state,
+        &mut events,
+        TraceQuestRequest {
+            QuestId: 311_000_000,
+            TraceType: 1,
+            Operate: 0,
+        },
+    )
+    .expect("none-operate auto trace blocked");
+    assert_eq!(h.state.player_components.quest.info.tracked_quest_id, 880_000_044);
+    for herald_id in [
+        100_200_001,
+        108_000_001,
+        110_800_001,
+        110_900_001,
+        111_000_001,
+        111_100_001,
+    ] {
+        assert!(
+            !activity::is_activity_unlocked(None, &h.state.assets, herald_id),
+            "Herald/Newcomer activity {herald_id} must remain locked/disabled"
+        );
+    }
+    let acts = activity::build_activity_list(
+        &h.state.assets,
+        &h.state.player_components.progress,
+        None,
+    );
+    for herald_id in [
+        100_200_001,
+        108_000_001,
+        110_800_001,
+        110_900_001,
+        111_000_001,
+        111_100_001,
+    ] {
+        assert!(
+            !acts.iter().any(|a| a.Id == herald_id),
+            "Herald/Newcomer activity {herald_id} must not appear in build_activity_list"
+        );
+    }
+    let mut show_seen = std::collections::HashSet::new();
+    let mm_notify: MapMarkInfoNotify = sonoro_gamesv_logic::handlers::misc::build_map_mark_info_notify(
+        &h.state.assets,
+        &h.state.player_components.map,
+    );
+    assert!(mm_notify.ShowMarkIds.iter().all(|m| show_seen.insert(m.MarkId)));
+    let fetter_rec = echo::presets::handle_phantom_fetter_recommend_request(
+        &mut h.state,
+        PhantomFetterRecommendRequest { RoleId: 1402 },
+    )
+    .expect("phantom fetter rec");
+    let fgroups = &fetter_rec.PhantomFetterRecommendInfos[0].PhantomFetterGroupInfos;
+    assert!((2..=3).contains(&fgroups.len()));
+    let role_dev = minimal::handle_role_develop_config_request(
+        &mut h.state,
+        RoleDevelopConfigRequest::default(),
+    )
+    .expect("role develop config");
+    assert!(role_dev.Configs.is_some());
+
+    // Also verify EnterLevelPlayNotify for 880000003 + batched spawn preserves JSPatch source map call.
+    h.state.scene.as_mut().unwrap().entities.clear();
+    let rt = h.state.as_runtime(&mut events, None);
+    let sc = rt.scene.as_mut().unwrap();
+    let handles = vec![
+        entity_cmd::spawn_with_location_and_progress(
+            rt.events,
+            sc,
+            rt.fs,
+            rt.assets,
+            rt.sink,
+            rt.basic_comp,
+            880_850_006,
+            Some(false),
+            Some(false),
+            Some(900),
+            None,
+            true,
+            &rt.progress_comp.info,
+            false,
+            true,
+        )
+        .unwrap()
+        .unwrap(),
+        entity_cmd::spawn_with_location_and_progress(
+            rt.events,
+            sc,
+            rt.fs,
+            rt.assets,
+            rt.sink,
+            rt.basic_comp,
+            880_000_004,
+            Some(false),
+            Some(false),
+            Some(900),
+            None,
+            true,
+            &rt.progress_comp.info,
+            false,
+            true,
+        )
+        .unwrap()
+        .unwrap(),
+    ];
+    let batch: Vec<_> = handles
+        .iter()
+        .zip([880_850_006i64, 880_000_004i64])
+        .map(|(&hnd, eid)| (hnd, eid, 900))
+        .collect();
+    let published = entity_cmd::publish_world_spawn_batch(sc, rt.fs, rt.assets, rt.sink, &batch);
+    assert_eq!(published.len(), 2);
+    let batch_msg_ids = h.drain_push_msg_ids();
+    assert_eq!(
+        batch_msg_ids
+            .iter()
+            .filter(|&&id| id == EntityAddNotify::MSG_ID)
+            .count(),
+        1
+    );
+    assert_eq!(
+        batch_msg_ids
+            .iter()
+            .filter(|&&id| id == JSPatchNotify::MSG_ID)
+            .count(),
+        1
+    );
+    // Also verify pre-spawn DoInteract registration embeds DynamicInteractInfos into EntityAddNotify
+    // without emitting EntityRemoveDynamicInteractNotify flicker on re-sync.
+    h.state.scene.as_mut().unwrap().entities.clear();
+    h.state
+        .scene
+        .as_mut()
+        .unwrap()
+        .dynamic_interact_options
+        .clear();
+    let rt = h.state.as_runtime(&mut events, None);
+    let sc = rt.scene.as_mut().unwrap();
+    let dyn_handle = entity_cmd::spawn_with_location_and_progress(
+        rt.events,
+        sc,
+        rt.fs,
+        rt.assets,
+        rt.sink,
+        rt.basic_comp,
+        880_000_004,
+        Some(false),
+        Some(false),
+        Some(900),
+        None,
+        true,
+        &rt.progress_comp.info,
+        false,
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    let do_interact_node = sonoro_gamesv_data::lazy_node_store::NodeEntry {
+        id: 77,
+        parent_id: 1,
+        node_type: "ChildQuest".to_string(),
+        count: 1,
+        reward_id: 0,
+        data: serde_json::json!({
+            "Condition": {
+                "Type": "DoInteract",
+                "AddOptions": [{
+                    "EntityId": 880_000_004i64,
+                    "Option": {
+                        "Guid": "audit115-dyn-guid",
+                        "TidContent": "TestInteract",
+                        "Type": { "Type": "Actions", "Actions": [] }
+                    }
+                }]
+            }
+        }),
+    };
+    quest_engine::push_do_interact_options_for_bt_node_mode(
+        sc,
+        rt.sink,
+        BtType::BtTypeQuest,
+        880_000_044,
+        &do_interact_node,
+        Some(880_000_004),
+        false,
+    )
+    .expect("pre-spawn register dynamic interact");
+    let published_dyn =
+        entity_cmd::publish_world_spawn_batch(sc, rt.fs, rt.assets, rt.sink, &[(dyn_handle, 880_000_004, 900)]);
+    assert_eq!(published_dyn.len(), 1);
+    let dyn_adds: Vec<EntityAddNotify> = h.drain_decoded(EntityAddNotify::MSG_ID);
+    let dyn_pb = dyn_adds
+        .iter()
+        .flat_map(|n| n.EntityPbs.iter())
+        .find(|pb| pb.Id == dyn_handle.net_id)
+        .expect("EntityPb in EntityAddNotify");
+    let embedded_dyn = dyn_pb.ComponentPbs.iter().any(|c| {
+        matches!(
+            &c.ComponentPb,
+            Some(EntityComponentPbComponentPbOneof::InteractComponent(ic))
+                if ic
+                    .DynamicInteractInfos
+                    .iter()
+                    .any(|di| di.OptionGuid == b"audit115-dyn-guid")
+        )
+    });
+    assert!(
+        embedded_dyn,
+        "EntityAddNotify must embed DynamicInteractInfo synchronously in InteractComponentPb"
+    );
+
+    let rt = h.state.as_runtime(&mut events, None);
+    let sc = rt.scene.as_mut().unwrap();
+    quest_engine::push_do_interact_options_for_bt_node_mode(
+        sc,
+        rt.sink,
+        BtType::BtTypeQuest,
+        880_000_044,
+        &do_interact_node,
+        Some(880_000_004),
+        true,
+    )
+    .expect("idempotent dynamic interact resync");
+    let resync_msg_ids = h.drain_push_msg_ids();
+    assert!(
+        !resync_msg_ids.contains(&EntityRemoveDynamicInteractNotify::MSG_ID),
+        "idempotent DoInteract sync must not emit EntityRemoveDynamicInteractNotify"
+    );
+    assert!(
+        !resync_msg_ids.contains(&EntityAddDynamicInteractNotify::MSG_ID),
+        "idempotent DoInteract sync must not duplicate EntityAddDynamicInteractNotify"
+    );
+    let _ = EnterLevelPlayNotify::MSG_ID;
 }

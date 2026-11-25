@@ -228,15 +228,18 @@ pub fn evaluate(
         transition.To,
         false,
     );
-    let result = if condition.IsClient.unwrap_or(false) {
+    if condition.IsClient.unwrap_or(false) {
         let key = ConditionKey {
             fsm_id: state_hierarchy::canonical_state(comp, fsm_id),
             from: resolved.from,
             to: resolved.to,
             index: condition.Index,
         };
-        comp.pass_pool.contains(&key)
-    } else if condition.Type == Some(4) {
+        // `FsmConditionPassPush.Value` is already `ResultSelf == !Reverse` on the client
+        // (AiStateMachineCondition.Result), so do not apply `condition.Reverse` a second time.
+        return comp.pass_pool.contains(&key);
+    }
+    let result = if condition.Type == Some(4) {
         true
     } else if condition.Type == Some(20) {
         comp.in_hate
@@ -601,5 +604,64 @@ fn compare_values(lhs: i32, rhs: i32, op: i32) -> bool {
         4 => lhs > rhs,
         5 => lhs >= rhs,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use sonoro_gamesv_data::fsm_graph_registry::Graph;
+
+    use super::*;
+
+    #[test]
+    fn client_condition_does_not_reapply_reverse_on_pass_pool() {
+        let mut comp = FsmComponent::from_graph(Arc::new(Graph::default()), 0).unwrap();
+        let transition = StateMachineTransition {
+            From: 10013,
+            To: 10015,
+            ..Default::default()
+        };
+        let cond = StateMachineCondition {
+            Index: 0,
+            Reverse: true,
+            IsClient: Some(true),
+            ..Default::default()
+        };
+        let ctx = EvalContext::default();
+
+        // When client has NOT sent a passing FsmConditionPassPush, pass_pool is empty:
+        // must evaluate to false even when Reverse is true.
+        assert!(!evaluate(&comp, 10007, &transition, &[cond.clone()], &cond, &ctx, 10013, 0));
+
+        // When client HAS sent FsmConditionPassPush { Value = true } (which already includes Reverse),
+        // pass_pool contains the key and must evaluate to true.
+        comp.pass_pool.push(ConditionKey {
+            fsm_id: 10007,
+            from: 10013,
+            to: 10015,
+            index: 0,
+        });
+        assert!(evaluate(&comp, 10007, &transition, &[cond.clone()], &cond, &ctx, 10013, 0));
+
+        // Server-evaluated conditions still apply Reverse normally.
+        let server_cond = StateMachineCondition {
+            Index: 0,
+            Reverse: true,
+            IsClient: Some(false),
+            CondTrue: Some(Default::default()),
+            ..Default::default()
+        };
+        assert!(!evaluate(
+            &comp,
+            10007,
+            &transition,
+            &[server_cond.clone()],
+            &server_cond,
+            &ctx,
+            10013,
+            0,
+        ));
     }
 }

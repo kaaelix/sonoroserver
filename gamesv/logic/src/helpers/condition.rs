@@ -2052,20 +2052,21 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
             is_loaded == want_load
         }
         "CompareLift" => {
-            let Some(eid) = json_int(obj.get("EntityId")) else {
+            let eid = json_int(obj.get("EntityId")).unwrap_or_else(|| {
+                if obj.get("IsSelf").and_then(Value::as_bool) == Some(true) {
+                    ctx.self_entity_config_id
+                } else {
+                    0
+                }
+            });
+            if eid <= 0 {
                 return false;
-            };
+            }
             let Some(want_loc) = json_int(obj.get("Location")) else {
                 return false;
             };
             let cmp = obj.get("Compare").and_then(Value::as_str).unwrap_or("Eq");
-            let Some(pc) = ctx.progress_comp else {
-                return false;
-            };
-            let cur_loc = pc
-                .info
-                .get_key_int(&format!("lift_target:{eid}"))
-                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            let cur_loc = resolve_compare_lift_location(ctx, eid);
             compare_ints(cur_loc, want_loc, cmp)
         }
         "CheckTreasureBeenClaimed" => json_int(obj.get("EntityId"))
@@ -4906,6 +4907,46 @@ fn eval_player_state_restriction(ctx: &EvalContext<'_>, restriction_id: i32) -> 
         150001 => !in_skill,
         _ => !in_skill,
     }
+}
+
+fn resolve_compare_lift_location(ctx: &EvalContext<'_>, eid: i32) -> i32 {
+    if let Some(pc) = ctx.progress_comp {
+        let lift_target = pc.info.get_key_int(&format!("lift_target:{eid}"));
+        if lift_target > 0 {
+            return lift_target.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        }
+        let elevator = pc.info.get_key_int(&format!("elevator:{eid}"));
+        if elevator > 0 {
+            return elevator.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        }
+    }
+    if let Some(scene) = ctx.scene
+        && let Some(nid) = scene.find_entity_net_id_by_config_id(eid)
+        && let Some(ent) = scene.entity(nid)
+        && let Some(lift) = ent.world_item.lift
+        && lift.location > 0
+    {
+        return lift.location;
+    }
+    if let Some(assets) = ctx.assets {
+        let inst_id = ctx
+            .scene
+            .map(|s| s.instance_id)
+            .filter(|&id| id > 0)
+            .unwrap_or(8);
+        if let Some(lcfg) = assets.find_level_entity(inst_id, i64::from(eid)) {
+            let mut comps = lcfg.ComponentsData.clone();
+            if let Some(tpl) = assets.find_template_config(&lcfg.BlueprintType) {
+                tpl.ComponentsData.merge_into(&mut comps);
+            }
+            if let Some(lc) = comps.LiftComponent
+                && !lc.Disabled.unwrap_or(false)
+            {
+                return lc.InitialFloor.unwrap_or(1);
+            }
+        }
+    }
+    0
 }
 
 fn resolve_entity_world_rot(ctx: &EvalContext<'_>, cfg_id_raw: i64) -> [f32; 3] {

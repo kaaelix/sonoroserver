@@ -98,6 +98,7 @@ pub struct DynamicInteractOption {
     pub flow_id: i32,
     pub state_id: i32,
     pub actions_json: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1422,6 +1423,7 @@ impl Scene {
         flow_id: i32,
         state_id: i32,
         actions_json: &str,
+        text: &str,
     ) {
         self.upsert_dynamic_interact_option_with_bt(
             guid,
@@ -1435,6 +1437,7 @@ impl Scene {
             flow_id,
             state_id,
             actions_json,
+            text,
         );
     }
 
@@ -1452,6 +1455,7 @@ impl Scene {
         flow_id: i32,
         state_id: i32,
         actions_json: &str,
+        text: &str,
     ) {
         if let Some(pos) = self
             .dynamic_interact_options
@@ -1472,6 +1476,7 @@ impl Scene {
             flow_id,
             state_id,
             actions_json: actions_json.to_string(),
+            text: text.to_string(),
         });
     }
 
@@ -1686,6 +1691,8 @@ impl Scene {
     fn remove_entity_state(&mut self, index: usize, net_id: i64) {
         self.clear_fsm_encounter_target_references(net_id);
         self.remove_combine_relations_for_entity(net_id);
+        self.dynamic_interact_options
+            .retain(|o| o.entity_net_id != net_id);
         self.fsm_wakes.cancel_entity(net_id);
         self.unregister_debug_spawn_route(net_id);
         self.active_battle_entities.remove(&net_id);

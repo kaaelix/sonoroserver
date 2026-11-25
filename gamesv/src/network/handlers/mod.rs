@@ -213,6 +213,50 @@ where
     Ok(())
 }
 
+fn run_req_respond_before_events<Req, Resp, F>(
+    state: &mut State,
+    rpc_id: u16,
+    msg_id: u16,
+    payload: &[u8],
+    fail_fn: fn() -> Resp,
+    f: F,
+) -> Result<(), DispatchError>
+where
+    Req: PbMessage,
+    Resp: PbMessage,
+    F: FnOnce(&mut State, &mut EventQueue, Req) -> Result<Resp, String>,
+{
+    let req = match Req::decode(payload) {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::error!("failed to decode request msg_id={msg_id}: {err}");
+            if rpc_id != 0
+                && let Some(resp_id) = response_id_for(msg_id)
+            {
+                let _ = state.conn.respond_with_msg_id(rpc_id, resp_id, &fail_fn());
+            }
+            return Ok(());
+        }
+    };
+
+    let mut events = EventQueue::new();
+    let resp = match f(state, &mut events, req) {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::error!("handler failed for msg_id={msg_id}: {err}");
+            fail_fn()
+        }
+    };
+    if let Some(resp_id) = response_id_for(msg_id) {
+        state
+            .conn
+            .respond_with_msg_id(rpc_id, resp_id, &resp)
+            .map_err(|_| DispatchError::Closed)?;
+    }
+    drain_event_queue_best_effort(&mut events, state);
+    Ok(())
+}
+
 fn run_push<Req, F>(state: &mut State, msg_id: u16, payload: &[u8], f: F) -> Result<(), DispatchError>
 where
     Req: PbMessage,
@@ -236,6 +280,19 @@ where
 macro_rules! req_ev {
     ($state:expr, $rpc:expr, $msg_id:expr, $payload:expr, $req:ty, $resp:ty, $func:expr) => {
         run_req::<$req, $resp, _>(
+            $state,
+            $rpc,
+            $msg_id,
+            $payload,
+            <$resp as sonoro_proto::FailResponse>::fail_response,
+            $func,
+        )
+    };
+}
+
+macro_rules! req_ev_fast {
+    ($state:expr, $rpc:expr, $msg_id:expr, $payload:expr, $req:ty, $resp:ty, $func:expr) => {
+        run_req_respond_before_events::<$req, $resp, _>(
             $state,
             $rpc,
             $msg_id,
@@ -3294,7 +3351,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::ApplySceneClientEntityIncIdResponse,
             scene::handle_apply_scene_client_entity_inc_id_request
         ),
-        pb::EntityInteractRequest::MSG_ID => req_ev!(
+        pb::EntityInteractRequest::MSG_ID => req_ev_fast!(
             state,
             rpc_id,
             msg_id,
@@ -3339,7 +3396,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::AnimalDestroyResponse,
             scene::handle_animal_destroy_request
         ),
-        pb::EntityDynamicInteractRequest::MSG_ID => req_ev!(
+        pb::EntityDynamicInteractRequest::MSG_ID => req_ev_fast!(
             state,
             rpc_id,
             msg_id,

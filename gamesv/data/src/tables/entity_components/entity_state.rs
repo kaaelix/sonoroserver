@@ -19,4 +19,6 @@ pub struct EntityStateComponent {
     pub State: Option<String>,
     #[serde(default)]
     pub LockConfig: Option<EntityStateComponentLockConfig>,
+    #[serde(default)]
+    pub StateChangeBehaviors: Vec<serde_json::Value>,
 }

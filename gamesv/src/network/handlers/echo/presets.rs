@@ -457,13 +457,51 @@ pub fn build_fetter_recommends(
             .collect();
     }
 
-    let groups: Vec<PhantomFetterGroupInfo> = selected_group_ids
-        .iter()
-        .map(|&group_id| PhantomFetterGroupInfo {
-            PhantomFetterGroupId: group_id,
-            CountNeed: 5,
-        })
-        .collect();
+    let mut groups: Vec<PhantomFetterGroupInfo> = Vec::new();
+    for &group_id in &selected_group_ids {
+        let mut counts: Vec<i32> = assets
+            .tables
+            .phantom_fetter_group
+            .get_data_by_id(&group_id)
+            .map(|fg| fg.FetterMap.keys().copied().filter(|&k| k > 0).collect())
+            .unwrap_or_default();
+        counts.sort_unstable();
+        if counts.is_empty() {
+            continue;
+        }
+        for count in counts {
+            groups.push(PhantomFetterGroupInfo {
+                PhantomFetterGroupId: group_id,
+                CountNeed: count,
+            });
+            if groups.len() >= 3 {
+                break;
+            }
+        }
+        if groups.len() >= 3 {
+            break;
+        }
+    }
+    if groups.len() < 2 {
+        for fg in &assets.tables.phantom_fetter_group.items {
+            let Some(&first_count) = fg.FetterMap.keys().filter(|&&k| k > 0).min() else {
+                continue;
+            };
+            if groups
+                .iter()
+                .any(|g| g.PhantomFetterGroupId == fg.Id && g.CountNeed == first_count)
+            {
+                continue;
+            }
+            groups.push(PhantomFetterGroupInfo {
+                PhantomFetterGroupId: fg.Id,
+                CountNeed: first_count,
+            });
+            if groups.len() >= 2 {
+                break;
+            }
+        }
+    }
 
     let mut seen_monsters = HashSet::new();
     let mut main_phantoms = Vec::new();

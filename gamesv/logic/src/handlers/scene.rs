@@ -1095,18 +1095,7 @@ pub fn notify_join_scene<S: PushSink + ?Sized>(
     scene.save(fs)?;
 
     let mut active_quest_targets = HashSet::new();
-    for aq in &quest_comp.info.active_quests {
-        let Ok(nodes) = assets.quest_nodes.get_owner_nodes(aq.quest_id) else {
-            continue;
-        };
-        for &nid in &aq.active_nodes {
-            if let Some(node) = nodes.iter().find(|n| n.id == nid) {
-                for eid in quest_engine::extract_node_target_entity_ids(node) {
-                    active_quest_targets.insert(eid);
-                }
-            }
-        }
-    }
+    collect_active_target_entity_ids(assets, quest_comp, Some(progress_comp), &mut active_quest_targets);
 
     let entity_snap: Vec<(i64, i32, EntityType)> = scene
         .entities
@@ -1598,7 +1587,7 @@ pub fn handle_spatial_spawns_check<S: PushSink + ?Sized>(
         role_comp,
         loc,
         20000.0,
-        35,
+        64,
         now_millis(),
     )
 }
@@ -1715,7 +1704,7 @@ fn is_priority_world_entity(assets: &Assets, cfg: &LevelEntityConfig) -> bool {
     let Some(bp) = assets.indexes.find_blueprint_config(&assets.tables, &cfg.BlueprintType) else {
         return false;
     };
-    if bp.EntityLogic == EntityLogic::Vehicle {
+    if bp.EntityLogic == EntityLogic::Vehicle || bp.EntityLogic == EntityLogic::Npc {
         return true;
     }
     matches!(
@@ -1725,6 +1714,7 @@ fn is_priority_world_entity(assets: &Assets, cfg: &LevelEntityConfig) -> bool {
             | BpEntityType::ChallengeInteract
             | BpEntityType::DungeonEntry
             | BpEntityType::DungeonEntryWithTrigger
+            | BpEntityType::ElementalNpc
             | BpEntityType::ExploreSkillGroupInteractor
             | BpEntityType::ExploreSkillInteractor
             | BpEntityType::GameplayInteractGear
@@ -1740,6 +1730,11 @@ fn is_priority_world_entity(assets: &Assets, cfg: &LevelEntityConfig) -> bool {
             | BpEntityType::CableWayHook
             | BpEntityType::Lift
             | BpEntityType::Lift2
+            | BpEntityType::Npc
+            | BpEntityType::Npc2
+            | BpEntityType::NpcMonster
+            | BpEntityType::PasserbyNpc
+            | BpEntityType::RewardNpc
             | BpEntityType::SequenceLift
             | BpEntityType::Portal
             | BpEntityType::NoRenderPortal
@@ -1747,12 +1742,15 @@ fn is_priority_world_entity(assets: &Assets, cfg: &LevelEntityConfig) -> bool {
             | BpEntityType::MoveNoRenderPortal
             | BpEntityType::SceneAura
             | BpEntityType::SimpleInteract
+            | BpEntityType::SpawnPasserbyNpc
             | BpEntityType::StateSceneItem
             | BpEntityType::TargetGear
             | BpEntityType::TargetGear2
             | BpEntityType::TeleControl
             | BpEntityType::Teleporter
             | BpEntityType::TreasureBox
+            | BpEntityType::TuanziNpc
+            | BpEntityType::VehicleNpc
             | BpEntityType::VehicleSceneItem
             | BpEntityType::VisionTreasureBox
             | BpEntityType::WaterSpout
@@ -1830,22 +1828,26 @@ fn consider_spawn_candidates(
         if dist2 > r2 {
             continue;
         }
-        if let Some(az) = cfg
-            .ComponentsData
-            .BaseInfoComponent
-            .as_ref()
-            .and_then(|bi| bi.AoiZRadius)
+        let cfg_id32 = i32::try_from(cfg.EntityId).unwrap_or(0);
+        let is_quest_target = cfg_id32 > 0 && active_quest_targets.contains(&cfg_id32);
+        let explicitly_shown =
+            cfg_id32 > 0 && quest_info.world.shown_entities.contains(&cfg_id32);
+        if !is_quest_target
+            && !explicitly_shown
+            && let Some(az) = cfg
+                .ComponentsData
+                .BaseInfoComponent
+                .as_ref()
+                .and_then(|bi| bi.AoiZRadius)
             && az > 0
             && dz.abs() > (az as f32)
         {
             continue;
         }
 
-        let cfg_id32 = i32::try_from(cfg.EntityId).unwrap_or(0);
-        let is_quest_target = cfg_id32 > 0 && active_quest_targets.contains(&cfg_id32);
         let is_priority = is_quest_target || is_priority_world_entity(assets, &cfg);
         if is_priority {
-            if priority_buf.len() >= 48 && priority_buf.last().is_some_and(|l| dist2 >= l.dist2) {
+            if priority_buf.len() >= 96 && priority_buf.last().is_some_and(|l| dist2 >= l.dist2) {
                 continue;
             }
         } else if cap > 0
@@ -1865,8 +1867,6 @@ fn consider_spawn_candidates(
         {
             continue;
         }
-        let explicitly_shown =
-            cfg_id32 > 0 && quest_info.world.shown_entities.contains(&cfg_id32);
         if is_blocked_world_entity_config(
             assets,
             quest_info,
@@ -1896,7 +1896,7 @@ fn consider_spawn_candidates(
             dist2,
         };
         if is_priority {
-            insert_spawn_candidate(priority_buf, 48, cand);
+            insert_spawn_candidate(priority_buf, 96, cand);
         } else {
             insert_spawn_candidate(best_buf, cap, cand);
         }
@@ -2046,6 +2046,44 @@ fn is_unlocked_teleporter_entity(
     false
 }
 
+fn collect_active_target_entity_ids(
+    assets: &Assets,
+    quest_comp: &PlayerQuestComponent,
+    progress_comp: Option<&PlayerProgressComponent>,
+    out: &mut HashSet<i32>,
+) {
+    for aq in &quest_comp.info.active_quests {
+        let Ok(nodes) = assets.quest_nodes.get_owner_nodes(aq.quest_id) else {
+            continue;
+        };
+        for &nid in &aq.active_nodes {
+            if let Some(node) = nodes.iter().find(|n| n.id == nid) {
+                for eid in quest_engine::extract_node_target_entity_ids(node) {
+                    out.insert(eid);
+                }
+            }
+        }
+    }
+    crate::helpers::level_play::collect_active_target_entity_ids(
+        assets,
+        quest_comp,
+        progress_comp,
+        out,
+    );
+}
+
+struct PendingWorldSpawn {
+    handle: crate::events::EntityHandle,
+    entity_id: i64,
+    source_map_id: i32,
+    cfg_id: Option<i32>,
+    net_id: Option<i64>,
+    gravity_type: Option<GravityFlipType>,
+    state_tag_upd: Option<crate::scene::StateTagUpdate>,
+    lift_target_floor: Option<i32>,
+    is_lift: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
     events: &mut EventQueue,
@@ -2072,18 +2110,7 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
     }
 
     let mut active_quest_targets = HashSet::new();
-    for aq in &quest_comp.info.active_quests {
-        let Ok(nodes) = assets.quest_nodes.get_owner_nodes(aq.quest_id) else {
-            continue;
-        };
-        for &nid in &aq.active_nodes {
-            if let Some(node) = nodes.iter().find(|n| n.id == nid) {
-                for eid in quest_engine::extract_node_target_entity_ids(node) {
-                    active_quest_targets.insert(eid);
-                }
-            }
-        }
-    }
+    collect_active_target_entity_ids(assets, quest_comp, Some(progress_comp), &mut active_quest_targets);
 
     if need_evict {
         evict_distant_ambient_entities(
@@ -2188,6 +2215,7 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
         );
     }
 
+    let mut pending = Vec::new();
     for pool in [priority_buf, best_buf] {
         for cand in pool {
             if scene.entities.len() >= 240 {
@@ -2200,11 +2228,34 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
             let is_qt = cfg_id32_hint > 0 && active_quest_targets.contains(&cfg_id32_hint);
             let exp_shown = cfg_id32_hint > 0
                 && quest_comp.info.world.shown_entities.contains(&cfg_id32_hint);
-            let saved_location = if cfg_id32_hint > 0 {
+            let mut merged_comps = cfg.ComponentsData.clone();
+            if let Some(tpl) = assets.find_template_config(&cfg.BlueprintType) {
+                tpl.ComponentsData.merge_into(&mut merged_comps);
+            }
+            let active_lift = merged_comps
+                .LiftComponent
+                .as_ref()
+                .filter(|lc| !lc.Disabled.unwrap_or(false));
+            let is_lift = active_lift.is_some();
+            let lift_target_floor = active_lift.and_then(|lc| {
+                let floor = opt_key_int(&progress_comp.info, &format!("lift_target:{}", cfg.EntityId))
+                    .filter(|&v| v > 0)
+                    .or_else(|| {
+                        opt_key_int(&progress_comp.info, &format!("elevator:{}", cfg.EntityId))
+                            .filter(|&v| v > 0)
+                    })
+                    .and_then(|v| i32::try_from(v).ok())
+                    .unwrap_or_else(|| lc.InitialFloor.unwrap_or(1));
+                (floor > 1).then_some(floor)
+            });
+            let saved_location = if is_lift {
+                None
+            } else if cfg_id32_hint > 0 {
                 stored_world_location(&progress_comp.info, cfg_id32_hint)
             } else {
                 None
             };
+            let initial_location = saved_location.unwrap_or([cand.x, cand.y, cand.z]);
             let Ok(Some(spawned_ent)) = entity_cmd::spawn_with_location_and_progress(
                 events,
                 scene,
@@ -2216,7 +2267,7 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
                 Some(false),
                 Some(false),
                 Some(cfg.MapId),
-                Some(saved_location.unwrap_or([cand.x, cand.y, cand.z])),
+                Some(initial_location),
                 true,
                 &progress_comp.info,
                 !(exp_shown || is_qt),
@@ -2236,120 +2287,169 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
                     cfg_id,
                     net_id,
                 )?;
+                if lift_target_floor.is_some()
+                    && let Some(storage) = scene.entity_mut(net_id)
+                {
+                    storage.world_item.lift = Some(LiftComponent { location: 1 });
+                }
+                let mut state_tag_upd = None;
                 if let Some(state_name) =
                     saved_spawn_state(assets, quest_comp, map_comp, map_id, cfg.EntityId)
-                {
-                    let _ = scene.update_entity_state_tag(
-                        &assets.tables.gameplay_tag_remap,
-                        net_id,
-                        state_name,
-                    );
-                }
-                if entity_cmd::publish_world_spawn(
-                    scene,
-                    fs,
-                    assets,
-                    sink,
-                    spawned_ent,
-                    cfg.EntityId,
-                    cfg.MapId,
-                )
-                .is_err()
-                {
-                    continue;
-                }
-                push_stored_world_transform(scene, sink, &progress_comp.info, cfg_id, net_id);
-                if let Some(location) = opt_key_int(&progress_comp.info, &format!("lift_target:{cfg_id}"))
-                    .and_then(|v| i32::try_from(v).ok())
-                {
-                    sink.push(
-                        ElevatorMoveNotify::MSG_ID,
-                        &ElevatorMoveNotify {
-                            EntityId: net_id,
-                            Location: location,
-                            MoveType: None,
-                        },
-                    );
-                }
-                push_stored_elevator_state(sink, &progress_comp.info, cfg_id, net_id);
-                if let Some(flip_type) = gravity_type {
-                    sink.push(
-                        GravityFlipUpdateTypeNotify::MSG_ID,
-                        &GravityFlipUpdateTypeNotify {
-                            NewGravityFlipType: Some(flip_type),
-                            EntityId: net_id,
-                        },
-                    );
-                }
-                if let Some(storage) = scene.entity(net_id) {
-                    if let Some(move_spline) = &storage.world_item.move_spline {
-                        sink.push(
-                            MoveSplineStatusNotify::MSG_ID,
-                            &MoveSplineStatusNotify {
-                                SceneItemRuntimeData: move_spline.runtime_data.clone(),
-                                MoveStatus: move_spline.move_status,
-                                EntityId: net_id,
-                                SplineEntityId: move_spline.spline_entity_id,
-                                MoveSplineConfig: move_spline.move_spline_config.clone(),
-                            },
-                        );
-                    }
-                    if let Some(move_to) = storage.world_item.move_to_point {
-                        sink.push(
-                            SceneItemMoveTargetNotify::MSG_ID,
-                            &SceneItemMoveTargetNotify {
-                                MoveInfo: Some(SceneItemMoveTargetInfo {
-                                    EntityId: net_id,
-                                    Location: Some(Vector {
-                                        X: move_to.target_pos[0],
-                                        Y: move_to.target_pos[1],
-                                        Z: move_to.target_pos[2],
-                                    }),
-                                    MoveTime: move_to.move_time,
-                                    StayTime: move_to.stay_time,
-                                    MaxSpeed: move_to.max_speed,
-                                    Acceleration: move_to.acceleration,
-                                }),
-                            },
-                        );
-                    }
-                }
-                quest_actions::sync_persisted_vehicle_npc_links(
-                    scene,
-                    progress_comp,
-                    sink,
-                    Some(cfg_id),
-                );
-            }
-
-            if i32::try_from(cfg.EntityId).is_ok() {
-                if let Some(state_name) =
-                    saved_spawn_state(assets, quest_comp, map_comp, map_id, cfg.EntityId)
-                    && let Ok(cfg_id32) = i32::try_from(cfg.EntityId)
-                    && let Some(nid) = scene.find_entity_net_id_by_config_id(cfg_id32)
                     && let Some(upd) = scene.update_entity_state_tag(
                         &assets.tables.gameplay_tag_remap,
-                        nid,
+                        net_id,
                         state_name,
                     )
                     && upd.old_tag_id != upd.new_tag_id
                 {
-                    quest_actions::emit_entity_state_tag_update_checked(
-                        scene,
-                        Some(assets),
-                        sink,
-                        nid,
-                        upd,
-                    );
+                    state_tag_upd = Some(upd);
                 }
-                quest_engine::sync_dynamic_interact_options_for_entity(
+                quest_engine::register_dynamic_interact_options_for_entity(
                     scene,
                     assets,
-                    sink,
                     &quest_comp.info,
                     Some(progress_comp),
                     cfg.EntityId,
                 )?;
+                pending.push(PendingWorldSpawn {
+                    handle: spawned_ent,
+                    entity_id: cfg.EntityId,
+                    source_map_id: cfg.MapId,
+                    cfg_id: Some(cfg_id),
+                    net_id: Some(net_id),
+                    gravity_type,
+                    state_tag_upd,
+                    lift_target_floor,
+                    is_lift,
+                });
+            } else {
+                pending.push(PendingWorldSpawn {
+                    handle: spawned_ent,
+                    entity_id: cfg.EntityId,
+                    source_map_id: cfg.MapId,
+                    cfg_id: None,
+                    net_id: None,
+                    gravity_type: None,
+                    state_tag_upd: None,
+                    lift_target_floor,
+                    is_lift,
+                });
+            }
+        }
+    }
+
+    let batch_items: Vec<(crate::events::EntityHandle, i64, i32)> = pending
+        .iter()
+        .map(|p| (p.handle, p.entity_id, p.source_map_id))
+        .collect();
+    let published_handles: HashSet<i64> = entity_cmd::publish_world_spawn_batch(
+        scene,
+        fs,
+        assets,
+        sink,
+        &batch_items,
+    )
+    .into_iter()
+    .map(|h| h.net_id)
+    .collect();
+
+    for item in pending {
+        if !published_handles.contains(&item.handle.net_id) {
+            continue;
+        }
+        if let (Some(cfg_id), Some(net_id)) = (item.cfg_id, item.net_id) {
+            if !item.is_lift {
+                push_stored_world_transform(scene, sink, &progress_comp.info, cfg_id, net_id);
+            }
+            if let Some(location) = item.lift_target_floor {
+                if let Some(storage) = scene.entity_mut(net_id) {
+                    storage.world_item.lift = Some(LiftComponent { location });
+                }
+                sink.push(
+                    ElevatorMoveNotify::MSG_ID,
+                    &ElevatorMoveNotify {
+                        EntityId: net_id,
+                        Location: location,
+                        MoveType: Some(sonoro_proto::pb::LiftMoveTypePb {
+                            Type: Some(sonoro_proto::enums::LiftMoveType::CustomSpeed),
+                            CustomSpeed: Some(sonoro_proto::pb::LiftMoveTypeCustomSpeedPb {
+                                TotalTime: 0.01,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                    },
+                );
+            } else if !item.is_lift
+                && let Some(location) = opt_key_int(&progress_comp.info, &format!("lift_target:{cfg_id}"))
+                    .and_then(|v| i32::try_from(v).ok())
+            {
+                sink.push(
+                    ElevatorMoveNotify::MSG_ID,
+                    &ElevatorMoveNotify {
+                        EntityId: net_id,
+                        Location: location,
+                        MoveType: None,
+                    },
+                );
+            }
+            push_stored_elevator_state(sink, &progress_comp.info, cfg_id, net_id);
+            if let Some(flip_type) = item.gravity_type {
+                sink.push(
+                    GravityFlipUpdateTypeNotify::MSG_ID,
+                    &GravityFlipUpdateTypeNotify {
+                        NewGravityFlipType: Some(flip_type),
+                        EntityId: net_id,
+                    },
+                );
+            }
+            if let Some(storage) = scene.entity(net_id) {
+                if let Some(move_spline) = &storage.world_item.move_spline {
+                    sink.push(
+                        MoveSplineStatusNotify::MSG_ID,
+                        &MoveSplineStatusNotify {
+                            SceneItemRuntimeData: move_spline.runtime_data.clone(),
+                            MoveStatus: move_spline.move_status,
+                            EntityId: net_id,
+                            SplineEntityId: move_spline.spline_entity_id,
+                            MoveSplineConfig: move_spline.move_spline_config.clone(),
+                        },
+                    );
+                }
+                if let Some(move_to) = storage.world_item.move_to_point {
+                    sink.push(
+                        SceneItemMoveTargetNotify::MSG_ID,
+                        &SceneItemMoveTargetNotify {
+                            MoveInfo: Some(SceneItemMoveTargetInfo {
+                                EntityId: net_id,
+                                Location: Some(Vector {
+                                    X: move_to.target_pos[0],
+                                    Y: move_to.target_pos[1],
+                                    Z: move_to.target_pos[2],
+                                }),
+                                MoveTime: move_to.move_time,
+                                StayTime: move_to.stay_time,
+                                MaxSpeed: move_to.max_speed,
+                                Acceleration: move_to.acceleration,
+                            }),
+                        },
+                    );
+                }
+            }
+            quest_actions::sync_persisted_vehicle_npc_links(
+                scene,
+                progress_comp,
+                sink,
+                Some(cfg_id),
+            );
+            if let Some(upd) = item.state_tag_upd {
+                quest_actions::emit_entity_state_tag_update_checked(
+                    scene,
+                    Some(assets),
+                    sink,
+                    net_id,
+                    upd,
+                );
             }
         }
     }

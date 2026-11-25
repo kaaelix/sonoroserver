@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::io;
 
 use serde_json::{Map, Value};
@@ -584,6 +585,27 @@ pub fn sync_dynamic_interact_options_for_entity<S: PushSink + ?Sized>(
     progress_comp: Option<&PlayerProgressComponent>,
     cfg_id: i64,
 ) -> io::Result<()> {
+    sync_dynamic_interact_options_for_entity_mode(
+        scene,
+        assets,
+        sink,
+        quest_info,
+        progress_comp,
+        cfg_id,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn sync_dynamic_interact_options_for_entity_mode<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    assets: &Assets,
+    sink: &mut S,
+    quest_info: &sonoro_gamesv_fs::quest_info::QuestInfo,
+    progress_comp: Option<&PlayerProgressComponent>,
+    cfg_id: i64,
+    push_notifies: bool,
+) -> io::Result<()> {
     if cfg_id <= 0 {
         return Ok(());
     }
@@ -598,13 +620,14 @@ pub fn sync_dynamic_interact_options_for_entity<S: PushSink + ?Sized>(
             if !is_lp_node_active(progress_comp, lp_id, node.id) {
                 continue;
             }
-            quest_engine::push_do_interact_options_for_bt_node(
+            quest_engine::push_do_interact_options_for_bt_node_mode(
                 scene,
                 sink,
                 BtType::BtTypeLevelPlay,
                 lp_id,
                 node,
                 Some(cfg_id),
+                push_notifies,
             )?;
         }
     }
@@ -2682,6 +2705,103 @@ pub fn on_fail_timer_due<S: PushSink + ?Sized>(
     Ok(true)
 }
 
+pub fn collect_active_target_entity_ids(
+    assets: &Assets,
+    quest_comp: &PlayerQuestComponent,
+    progress_comp: Option<&PlayerProgressComponent>,
+    out: &mut HashSet<i32>,
+) {
+    for &lp_id in &quest_comp.info.progress.entered_level_plays {
+        if quest_comp.info.completed_level_plays.contains(&lp_id) {
+            continue;
+        }
+        let Ok(nodes) = assets.level_play_nodes.get_owner_nodes(lp_id) else {
+            continue;
+        };
+        for node in nodes.iter() {
+            if !is_lp_node_active(progress_comp, lp_id, node.id) {
+                continue;
+            }
+            for eid in quest_engine::extract_node_target_entity_ids(node) {
+                out.insert(eid);
+            }
+        }
+    }
+}
+
+fn parse_ref_entity_id(raw: &str) -> Option<i32> {
+    let trimmed = raw.trim();
+    if let Ok(eid) = trimmed.parse::<i32>() {
+        return (eid > 0).then_some(eid);
+    }
+    let (_, tail) = trimmed.rsplit_once('_')?;
+    let eid = tail.parse::<i32>().ok()?;
+    (eid > 0).then_some(eid)
+}
+
+fn dungeon_level_play_matches_instance(
+    assets: &Assets,
+    lp: &LevelPlayData,
+    inst_id: i32,
+    map_id: i32,
+) -> bool {
+    if lp.Data.Type != "Dungeon" || (lp.Data.Id <= 0 && lp.LevelPlayId <= 0) {
+        return false;
+    }
+    if lp.Data.InstanceId == inst_id {
+        return true;
+    }
+    if lp.Data.InstanceId != 0 || lp.Data.LevelId != map_id {
+        return false;
+    }
+    lp.Data.Reference.iter().any(|r| {
+        parse_ref_entity_id(r)
+            .and_then(|eid| assets.find_level_entity(map_id, i64::from(eid)))
+            .and_then(|cfg| cfg.ComponentsData.BaseInfoComponent.as_ref().and_then(|bi| bi.PackId))
+            == Some(inst_id)
+    })
+}
+
+pub fn sync_dungeon_level_plays<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+) -> io::Result<()> {
+    let inst_id = ctx.scene.instance_id;
+    if inst_id <= 0 || inst_id == 8 {
+        return Ok(());
+    }
+    let map_id = ctx.assets.resolve_map_config_id(inst_id);
+    let candidates: Vec<LevelPlayData> = ctx
+        .assets
+        .tables
+        .level_play_data
+        .items
+        .iter()
+        .filter(|lp| {
+            let lp_id = lp.LevelPlayId;
+            lp_id > 0
+                && lp.Data.LevelPlayEntityId == 0
+                && !ctx.quest_comp.info.completed_level_plays.contains(&lp_id)
+                && !ctx
+                    .quest_comp
+                    .info
+                    .progress
+                    .entered_level_plays
+                    .contains(&lp_id)
+                && dungeon_level_play_matches_instance(ctx.assets, lp, inst_id, map_id)
+        })
+        .cloned()
+        .collect();
+    let player_pos = current_player_pos(ctx);
+    let mut dirty_entered = false;
+    for lp in candidates {
+        enter_and_start_level_play(ctx, &lp, player_pos, &mut dirty_entered)?;
+    }
+    if dirty_entered {
+        ctx.quest_comp.save(ctx.fs)?;
+    }
+    Ok(())
+}
+
 pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut LevelPlayContext<'_, S>) -> io::Result<()> {
     ensure_active_timers_scheduled(ctx)?;
     let pos = current_player_pos(ctx);
@@ -2731,6 +2851,7 @@ pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut LevelPlayContext<'_, S>) ->
             step_level_play_tree(ctx, lp_id, &nodes, true, pos)?;
         }
     }
+    sync_dungeon_level_plays(ctx)?;
     Ok(())
 }
 
@@ -3498,11 +3619,24 @@ fn evaluate_entered_level_play_trees<S: PushSink + ?Sized>(
         step_level_play_tree(ctx, preferred_lp_id, &nodes, true, None)?;
     }
 
+    let inst_id = ctx.scene.instance_id;
+    let map_id = ctx.assets.resolve_map_config_id(inst_id);
     let entered_snap = ctx.quest_comp.info.progress.entered_level_plays.clone();
     for lp_id in entered_snap {
         if lp_id == preferred_lp_id || ctx.quest_comp.info.completed_level_plays.contains(&lp_id)
         {
             continue;
+        }
+        if let Some(lp) = ctx.assets.tables.level_play_data.get_data_by_id(&lp_id) {
+            if lp.Data.Type == "Dungeon" {
+                if !dungeon_level_play_matches_instance(ctx.assets, &lp, inst_id, map_id) {
+                    continue;
+                }
+            } else if (lp.Data.InstanceId > 0 && lp.Data.InstanceId != inst_id)
+                || (lp.Data.LevelId > 0 && lp.Data.LevelId != map_id)
+            {
+                continue;
+            }
         }
         if let Ok(nodes) = ctx.assets.level_play_nodes.get_owner_nodes(lp_id) {
             step_level_play_tree(ctx, lp_id, &nodes, true, None)?;

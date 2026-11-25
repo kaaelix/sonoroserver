@@ -222,13 +222,19 @@ pub fn build_level_play_info_notify(
 pub fn build_map_mark_info_notify(assets: &Assets, map_comp: &PlayerMapComponent) -> MapMarkInfoNotify {
     let mut show_marks = Vec::new();
     let mut unlock_marks = Vec::new();
+    let mut seen_show = HashSet::new();
+    let mut seen_unlock = HashSet::new();
 
     for &tp_id in &map_comp.info.unlocked_teleporters {
-        unlock_marks.push(tp_id);
-        show_marks.push(MapMarkShowInfo {
-            MarkId: tp_id,
-            ShowFlag: 1,
-        });
+        if seen_unlock.insert(tp_id) {
+            unlock_marks.push(tp_id);
+        }
+        if seen_show.insert(tp_id) {
+            show_marks.push(MapMarkShowInfo {
+                MarkId: tp_id,
+                ShowFlag: 1,
+            });
+        }
     }
 
     for mark in &assets.tables.map_mark.items {
@@ -237,11 +243,15 @@ pub fn build_map_mark_info_notify(assets: &Assets, map_comp: &PlayerMapComponent
         let is_teleporter = mark.ObjectType == 5 || mark.ObjectType == 6;
 
         if is_boss_or_challenge {
-            show_marks.push(MapMarkShowInfo {
-                MarkId: mark.MarkId,
-                ShowFlag: 1,
-            });
-            unlock_marks.push(mark.MarkId);
+            if seen_show.insert(mark.MarkId) {
+                show_marks.push(MapMarkShowInfo {
+                    MarkId: mark.MarkId,
+                    ShowFlag: 1,
+                });
+            }
+            if seen_unlock.insert(mark.MarkId) {
+                unlock_marks.push(mark.MarkId);
+            }
         } else if (!is_teleporter
             && mark.CreateOnStart == 1
             && (mark.FogHide == 0 || map_comp.info.unlocked_fogs.contains(&mark.FogHide)))
@@ -250,10 +260,12 @@ pub fn build_map_mark_info_notify(assets: &Assets, map_comp: &PlayerMapComponent
                 && mark.FogHide != 0
                 && map_comp.info.unlocked_fogs.contains(&mark.FogHide))
         {
-            show_marks.push(MapMarkShowInfo {
-                MarkId: mark.MarkId,
-                ShowFlag: 1,
-            });
+            if seen_show.insert(mark.MarkId) {
+                show_marks.push(MapMarkShowInfo {
+                    MarkId: mark.MarkId,
+                    ShowFlag: 1,
+                });
+            }
         }
     }
 

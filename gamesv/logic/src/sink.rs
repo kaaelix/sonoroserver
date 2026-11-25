@@ -27,3 +27,11 @@ impl PushSink for VecPushSink {
         self.packets.push(OutboundPacket { msg_id, payload });
     }
 }
+
+/// Discards pushed packets when only in-memory scene state synchronization is needed.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopSink;
+
+impl PushSink for NoopSink {
+    fn push_raw(&mut self, _msg_id: u16, _payload: Vec<u8>) {}
+}

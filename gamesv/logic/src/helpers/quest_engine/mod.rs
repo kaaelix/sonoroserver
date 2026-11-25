@@ -38,6 +38,7 @@ pub use triggers::{
     has_async_play_flow_action, is_client_action_name_registered, is_safe_bt_leisure_interact,
     matches_reach_area_pub, node_action_items_pub, push_bt_child_node_status,
     push_bt_level_events_for_type, push_do_interact_options_for_bt_node,
+    push_do_interact_options_for_bt_node_mode, register_dynamic_interact_options_for_entity,
     remove_do_interact_options_for_bt_node, sync_dynamic_interact_options_for_entity,
 };
 
@@ -385,7 +386,23 @@ pub fn on_scene_loading_finish<S: PushSink + ?Sized>(
     reenter_save_blocks_after_login(ctx)?;
     ensure_active_quest_targets_spawned(ctx);
     tree::ensure_active_quest_timers_scheduled(ctx)?;
-    triggers::push_quest_state_notifies(ctx)?;
+    triggers::ensure_tracked_focus_valid(ctx);
+    triggers::sync_scene_current_node(ctx);
+    ctx.sink.push(
+        TraceQuestNotify::MSG_ID,
+        &TraceQuestNotify {
+            QuestId: ctx.quest_comp.info.tracked_quest_id,
+        },
+    );
+    if ctx.quest_comp.info.focus_quest_id > 0 {
+        ctx.sink.push(
+            FocusQuestSetNotify::MSG_ID,
+            &FocusQuestSetNotify {
+                FocusQuestId: ctx.quest_comp.info.focus_quest_id,
+                Reason: Some(QuestFocusReason::Inherit),
+            },
+        );
+    }
     sync_morale_on_scene_load(ctx)?;
 
     let prologue_active = ctx

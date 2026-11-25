@@ -210,16 +210,6 @@ pub fn handle_map_trace_info_request(
     state: &mut State,
     _req: MapTraceInfoRequest,
 ) -> Result<MapTraceInfoResponse, String> {
-    let marks = append_custom_marks(state);
-    if !marks.is_empty() {
-        let _ = state.conn.push_msg(
-            MapMarkInfoNotify::MSG_ID,
-            &MapMarkInfoNotify {
-                InfoList: marks,
-                ..Default::default()
-            },
-        );
-    }
     Ok(MapTraceInfoResponse {
         ErrorCode: Some(ErrorCode::Success),
         MarkIdList: state.player_components.map.info.tracked_mark_ids.clone(),

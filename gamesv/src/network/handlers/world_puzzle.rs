@@ -965,42 +965,6 @@ fn read_json_pos3_offsets(obj: &serde_json::Map<String, Value>) -> [f32; 3] {
     ]
 }
 
-fn resolve_elevator_stay_pos(
-    state: &State,
-    instance_id: i32,
-    config_id: i32,
-    tag_state: i32,
-) -> Option<[f32; 3]> {
-    let lcfg = state
-        .assets
-        .find_level_entity(instance_id, i64::from(config_id))?;
-    let base = entity_world_pos(lcfg.as_ref())?;
-    let mut components = lcfg.ComponentsData.clone();
-    if let Some(tpl) = state.assets.find_template_config(&lcfg.BlueprintType) {
-        tpl.ComponentsData.merge_into(&mut components);
-    }
-    let lift = components.LiftComponent?;
-    let floors = lift.StayPositions.as_array()?;
-    if floors.is_empty() {
-        return None;
-    }
-    let idx = if tag_state >= 1 && (tag_state as usize) <= floors.len() {
-        (tag_state - 1) as usize
-    } else if tag_state >= 0 && (tag_state as usize) < floors.len() {
-        tag_state as usize
-    } else {
-        return None;
-    };
-    let Some(obj) = floors[idx].as_object() else {
-        return Some(base);
-    };
-    let off = gravity::rotate_local_offset_ue(
-        read_json_pos3_offsets(obj),
-        entity_world_rot(lcfg.as_ref()),
-    );
-    Some([base[0] + off[0], base[1] + off[1], base[2] + off[2]])
-}
-
 fn resolve_spline_endpoint_pos(
     state: &State,
     instance_id: i32,
@@ -1236,33 +1200,62 @@ pub fn handle_elevator_state_change_request(
             ErrorCode: Some(ErrorCode::ErrElevatorConfigNotExit),
         });
     }
-    if let Some(new_pos) = resolve_elevator_stay_pos(state, instance_id, config_id, req.TagState) {
-        let _ = persist_world_entity_transform(state, req.EntityId, new_pos, None)?;
-    }
+    let _ = instance_id;
+    let prev_location = state
+        .scene
+        .as_ref()
+        .and_then(|s| s.net_id_map.get(&req.EntityId).copied())
+        .and_then(|idx| state.scene.as_ref()?.entities[idx].world_item.lift)
+        .map(|l| l.location)
+        .unwrap_or(0);
     if let Some(scene) = state.scene.as_mut()
         && let Some(&idx) = scene.net_id_map.get(&req.EntityId)
     {
         scene.entities[idx].world_item.lift = Some(EntityLiftComponent {
             location: req.TagState,
         });
+        if req.State == Some(sonoro_proto::enums::ElevatorState::End) {
+            scene.update_entity_state_tag(
+                &state.assets.tables.gameplay_tag_remap,
+                req.EntityId,
+                "关卡.电梯.停靠",
+            );
+        }
     }
     let info = &mut state.player_components.progress.info;
     info.set_key_int(&format!("elevator:{config_id}"), i64::from(req.TagState));
     info.set_key_int(&format!("lift_target:{config_id}"), i64::from(req.TagState));
+    if req.State == Some(sonoro_proto::enums::ElevatorState::End) {
+        state
+            .player_components
+            .quest
+            .info
+            .set_entity_state(i64::from(config_id), "关卡.电梯.停靠");
+        state
+            .player_components
+            .quest
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
     flush_quest_condition_changed(state);
-    let _ = state.conn.push_msg(
-        ElevatorMoveNotify::MSG_ID,
-        &ElevatorMoveNotify {
-            EntityId: req.EntityId,
-            Location: req.TagState,
-            ..Default::default()
-        },
-    );
+    if req.State != Some(sonoro_proto::enums::ElevatorState::End)
+        && req.TagState > 0
+        && prev_location != req.TagState
+    {
+        let _ = state.conn.push_msg(
+            ElevatorMoveNotify::MSG_ID,
+            &ElevatorMoveNotify {
+                EntityId: req.EntityId,
+                Location: req.TagState,
+                ..Default::default()
+            },
+        );
+    }
     Ok(ElevatorStateChangeResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

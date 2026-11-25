@@ -268,6 +268,9 @@ impl MergeFields for super::entity_state::EntityStateComponent {
         if self.Type.is_none() { self.Type = template.Type.clone(); }
         if self.State.is_none() { self.State = template.State.clone(); }
         if self.LockConfig.is_none() { self.LockConfig = template.LockConfig.clone(); }
+        if self.StateChangeBehaviors.is_empty() {
+            self.StateChangeBehaviors = template.StateChangeBehaviors.clone();
+        }
     }
 }
 

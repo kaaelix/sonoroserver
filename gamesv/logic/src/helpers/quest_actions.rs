@@ -2014,7 +2014,97 @@ pub fn apply_entity_state_change<S: PushSink + ?Sized>(
     if let Some(cb) = callbacks.on_entity_state_changed {
         cb(ctx, entity_cfg_id, state_str)?;
     }
+    execute_entity_state_change_behaviors(ctx, callbacks, entity_cfg_id, state_str)?;
     Ok(())
+}
+
+fn execute_entity_state_change_behaviors<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    callbacks: &ActionCallbacks<'_, S>,
+    entity_cfg_id: i32,
+    state_str: &str,
+) -> io::Result<()> {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use sonoro_gamesv_data::tables::entity_components::components::MergeFields;
+
+    thread_local! {
+        static ACTIVE_BEHAVIORS: RefCell<HashSet<(i32, String)>> = RefCell::new(HashSet::new());
+    }
+
+    let key = (entity_cfg_id, state_str.to_string());
+    let inserted = ACTIVE_BEHAVIORS.with(|set| set.borrow_mut().insert(key.clone()));
+    if !inserted {
+        return Ok(());
+    }
+
+    struct ActiveBehaviorGuard((i32, String));
+    impl Drop for ActiveBehaviorGuard {
+        fn drop(&mut self) {
+            ACTIVE_BEHAVIORS.with(|set| {
+                set.borrow_mut().remove(&self.0);
+            });
+        }
+    }
+    let _guard = ActiveBehaviorGuard(key);
+
+    let map_id = ctx
+        .scene
+        .as_deref()
+        .map_or(8, |s| ctx.assets.resolve_map_config_id(s.instance_id));
+    let Some(lcfg) = ctx.assets.find_level_entity(map_id, i64::from(entity_cfg_id)) else {
+        return Ok(());
+    };
+    let mut esc = lcfg.ComponentsData.EntityStateComponent.clone();
+    if let Some(tpl) = ctx.assets.find_template_config(&lcfg.BlueprintType)
+        && let Some(tpl_esc) = &tpl.ComponentsData.EntityStateComponent
+    {
+        match &mut esc {
+            Some(cur) => cur.merge_fields_from(tpl_esc),
+            None => esc = Some(tpl_esc.clone()),
+        }
+    }
+    let Some(esc) = esc else {
+        return Ok(());
+    };
+    if esc.StateChangeBehaviors.is_empty() {
+        return Ok(());
+    }
+
+    let mut matched_actions = Vec::new();
+    for beh in &esc.StateChangeBehaviors {
+        let Some(obj) = beh.as_object() else {
+            continue;
+        };
+        if json_str(obj.get("State")) != Some(state_str) {
+            continue;
+        }
+        if let Some(cond_val) = obj.get("Condition")
+            && !cond_val.is_null()
+        {
+            let mut eval_ctx = ctx.make_eval_context();
+            eval_ctx.self_entity_config_id = entity_cfg_id;
+            if !crate::helpers::condition::eval_inline_condition_block(&eval_ctx, cond_val) {
+                continue;
+            }
+        }
+        if let Some(acts) = obj
+            .get("Action")
+            .or_else(|| obj.get("Actions"))
+            .and_then(|v| v.as_array())
+        {
+            matched_actions.extend(acts.iter().cloned());
+        }
+    }
+    if matched_actions.is_empty() {
+        return Ok(());
+    }
+
+    let mut behavior_cbs = ActionCallbacks {
+        on_entity_state_changed: callbacks.on_entity_state_changed,
+        ..Default::default()
+    };
+    execute_action_list(ctx, &mut behavior_cbs, entity_cfg_id, 0, &matched_actions)
 }
 
 pub fn sync_world_state_on_join<S: PushSink + ?Sized>(
@@ -4587,6 +4677,7 @@ fn apply_add_flow_interact_option<S: PushSink + ?Sized>(
         flow_id,
         state_id,
         &actions_json,
+        text,
     );
 
     let game_ctx = if quest_id > 0 {
@@ -5797,6 +5888,18 @@ fn apply_server_move_action<S: PushSink + ?Sized>(
         "ChangeLiftTarget" => {
             if let Some(cfg_id) = resolve_action_entity_cfg_id(ctx.scene.as_deref(), params) {
                 let loc = json_int(params.get("Location")).unwrap_or(0);
+                let prev_loc = ctx
+                    .scene
+                    .as_deref()
+                    .and_then(|scene| {
+                        let net_id = scene.find_entity_net_id_by_config_id(cfg_id)?;
+                        scene.entity(net_id)?.world_item.lift.map(|l| l.location)
+                    })
+                    .or_else(|| {
+                        let pc = ctx.progress_comp.as_deref()?;
+                        let v = pc.info.get_key_int(&format!("lift_target:{cfg_id}"));
+                        (v > 0).then(|| i32::try_from(v).ok()).flatten()
+                    });
                 record_progress_int(ctx, &format!("lift_target:{cfg_id}"), i64::from(loc), false)?;
                 record_progress_int(ctx, &format!("elevator:{cfg_id}"), i64::from(loc), false)?;
                 ensure_quest_entity_spawned(ctx, cfg_id);
@@ -5804,16 +5907,17 @@ fn apply_server_move_action<S: PushSink + ?Sized>(
                     && let Some(net_id) = scene.find_entity_net_id_by_config_id(cfg_id)
                     && let Some(storage) = scene.entity_mut(net_id)
                 {
-                    storage.world_item.lift =
-                        Some(LiftComponent { location: loc });
-                    ctx.sink.push(
-                        ElevatorMoveNotify::MSG_ID,
-                        &ElevatorMoveNotify {
-                            EntityId: net_id,
-                            Location: loc,
-                            MoveType: None,
-                        },
-                    );
+                    storage.world_item.lift = Some(LiftComponent { location: loc });
+                    if loc > 0 && prev_loc != Some(loc) {
+                        ctx.sink.push(
+                            ElevatorMoveNotify::MSG_ID,
+                            &ElevatorMoveNotify {
+                                EntityId: net_id,
+                                Location: loc,
+                                MoveType: None,
+                            },
+                        );
+                    }
                 }
             }
         }
