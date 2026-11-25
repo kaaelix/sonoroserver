@@ -188,7 +188,153 @@ PY
   exit 1
 }
 
-ensure_assets_db
+ensure_server_update() {
+  local ver_file="$ROOT_DIR/.server.version"
+  local manifest_tmp="/tmp/sonoro-server-manifest.json"
+  local manifest=""
+
+  for url in \
+    "https://raw.githubusercontent.com/kaaelix/sonoroserver/main/assets.json" \
+    "https://raw.githubusercontent.com/kaaelix/wuwaserver/main/assets.json"; do
+    if curl -fsSL --connect-timeout 3 --max-time 5 "$url" -o "$manifest_tmp" 2>/dev/null; then
+      manifest="$manifest_tmp"
+      break
+    fi
+  done
+
+  if [[ -z "$manifest" ]] || ! command -v python3 >/dev/null 2>&1; then
+    rm -f "$manifest_tmp"
+    return 0
+  fi
+
+  local check_out
+  check_out="$(python3 - "$manifest" "$ROOT_DIR" "$ver_file" <<'PY'
+import hashlib, json, os, sys
+m = json.load(open(sys.argv[1]))
+root, vf = sys.argv[2], sys.argv[3]
+srv = m.get('server') or {}
+files = srv.get('files') or {}
+remote_ver = str(srv.get('version', ''))
+if not files or not remote_ver:
+    print("SKIP")
+    sys.exit(0)
+local_ver = open(vf).read().strip() if os.path.exists(vf) else ""
+if not local_ver and os.path.exists(os.path.join(root, "assets.json")):
+    try:
+        local_ver = str((json.load(open(os.path.join(root, "assets.json"))).get('server') or {}).get('version', ''))
+    except Exception:
+        pass
+req_missing = any(
+    not os.path.exists(os.path.join(root, req))
+    for req in ("start-private-server.sh", "stop-private-server.sh", "proxy/server_manager.py", "proxy/modified_3.8_index.json", "proxy/encrypted_3.8_index.b64")
+)
+if not req_missing and local_ver == remote_ver:
+    print(f"OK|{remote_ver}")
+    sys.exit(0)
+
+changed = 0
+for rel, exp in files.items():
+    if rel.startswith("assets/BinData/") or rel == "assets/assets.db":
+        continue
+    p = os.path.join(root, rel)
+    if not os.path.exists(p):
+        changed += 1
+        continue
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for c in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(c)
+    if h.hexdigest().lower() != str(exp).lower():
+        changed += 1
+if changed == 0:
+    open(vf, 'w').write(remote_ver)
+    print(f"OK|{remote_ver}")
+else:
+    print(f"UPDATE|{remote_ver}|{local_ver or 'local'}|{changed}")
+PY
+)"
+
+  local status remote_ver local_ver changed
+  IFS='|' read -r status remote_ver local_ver changed <<< "$check_out"
+  if [[ "$status" == "SKIP" ]]; then
+    rm -f "$manifest_tmp"
+    return 0
+  fi
+  if [[ "$status" == "OK" ]]; then
+    echo "server: up to date (v${remote_ver})"
+    rm -f "$manifest_tmp"
+    return 0
+  fi
+
+  local ans="n"
+  echo "Server update available: ${local_ver} -> v${remote_ver} (${changed} changed files, BinData skipped)."
+  if [[ -t 0 ]]; then
+    read -r -p "Update changed files now? [y/N] " ans
+    ans="${ans:-n}"
+  fi
+  if [[ ! "$ans" =~ ^[Yy] ]]; then
+    rm -f "$manifest_tmp"
+    echo "Keeping current server files."
+    return 0
+  fi
+
+  python3 - "$manifest_tmp" "$ROOT_DIR" "$ver_file" <<'PY'
+import hashlib, json, os, shutil, sys, urllib.request
+m = json.load(open(sys.argv[1]))
+root, vf = sys.argv[2], sys.argv[3]
+srv = m['server']
+bases = srv.get('raw_bases') or [
+    "https://raw.githubusercontent.com/kaaelix/sonoroserver/main",
+    "https://raw.githubusercontent.com/kaaelix/wuwaserver/main",
+]
+need_rebuild = False
+for rel, exp in srv['files'].items():
+    if rel.startswith("assets/BinData/") or rel == "assets/assets.db":
+        continue
+    dest = os.path.join(root, rel)
+    ok = False
+    if os.path.exists(dest):
+        h = hashlib.sha256()
+        with open(dest, 'rb') as f:
+            for c in iter(lambda: f.read(1024 * 1024), b''):
+                h.update(c)
+        if h.hexdigest().lower() == str(exp).lower():
+            ok = True
+    if ok:
+        continue
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    downloaded = False
+    for b in bases:
+        try:
+            with urllib.request.urlopen(f"{b.rstrip('/')}/{rel}", timeout=20) as r:
+                data = r.read()
+            if hashlib.sha256(data).hexdigest().lower() != str(exp).lower():
+                continue
+            tmp = dest + ".tmp"
+            with open(tmp, 'wb') as f:
+                f.write(data)
+            shutil.move(tmp, dest)
+            print(f"updated: {rel}")
+            downloaded = True
+            if rel.endswith(('.rs', 'Cargo.toml', 'Cargo.lock')):
+                need_rebuild = True
+            break
+        except Exception:
+            pass
+    if not downloaded:
+        raise SystemExit(f"failed downloading {rel}")
+
+open(vf, 'w').write(str(srv['version']))
+shutil.copyfile(sys.argv[1], os.path.join(root, "assets.json"))
+if need_rebuild:
+    for name in ("sonoro-aki-logic", "sonoro-cfgsv", "sonoro-loginsv", "sonoro-gamesv"):
+        bp = os.path.join(root, "target", "release", name)
+        if os.path.exists(bp):
+            os.remove(bp)
+PY
+  rm -f "$manifest_tmp"
+}
+
 ensure_rust_and_build() {
   local bins=(
     "$ROOT_DIR/target/release/sonoro-aki-logic"
@@ -251,6 +397,7 @@ find_server_manager() {
   return 1
 }
 
+ensure_server_update
 ensure_assets_db
 ensure_rust_and_build
 

@@ -1,6 +1,7 @@
 target/
 logs/
 *.pid
+.server.version
 proxy/server.key
 proxy/server.crt
 proxy/server_bundle.crt

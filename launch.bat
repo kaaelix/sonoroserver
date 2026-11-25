@@ -441,11 +441,155 @@ function Get-AssetsManifest {
             }
         } catch {}
     }
-    $localJson = Join-Path $ServerRoot "assets.json"
-    if (Test-Path -LiteralPath $localJson) {
-        try { return (Get-Content -Raw -LiteralPath $localJson | ConvertFrom-Json) } catch {}
+    if (-not [string]::IsNullOrWhiteSpace($ServerRoot)) {
+        $localJson = Join-Path $ServerRoot "assets.json"
+        if (Test-Path -LiteralPath $localJson) {
+            try { return (Get-Content -Raw -LiteralPath $localJson | ConvertFrom-Json) } catch {}
+        }
     }
     return $null
+}
+
+function Download-RepoFile {
+    param([string[]]$RawBases, [string]$RelPath, [string]$DestPath, [string]$ExpectedSha)
+    $dir = Split-Path -Path $DestPath -Parent
+    if (-not [string]::IsNullOrWhiteSpace($dir) -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $tmp = "$DestPath.tmp"
+    foreach ($base in $RawBases) {
+        $u = ($base.TrimEnd('/')) + "/" + $RelPath
+        try {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            Invoke-WebRequest -Uri $u -OutFile $tmp -TimeoutSec 20 -UseBasicParsing
+            if (-not [string]::IsNullOrWhiteSpace($ExpectedSha)) {
+                $actual = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($actual -ne $ExpectedSha.ToLowerInvariant()) { throw "SHA256 mismatch for $RelPath" }
+            }
+            Move-Item -LiteralPath $tmp -Destination $DestPath -Force
+            return $true
+        } catch {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+    throw "Failed to download $RelPath"
+}
+
+function Ensure-ServerProject {
+    param([string]$ServerRoot, $Manifest)
+    if ($null -eq $Manifest -or $null -eq $Manifest.server -or $null -eq $Manifest.server.files) {
+        return $ServerRoot
+    }
+
+    $srv = $Manifest.server
+    $rawBases = @()
+    foreach ($b in $srv.raw_bases) { if (-not [string]::IsNullOrWhiteSpace([string]$b)) { $rawBases += [string]$b } }
+    if ($rawBases.Count -eq 0) {
+        $rawBases = @("https://raw.githubusercontent.com/kaaelix/sonoroserver/main", "https://raw.githubusercontent.com/kaaelix/wuwaserver/main")
+    }
+
+    $remoteVer = [string]$srv.version
+    $isFresh = [string]::IsNullOrWhiteSpace($ServerRoot) -or -not (Test-Path -LiteralPath (Join-Path $ServerRoot "Cargo.toml"))
+    if ($isFresh) {
+        $batDir = if (-not [string]::IsNullOrWhiteSpace($env:LAUNCH_BAT_DIR)) { $env:LAUNCH_BAT_DIR.TrimEnd('\', '/') } else { (Get-Location).Path }
+        $targetDir = if ([string]::IsNullOrWhiteSpace($ServerRoot)) { $batDir } else { $ServerRoot }
+        Write-Host "Server project not found in $targetDir (BinData excluded; uses assets.db)."
+        $ans = Read-Host "Download server files (v$remoteVer)? [Y/n]"
+        if (-not ([string]::IsNullOrWhiteSpace($ans) -or $ans.Trim() -match '^(y|yes)$')) {
+            throw "Server project files required."
+        }
+        $ServerRoot = $targetDir
+    }
+
+    $verFile = Join-Path $ServerRoot ".server.version"
+    $localVer = ""
+    if (Test-Path -LiteralPath $verFile) {
+        $localVer = (Get-Content -Raw -LiteralPath $verFile).Trim()
+    } elseif (-not $isFresh) {
+        $localJsonPath = Join-Path $ServerRoot "assets.json"
+        if (Test-Path -LiteralPath $localJsonPath) {
+            try { $localVer = [string]((Get-Content -Raw -LiteralPath $localJsonPath | ConvertFrom-Json).server.version) } catch {}
+        }
+    }
+
+    $requiredMissing = $false
+    foreach ($req in @("start-private-server.sh", "stop-private-server.sh", "proxy/server_manager.py", "proxy/modified_3.8_index.json", "proxy/encrypted_3.8_index.b64")) {
+        $rp = Join-Path $ServerRoot ($req -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $rp)) {
+            $requiredMissing = $true
+            break
+        }
+    }
+
+    if (-not $isFresh -and -not $requiredMissing -and $localVer -and $localVer -eq $remoteVer) {
+        Write-Host "Server: up to date (v$remoteVer)"
+        return $ServerRoot
+    }
+
+    $changed = [System.Collections.Generic.List[object]]::new()
+    foreach ($prop in $srv.files.PSObject.Properties) {
+        $rel = [string]$prop.Name
+        if ($rel.StartsWith("assets/BinData/") -or $rel -eq "assets/assets.db") { continue }
+        $expected = ([string]$prop.Value).ToLowerInvariant()
+        $localPath = Join-Path $ServerRoot ($rel -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        $needs = $true
+        if (Test-Path -LiteralPath $localPath) {
+            try {
+                $actual = (Get-FileHash -LiteralPath $localPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($actual -eq $expected) { $needs = $false }
+            } catch {}
+        }
+        if ($needs) {
+            $changed.Add(@{ Rel = $rel; Path = $localPath; Sha = $expected })
+        }
+    }
+
+    if ($changed.Count -eq 0) {
+        if (-not [string]::IsNullOrWhiteSpace($remoteVer)) {
+            [System.IO.File]::WriteAllText($verFile, $remoteVer, [System.Text.UTF8Encoding]::new($false))
+        }
+        Write-Host "Server: up to date (v$remoteVer)"
+        return $ServerRoot
+    }
+
+    if (-not $isFresh) {
+        $curLabel = if ($localVer) { "v$localVer" } else { "local" }
+        Write-Host "Server update available: $curLabel -> v$remoteVer ($($changed.Count) changed files, BinData skipped)"
+        $ans = Read-Host "Update changed files now? [y/N]"
+        if ([string]::IsNullOrWhiteSpace($ans) -or $ans.Trim() -notmatch '^(y|yes)$') {
+            Write-Host "Keeping current server files."
+            return $ServerRoot
+        }
+    }
+
+    $needRebuild = $false
+    $selfUpdated = $false
+    $i = 0
+    foreach ($item in $changed) {
+        $i++
+        Write-Host ("[$i/$($changed.Count)] $($item.Rel)")
+        Download-RepoFile -RawBases $rawBases -RelPath $item.Rel -DestPath $item.Path -ExpectedSha $item.Sha | Out-Null
+        if ($item.Rel -match '(\.rs$|Cargo\.toml$|Cargo\.lock$)') { $needRebuild = $true }
+        if ($item.Rel -eq "launch.bat") { $selfUpdated = $true }
+    }
+
+    [System.IO.File]::WriteAllText($verFile, $remoteVer, [System.Text.UTF8Encoding]::new($false))
+    $manifestJson = $Manifest | ConvertTo-Json -Depth 6
+    [System.IO.File]::WriteAllText((Join-Path $ServerRoot "assets.json"), $manifestJson, [System.Text.UTF8Encoding]::new($false))
+
+    if ($needRebuild -and -not $isFresh) {
+        $relDir = Join-Path $ServerRoot "target\release"
+        foreach ($b in @("sonoro-aki-logic.exe", "sonoro-cfgsv.exe", "sonoro-loginsv.exe", "sonoro-gamesv.exe")) {
+            $bp = Join-Path $relDir $b
+            if (Test-Path -LiteralPath $bp) { Remove-Item -LiteralPath $bp -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    if ($selfUpdated -and -not $isFresh) {
+        Write-Host "launch.bat updated. Please re-run launch.bat."
+        Read-Host "Press Enter to exit"
+        exit 0
+    }
+    return $ServerRoot
 }
 
 function Download-AssetsDb {
@@ -499,8 +643,9 @@ function Download-AssetsDb {
 }
 
 function Ensure-AssetsDb {
-    param([string]$ServerRoot)
-    $manifest = Get-AssetsManifest -ServerRoot $ServerRoot
+    param([string]$ServerRoot, $Manifest)
+    if ($null -eq $Manifest) { $Manifest = Get-AssetsManifest -ServerRoot $ServerRoot }
+    $manifest = $Manifest
     if ($null -eq $manifest) {
         Write-Host "assets.json unavailable; skipping assets check."
         return
@@ -567,8 +712,8 @@ function Ensure-AssetsDb {
 }
 
 function Start-LocalServer {
-    param([string]$ServerRoot, [string]$BindHost, [string]$AdvertiseIp)
-    Ensure-AssetsDb -ServerRoot $ServerRoot
+    param([string]$ServerRoot, [string]$BindHost, [string]$AdvertiseIp, $Manifest)
+    Ensure-AssetsDb -ServerRoot $ServerRoot -Manifest $Manifest
     Ensure-ServerBuilt -ServerRoot $ServerRoot
     $pyBin = Ensure-Python
     foreach ($sslDir in @("C:\Program Files\Git\usr\bin", "C:\Program Files\Git\mingw64\bin", "C:\Program Files\OpenSSL-Win64\bin")) {
@@ -703,6 +848,8 @@ if ($mode -ne "2") {
 }
 
 $serverRoot = Find-ServerRoot -SavedRoot $cfg.ServerRoot
+$manifest = Get-AssetsManifest -ServerRoot $serverRoot
+$serverRoot = Ensure-ServerProject -ServerRoot $serverRoot -Manifest $manifest
 while (-not $serverRoot) {
     $manualRoot = Read-Host "Enter wuwa-server folder path"
     if (-not [string]::IsNullOrWhiteSpace($manualRoot)) {
@@ -730,7 +877,7 @@ if ($hostMode -eq "2") {
 
 $serverProcs = $null
 try {
-    $serverProcs = Start-LocalServer -ServerRoot $serverRoot -BindHost $bindHost -AdvertiseIp $advertiseIp
+    $serverProcs = Start-LocalServer -ServerRoot $serverRoot -BindHost $bindHost -AdvertiseIp $advertiseIp -Manifest $manifest
     Write-Host "Server ready."
 
     if ($hostMode -eq "2") {
