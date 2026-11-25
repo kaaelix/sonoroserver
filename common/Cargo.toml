@@ -1,0 +1,13 @@
+[package]
+name = "sonoro-common"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+rusqlite = { workspace = true, optional = true }
+thiserror.workspace = true
+tokio.workspace = true

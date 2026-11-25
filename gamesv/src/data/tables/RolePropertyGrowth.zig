@@ -1,6 +1,0 @@
-Id: i32,
-Level: i32,
-BreachLevel: i32,
-LifeMaxRatio: i32,
-AtkRatio: i32,
-DefRatio: i32,

@@ -1,5 +1,0 @@
-Id: i32,
-TitleType: i32,
-LimitTimeId: i32,
-TitleQuality: i32,
-SortIndex: i32,

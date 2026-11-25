@@ -1,0 +1,16 @@
+[package]
+name = "sonoro-tools"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "serve-all"
+path = "src/serve_all.rs"
+
+[[bin]]
+name = "clear-state"
+path = "src/clear_state.rs"
+
+[[bin]]
+name = "decrypt-client-log"
+path = "src/decrypt_client_log.rs"

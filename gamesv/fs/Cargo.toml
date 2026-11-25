@@ -1,0 +1,11 @@
+[package]
+name = "sonoro-gamesv-fs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+sonoro-common = { path = "../../common" }
+sonoro-gamesv-data = { path = "../data" }
+sonoro-proto = { path = "../../proto" }
+thiserror.workspace = true

@@ -1,6 +1,0 @@
-Id: i32,
-UnlockItem: i32,
-DefaultFlag: bool,
-SceneId: []const u8,
-SceneName: []const u8,
-SceneIcon: []const u8,

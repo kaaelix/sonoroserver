@@ -1,6 +1,0 @@
-Id: i32,
-TreeType: i32,
-PreNode: []const i32,
-TechLv: []const i32,
-InitLevel: i32,
-UnlockCondition: i32,

@@ -1,0 +1,15 @@
+[package]
+name = "sonoro-gamesv-logic"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sonoro-common = { path = "../../common" }
+sonoro-gamesv-data = { path = "../data" }
+sonoro-gamesv-fs = { path = "../fs" }
+sonoro-proto = { path = "../../proto" }
+thiserror.workspace = true
+tracing.workspace = true

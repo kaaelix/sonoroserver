@@ -1,6 +1,0 @@
-Id: i32,
-Type: i32 = 0,
-TreeLevel: i32 = 0,
-PreNode: i32 = 0,
-UnlockCondition: i32 = 0,
-Effect: []const i32 = &.{},

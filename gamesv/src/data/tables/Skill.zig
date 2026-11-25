@@ -1,5 +1,0 @@
-Id: i32,
-SkillType: i32 = 0,
-SkillGroupId: i32,
-SkillLevelGroupId: i32,
-MaxSkillLevel: i32,

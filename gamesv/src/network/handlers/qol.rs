@@ -1,0 +1,1291 @@
+use sonoro_gamesv_data::reward_index::composite_key;
+use sonoro_gamesv_data::Assets;
+use sonoro_gamesv_logic::component::player::PlayerProgressComponent;
+use sonoro_gamesv_logic::helpers::{consume, energy, pb_kv, reward};
+use sonoro_proto::enums::{BattlePassPayStatus, BattlePassType, ErrorCode};
+use sonoro_proto::pb::{
+    BattlePassEnterPush, BattlePassExpUpdateNotify, BattlePassLevelUpRequest,
+    BattlePassLevelUpResponse, BattlePassRequest, BattlePassResponse, BattlePassTakeAllRewardRequest,
+    BattlePassTakeAllRewardResponse, BattlePassTakeRewardRequest, BattlePassTakeRewardResponse,
+    BattlePassTaskRequest, BattlePassTaskResponse, BattlePassTaskTakeRequest,
+    BattlePassTaskTakeResponse, BirthDayCardRoleRequest, BirthDayCardRoleResponse,
+    BirthDayRewardRequest, BirthDayRewardResponse, ClientStorageInfoDataOneof,
+    GachaAccumulateGroupInfo, GachaAccumulateInfo, GachaAccumulateInfoRequest,
+    GachaAccumulateInfoResponse, GachaAccumulateRewardRequest, GachaAccumulateRewardResponse,
+    InfluenceInfo, InfluenceInfoRequest, InfluenceInfoResponse, InfluenceRewardRequest,
+    InfluenceRewardResponse, MonthCardRequest, MonthCardResponse, PayGiftInfo,
+    PayGiftInfoRequest, PayGiftInfoResponse, PayGiftRequest, PayGiftResponse, PayItemRequest,
+    PayItemResponse, PbBattlePass, PbBattlePassReward, PbBattlePassTask,
+    RoleFavorUnLockRequest, RoleFavorUnLockResponse, RoleGiftRewardRequest,
+    RoleGiftRewardResponse, RoleMotionUnLockRequest, RoleMotionUnLockResponse, RoleTrainRequest,
+    RoleTrainResponse, RoleUpdateDevelopTargetRequest, RoleUpdateDevelopTargetResponse,
+    ShortMessageChatCharmChangeRequest, ShortMessageChatCharmChangeResponse,
+    ShortMessageChatThemeChangeRequest, ShortMessageChatThemeChangeResponse, ShortMessageInfo,
+    ShortMessageInfoRequest, ShortMessageInfoResponse, ShortMessageReadRequest,
+    ShortMessageReadResponse, ShortMessageReceivedRequest, ShortMessageReceivedResponse,
+    ShortMessageReplyRequest, ShortMessageReplyResponse, ShortMessageShowChangeRequest,
+    ShortMessageShowChangeResponse, ShortMessageUpdateRequest, ShortMessageUpdateResponse,
+    StorageInfoRequest, StorageInfoResponse, StorageInfoUpdateRequest, StorageInfoUpdateResponse,
+    TotalTopUpRewardRequest, TotalTopUpRewardResponse, TotalTopUpScoreInfo,
+    TotalTopUpScoreInfoRequest, TotalTopUpScoreInfoResponse, WeekCardContentInfo, WeekCardInfo,
+    WeekCardInfoRequest, WeekCardInfoResponse, WeekCardRewardRequest, WeekCardRewardResponse,
+};
+
+use super::State;
+use sonoro_gamesv_logic::sink::PushSink;
+
+pub fn handle_role_favor_unlock_request(
+    state: &mut State,
+    req: RoleFavorUnLockRequest,
+) -> Result<RoleFavorUnLockResponse, String> {
+    let itype = req.ItemType.map_or(0, |t| t as i32);
+    let k = format!("favor_unlock:{}:{itype}:{}", req.RoleId, req.UnLockId);
+    let _ = state.player_components.progress.info.mark_claim(&k);
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    Ok(RoleFavorUnLockResponse {
+        RoleId: req.RoleId,
+        ItemType: req.ItemType,
+        UnLockId: req.UnLockId,
+        ErrCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_role_gift_reward_request(
+    state: &mut State,
+    req: RoleGiftRewardRequest,
+) -> Result<RoleGiftRewardResponse, String> {
+    let k = format!("role_gift_clm:{}", req.TaskId);
+    if state.player_components.progress.info.mark_claim(&k) {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        let mut rctx = state.reward_context();
+        reward::grant_items(
+            &mut rctx,
+            0,
+            true,
+            &[
+                reward::RewardItem {
+                    item_id: 3,
+                    count: 40,
+                },
+                reward::RewardItem {
+                    item_id: 2,
+                    count: 10000,
+                },
+            ],
+            19500,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(RoleGiftRewardResponse {
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_role_motion_unlock_request(
+    state: &mut State,
+    req: RoleMotionUnLockRequest,
+) -> Result<RoleMotionUnLockResponse, String> {
+    let k = format!("role_motion:{}:{}", req.RoleId, req.UnLockId);
+    let _ = state.player_components.progress.info.mark_claim(&k);
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    Ok(RoleMotionUnLockResponse {
+        RoleId: req.RoleId,
+        UnLockId: req.UnLockId,
+        ErrCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_role_train_request(
+    state: &mut State,
+    req: RoleTrainRequest,
+) -> Result<RoleTrainResponse, String> {
+    let k = format!("role_train:{}:{}", req.RoleId, req.TrainType);
+    let _ = state.player_components.progress.info.add_key_int(&k, 1);
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    Ok(RoleTrainResponse {
+        GreatSucc: true,
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_role_update_develop_target_request(
+    state: &mut State,
+    req: RoleUpdateDevelopTargetRequest,
+) -> Result<RoleUpdateDevelopTargetResponse, String> {
+    let k = format!("role_dev_target:{}", req.RoleId);
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int(&k, i64::from(req.PlanId));
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    Ok(RoleUpdateDevelopTargetResponse {
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn build_short_message_infos(
+    assets: &Assets,
+    progress_comp: &PlayerProgressComponent,
+) -> Vec<ShortMessageInfo> {
+    let rows = assets.reward_index.get_rows("ShortMessage");
+    let mut infos = Vec::new();
+    for row in rows.iter() {
+        let cid = row.key as i32;
+        if (38000..=38999).contains(&cid) {
+            continue;
+        }
+        let saved_last = progress_comp.info.get_key_int(&format!("sm:last:{cid}"));
+        let last_cid = if saved_last > 0 { saved_last as i32 } else { cid };
+        infos.push(ShortMessageInfo {
+            ConfigId: cid,
+            LastConfigId: last_cid,
+            IsRead: progress_comp.info.has_claim(&format!("sm:read:{cid}")),
+            IsReceived: progress_comp.info.has_claim(&format!("sm:recv:{cid}")),
+            IsFinish: progress_comp.info.has_claim(&format!("sm:fin:{cid}")),
+            UnlockTime: 1,
+            ..Default::default()
+        });
+    }
+    infos
+}
+
+pub fn handle_short_message_info_request(
+    state: &mut State,
+    _req: ShortMessageInfoRequest,
+) -> Result<ShortMessageInfoResponse, String> {
+    let pc = &state.player_components.progress;
+    let infos = build_short_message_infos(&state.assets, pc);
+    let charm_saved = pc.info.get_key_int("sm:charm");
+    let theme_saved = pc.info.get_key_int("sm:theme");
+    let bg_saved = pc.info.get_key_int("sm:bg");
+    let bubble_saved = pc.info.get_key_int("sm:bubble");
+
+    Ok(ShortMessageInfoResponse {
+        ShortMessageInfos: infos,
+        ChatCharmId: if charm_saved > 0 { charm_saved as i32 } else { 80892001 },
+        ChatCharmIds: vec![80892001, 80892002],
+        ChatThemeId: if theme_saved > 0 { theme_saved as i32 } else { 80891001 },
+        ChatThemeIds: vec![80891001, 80891002],
+        ChatBgId: if bg_saved > 0 { bg_saved as i32 } else { 80820001 },
+        ChatBgIds: vec![80820001, 80820002, 80820004],
+        BubbleId: if bubble_saved > 0 { bubble_saved as i32 } else { 80810001 },
+        BubbleIds: vec![80810001, 80810002, 80810003],
+        ErrCode: Some(ErrorCode::Success),
+        ..Default::default()
+    })
+}
+
+pub fn handle_short_message_read_request(
+    state: &mut State,
+    req: ShortMessageReadRequest,
+) -> Result<ShortMessageReadResponse, String> {
+    let k = format!("sm:read:{}", req.ConfigId);
+    let _ = state.player_components.progress.info.mark_claim(&k);
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    Ok(ShortMessageReadResponse {
+        ErrCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_short_message_received_request(
+    state: &mut State,
+    req: ShortMessageReceivedRequest,
+) -> Result<ShortMessageReceivedResponse, String> {
+    let k = format!("sm:recv:{}", req.ConfigId);
+    if state.player_components.progress.info.mark_claim(&k) {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        let mut rctx = state.reward_context();
+        reward::grant_table_reward(
+            &mut rctx,
+            "ShortMessage",
+            i64::from(req.ConfigId),
+            false,
+            true,
+            19500,
+            &[reward::RewardItem {
+                item_id: 3,
+                count: 20,
+            }],
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(ShortMessageReceivedResponse {
+        ErrCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_short_message_reply_request(
+    state: &mut State,
+    req: ShortMessageReplyRequest,
+) -> Result<ShortMessageReplyResponse, String> {
+    let k = format!("sm:opt:{}:{}", req.ConfigId, req.CurOptionId);
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int(&k, i64::from(req.SelectId));
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    Ok(ShortMessageReplyResponse {
+        ErrCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_short_message_update_request(
+    state: &mut State,
+    req: ShortMessageUpdateRequest,
+) -> Result<ShortMessageUpdateResponse, String> {
+    if req.IsFinish {
+        let _ = state
+            .player_components
+            .progress
+            .info
+            .mark_claim(&format!("sm:fin:{}", req.ConfigId));
+    }
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int(&format!("sm:last:{}", req.ConfigId), i64::from(req.LastConfigId));
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    Ok(ShortMessageUpdateResponse {
+        ErrCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_short_message_chat_charm_change_request(
+    state: &mut State,
+    req: ShortMessageChatCharmChangeRequest,
+) -> Result<ShortMessageChatCharmChangeResponse, String> {
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int("sm:charm", i64::from(req.ChatCharmId));
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    Ok(ShortMessageChatCharmChangeResponse {
+        ErrCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_short_message_chat_theme_change_request(
+    state: &mut State,
+    req: ShortMessageChatThemeChangeRequest,
+) -> Result<ShortMessageChatThemeChangeResponse, String> {
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int("sm:theme", i64::from(req.ChatThemeId));
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    Ok(ShortMessageChatThemeChangeResponse {
+        ErrCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_short_message_show_change_request(
+    state: &mut State,
+    req: ShortMessageShowChangeRequest,
+) -> Result<ShortMessageShowChangeResponse, String> {
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int("sm:bg", i64::from(req.ChatBgId));
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int("sm:bubble", i64::from(req.BubbleId));
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    Ok(ShortMessageShowChangeResponse {
+        ErrCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_birthday_card_role_request(
+    state: &mut State,
+    req: BirthDayCardRoleRequest,
+) -> Result<BirthDayCardRoleResponse, String> {
+    let k = format!("birthday:role:{}", req.YearId);
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int(&k, i64::from(req.RoleID));
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    Ok(BirthDayCardRoleResponse {
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_birthday_reward_request(
+    state: &mut State,
+    req: BirthDayRewardRequest,
+) -> Result<BirthDayRewardResponse, String> {
+    let k = format!("birthday:clm:{}", req.YearId);
+    if state.player_components.progress.info.mark_claim(&k) {
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int("birthday:reward_year", i64::from(req.YearId));
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        let mut rctx = state.reward_context();
+        reward::grant_items(
+            &mut rctx,
+            0,
+            true,
+            &[
+                reward::RewardItem {
+                    item_id: 3,
+                    count: 160,
+                },
+                reward::RewardItem {
+                    item_id: 2,
+                    count: 20000,
+                },
+            ],
+            19500,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(BirthDayRewardResponse {
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+fn current_battle_pass_id(assets: &Assets) -> i32 {
+    let rows = assets.reward_index.get_rows("BattlePass");
+    rows.last().map_or(2, |r| r.key as i32)
+}
+
+fn get_battle_pass_item(assets: &Assets, bp_id: i32, level: i32, is_pay: bool) -> i32 {
+    let keys = [
+        composite_key(bp_id, level),
+        composite_key(13, level),
+        composite_key(0, level),
+        composite_key(1, level),
+    ];
+    for k in keys {
+        if let Some(row) = assets.reward_index.get_row("BattlePassReward", k) {
+            if is_pay {
+                if let Some(first) = row.pay_items.first() {
+                    return first.item_id;
+                }
+            } else if let Some(first) = row.items.first() {
+                return first.item_id;
+            }
+        }
+    }
+    0
+}
+
+pub fn handle_battle_pass_request(
+    state: &mut State,
+    _req: BattlePassRequest,
+) -> Result<BattlePassResponse, String> {
+    let now_s = energy::now_seconds();
+    let bp_id = current_battle_pass_id(&state.assets);
+    let pc = &state.player_components.progress;
+    let lvl = (pc.info.get_key_int("bp:level") as i32).max(1);
+    let exp = pc.info.get_key_int("bp:exp").max(0) as i32;
+    let paid_raw = pc.info.get_key_int("bp:paid");
+    let pay_status = if paid_raw >= 2 {
+        BattlePassPayStatus::Advanced
+    } else if paid_raw >= 1 {
+        BattlePassPayStatus::Paid
+    } else {
+        BattlePassPayStatus::NoPaid
+    };
+
+    let mut taken = Vec::new();
+    for l in 1..=70 {
+        if pc.info.has_claim(&format!("bp:clm:0:{l}")) {
+            taken.push(PbBattlePassReward {
+                Level: l,
+                Type: Some(BattlePassType::Free),
+                ItemId: get_battle_pass_item(&state.assets, bp_id, l, false),
+            });
+        }
+        if pc.info.has_claim(&format!("bp:clm:1:{l}")) {
+            taken.push(PbBattlePassReward {
+                Level: l,
+                Type: Some(BattlePassType::Pay),
+                ItemId: get_battle_pass_item(&state.assets, bp_id, l, true),
+            });
+        }
+    }
+
+    Ok(BattlePassResponse {
+        ErrorCode: Some(ErrorCode::Success),
+        BattlePass: Some(PbBattlePass {
+            InTimeRange: true,
+            Id: bp_id,
+            Level: lvl,
+            Exp: exp,
+            WeeklyTotalExp: exp,
+            PayStatus: Some(pay_status),
+            TakenRewards: taken,
+            BeginTime: now_s - 86_400,
+            EndTime: now_s + 30 * 86_400,
+            RecurringRewards: Vec::new(),
+            HadEnter: pc.info.has_claim("bp:entered"),
+        }),
+    })
+}
+
+pub fn handle_battle_pass_enter_push(
+    state: &mut State,
+    _req: BattlePassEnterPush,
+) -> Result<(), String> {
+    let _ = state.player_components.progress.info.mark_claim("bp:entered");
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())
+}
+
+pub fn handle_battle_pass_level_up_request(
+    state: &mut State,
+    req: BattlePassLevelUpRequest,
+) -> Result<BattlePassLevelUpResponse, String> {
+    let cur = (state.player_components.progress.info.get_key_int("bp:level") as i32).max(1);
+    let requested = if req.Level > 0 { req.Level } else { cur + 1 };
+    let next = requested.clamp(cur, 70);
+    let levels_gained = next - cur;
+    if levels_gained <= 0 {
+        return Ok(BattlePassLevelUpResponse {
+            ErrorCode: Some(ErrorCode::Success),
+        });
+    }
+
+    let costs = [consume::CostItem {
+        id: 3,
+        count: levels_gained * 100,
+    }];
+    let ok = {
+        let State {
+            conn,
+            fs,
+            player_components,
+            ..
+        } = state;
+        consume::consume_costs(
+            conn,
+            fs,
+            &mut player_components.basic,
+            &mut player_components.inventory,
+            &costs,
+        )
+        .map_err(|e| e.to_string())?
+    };
+    if !ok {
+        return Ok(BattlePassLevelUpResponse {
+            ErrorCode: Some(ErrorCode::ErrItemNotEnough),
+        });
+    }
+
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int("bp:level", i64::from(next));
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    state.conn.push(
+        BattlePassExpUpdateNotify::MSG_ID,
+        &BattlePassExpUpdateNotify {
+            Level: next,
+            Exp: 0,
+            WeeklyTotalExp: next * 1000,
+            RecurringRewards: Vec::new(),
+        },
+    );
+    Ok(BattlePassLevelUpResponse {
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+fn grant_battle_pass_level_reward(
+    state: &mut State,
+    bp_id: i32,
+    level: i32,
+    is_pay: bool,
+) -> Result<bool, String> {
+    let keys = [
+        composite_key(bp_id, level),
+        composite_key(0, level),
+        composite_key(1, level),
+    ];
+    for k in keys {
+        if state
+            .assets
+            .reward_index
+            .get_row("BattlePassReward", k)
+            .is_some()
+        {
+            let mut rctx = state.reward_context();
+            reward::grant_table_reward(
+                &mut rctx,
+                "BattlePassReward",
+                k,
+                is_pay,
+                false,
+                18500,
+                &[reward::RewardItem {
+                    item_id: 2,
+                    count: 10000,
+                }],
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub fn handle_battle_pass_take_reward_request(
+    state: &mut State,
+    req: BattlePassTakeRewardRequest,
+) -> Result<BattlePassTakeRewardResponse, String> {
+    let t_val = req.Type.map_or(0, |t| t as i32);
+    let is_pay = t_val == 1;
+    let cur_lvl = (state.player_components.progress.info.get_key_int("bp:level") as i32).clamp(1, 70);
+    let paid = state.player_components.progress.info.get_key_int("bp:paid") != 0;
+    if req.Level < 1 || req.Level > cur_lvl || (is_pay && !paid) {
+        return Ok(BattlePassTakeRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
+    let k = format!("bp:clm:{t_val}:{}", req.Level);
+    if state.player_components.progress.info.mark_claim(&k) {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        let bp_id = current_battle_pass_id(&state.assets);
+        if !grant_battle_pass_level_reward(state, bp_id, req.Level, is_pay)? {
+            let mut rctx = state.reward_context();
+            reward::grant_items(
+                &mut rctx,
+                0,
+                true,
+                &[reward::RewardItem {
+                    item_id: 2,
+                    count: 10000,
+                }],
+                18500,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(BattlePassTakeRewardResponse {
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_battle_pass_take_all_reward_request(
+    state: &mut State,
+    _req: BattlePassTakeAllRewardRequest,
+) -> Result<BattlePassTakeAllRewardResponse, String> {
+    let cur_lvl = (state.player_components.progress.info.get_key_int("bp:level") as i32).clamp(1, 70);
+    let paid = state.player_components.progress.info.get_key_int("bp:paid") != 0;
+    let bp_id = current_battle_pass_id(&state.assets);
+    let mut taken = Vec::new();
+    let mut dirty = false;
+
+    for l in 1..=cur_lvl {
+        for tp in [0i32, 1i32] {
+            if tp == 1 && !paid {
+                continue;
+            }
+            let k = format!("bp:clm:{tp}:{l}");
+            if state.player_components.progress.info.mark_claim(&k) {
+                dirty = true;
+                let _ = grant_battle_pass_level_reward(state, bp_id, l, tp == 1)?;
+                let it_id = get_battle_pass_item(&state.assets, bp_id, l, tp == 1);
+                taken.push(PbBattlePassReward {
+                    Level: l,
+                    Type: Some(if tp == 1 {
+                        BattlePassType::Pay
+                    } else {
+                        BattlePassType::Free
+                    }),
+                    ItemId: it_id,
+                });
+            }
+        }
+    }
+    if dirty {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(BattlePassTakeAllRewardResponse {
+        ErrorCode: Some(ErrorCode::Success),
+        TakenRewards: taken,
+        ..Default::default()
+    })
+}
+
+pub fn handle_battle_pass_task_request(
+    state: &mut State,
+    _req: BattlePassTaskRequest,
+) -> Result<BattlePassTaskResponse, String> {
+    let now_s = energy::now_seconds();
+    let rows = state.assets.reward_index.get_rows("BattlePassTask");
+    let tasks = rows
+        .iter()
+        .filter_map(|row| {
+            let tid = row.key as i32;
+            (tid > 0).then(|| PbBattlePassTask {
+                Id: tid,
+                Current: 1,
+                Target: 1,
+                IsFinished: true,
+                IsTaken: state
+                    .player_components
+                    .progress
+                    .info
+                    .has_claim(&format!("bp:task:{tid}")),
+            })
+        })
+        .collect();
+    Ok(BattlePassTaskResponse {
+        ErrorCode: Some(ErrorCode::Success),
+        Tasks: tasks,
+        DayEnd: now_s + 86_400,
+        WeekEnd: now_s + 7 * 86_400,
+    })
+}
+
+pub fn handle_battle_pass_task_take_request(
+    state: &mut State,
+    req: BattlePassTaskTakeRequest,
+) -> Result<BattlePassTaskTakeResponse, String> {
+    let mut taken_ids = Vec::new();
+    let mut exp_gain = 0i32;
+
+    for tid in req.Ids {
+        let k = format!("bp:task:{tid}");
+        if !state.player_components.progress.info.mark_claim(&k) {
+            continue;
+        }
+        taken_ids.push(tid);
+        if let Some(row) = state.assets.reward_index.get_row("BattlePassTask", i64::from(tid)) {
+            for it in &row.items {
+                exp_gain += it.count;
+            }
+        } else {
+            exp_gain += 250;
+        }
+    }
+
+    if !taken_ids.is_empty() {
+        let mut cur_lvl =
+            (state.player_components.progress.info.get_key_int("bp:level") as i32).max(1);
+        let mut cur_exp =
+            state.player_components.progress.info.get_key_int("bp:exp").max(0) as i32 + exp_gain;
+        while cur_exp >= 1000 && cur_lvl < 70 {
+            cur_exp -= 1000;
+            cur_lvl += 1;
+        }
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int("bp:level", i64::from(cur_lvl));
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int("bp:exp", i64::from(cur_exp));
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        state.conn.push(
+            BattlePassExpUpdateNotify::MSG_ID,
+            &BattlePassExpUpdateNotify {
+                Level: cur_lvl,
+                Exp: cur_exp,
+                WeeklyTotalExp: cur_lvl * 1000 + cur_exp,
+                RecurringRewards: Vec::new(),
+            },
+        );
+    }
+
+    Ok(BattlePassTaskTakeResponse {
+        ErrorCode: Some(ErrorCode::Success),
+        Ids: taken_ids,
+    })
+}
+
+pub fn handle_month_card_request(
+    state: &mut State,
+    _req: MonthCardRequest,
+) -> Result<MonthCardResponse, String> {
+    let mut days = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("month_card:days")
+        .max(0) as i32;
+    let mut dirty = false;
+    if days <= 0
+        && state
+            .player_components
+            .progress
+            .info
+            .mark_claim("month_card:init")
+    {
+        days = 30;
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int("month_card:days", i64::from(days));
+        dirty = true;
+    }
+    let day_bucket = energy::now_seconds().div_euclid(86_400);
+    let last_got_day = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("month_card:last_day");
+    let is_got_today = last_got_day == day_bucket;
+    let mut granted_today = false;
+    if !is_got_today && days > 0 {
+        days -= 1;
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int("month_card:days", i64::from(days));
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int("month_card:last_day", day_bucket);
+        dirty = true;
+        granted_today = true;
+    }
+    if dirty {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
+    if granted_today {
+        let mut rctx = state.reward_context();
+        reward::grant_items(
+            &mut rctx,
+            0,
+            false,
+            &[reward::RewardItem {
+                item_id: 3,
+                count: 90,
+            }],
+            19500,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(MonthCardResponse {
+        Days: days,
+        IsDailyGot: is_got_today || granted_today,
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_week_card_info_request(
+    state: &mut State,
+    req: WeekCardInfoRequest,
+) -> Result<WeekCardInfoResponse, String> {
+    let now_s = energy::now_seconds();
+    let mut infos = Vec::new();
+    for wid in req.WeekCardIds {
+        let mut contents = Vec::new();
+        for day in 1..=3 {
+            let cid = wid * 100 + day;
+            let k = format!("week_card:{cid}");
+            contents.push(WeekCardContentInfo {
+                WeekCardContentId: cid,
+                UnlockDay: day,
+                Status: if state.player_components.progress.info.has_claim(&k) {
+                    2
+                } else {
+                    1
+                },
+                ..Default::default()
+            });
+        }
+        infos.push(WeekCardInfo {
+            WeekCardId: wid,
+            Days: 7,
+            BuyTimeStamp: now_s,
+            EndTimeStamp: now_s + 7 * 86_400,
+            WeekCardContentInfos: contents,
+        });
+    }
+    let first_info = infos.first().cloned().unwrap_or(WeekCardInfo {
+        WeekCardId: req.WeekCardId,
+        Days: 7,
+        BuyTimeStamp: now_s,
+        EndTimeStamp: now_s + 7 * 86_400,
+        WeekCardContentInfos: Vec::new(),
+    });
+    Ok(WeekCardInfoResponse {
+        ErrorCode: Some(ErrorCode::Success),
+        WeekCardInfos: infos,
+        Infos: Some(first_info),
+    })
+}
+
+pub fn handle_week_card_reward_request(
+    state: &mut State,
+    req: WeekCardRewardRequest,
+) -> Result<WeekCardRewardResponse, String> {
+    let k = format!("week_card:{}", req.WeekCardContentId);
+    if state.player_components.progress.info.mark_claim(&k) {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        let mut rctx = state.reward_context();
+        reward::grant_items(
+            &mut rctx,
+            0,
+            true,
+            &[
+                reward::RewardItem {
+                    item_id: 3,
+                    count: 100,
+                },
+                reward::RewardItem {
+                    item_id: 2,
+                    count: 15000,
+                },
+            ],
+            1,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(WeekCardRewardResponse {
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_pay_gift_info_request(
+    state: &mut State,
+    req: PayGiftInfoRequest,
+) -> Result<PayGiftInfoResponse, String> {
+    let rows = state.assets.reward_index.get_rows("PayGift");
+    let infos = rows
+        .iter()
+        .map(|row| {
+            let gid = row.key as i32;
+            let bought = state
+                .player_components
+                .progress
+                .info
+                .get_key_int(&format!("paygift:{gid}"))
+                .max(0) as i32;
+            PayGiftInfo {
+                Id: gid,
+                PayId: gid,
+                BuyLimit: 99,
+                BoughtCount: bought,
+                BeginTime: 1,
+                EndTime: 2_000_000_000,
+                IsCanBuy: true,
+                ..Default::default()
+            }
+        })
+        .collect();
+    Ok(PayGiftInfoResponse {
+        Infos: infos,
+        Version: if req.Version.is_empty() {
+            b"1".to_vec()
+        } else {
+            req.Version
+        },
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_pay_gift_request(
+    state: &mut State,
+    req: PayGiftRequest,
+) -> Result<PayGiftResponse, String> {
+    let k = format!("paygift:{}", req.Id);
+    let _ = state.player_components.progress.info.add_key_int(&k, 1);
+    let _ = state
+        .player_components
+        .progress
+        .info
+        .add_key_int("topup:score", 300);
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    let mut rctx = state.reward_context();
+    reward::grant_items(
+        &mut rctx,
+        0,
+        true,
+        &[
+            reward::RewardItem {
+                item_id: 4,
+                count: 300,
+            },
+            reward::RewardItem {
+                item_id: 2,
+                count: 50000,
+            },
+        ],
+        8001,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(PayGiftResponse {
+        ErrorCode: Some(ErrorCode::Success),
+        ReceiptId: b"local_receipt".to_vec(),
+        ..Default::default()
+    })
+}
+
+pub fn handle_pay_item_request(
+    state: &mut State,
+    req: PayItemRequest,
+) -> Result<PayItemResponse, String> {
+    let k = format!("payitem:{}", req.Id);
+    let _ = state.player_components.progress.info.add_key_int(&k, 1);
+    let _ = state
+        .player_components
+        .progress
+        .info
+        .add_key_int("topup:score", 648);
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    let mut rctx = state.reward_context();
+    reward::grant_items(
+        &mut rctx,
+        0,
+        true,
+        &[reward::RewardItem {
+            item_id: 4,
+            count: 648,
+        }],
+        8001,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(PayItemResponse {
+        ErrorCode: Some(ErrorCode::Success),
+        ReceiptId: b"local_receipt".to_vec(),
+        ..Default::default()
+    })
+}
+
+pub fn handle_gacha_accumulate_info_request(
+    _state: &mut State,
+    req: GachaAccumulateInfoRequest,
+) -> Result<GachaAccumulateInfoResponse, String> {
+    Ok(GachaAccumulateInfoResponse {
+        ErrorCode: Some(ErrorCode::Success),
+        GachaAccumulateInfo: Some(GachaAccumulateInfo {
+            GachaAccumulateId: req.GachaAccumulateId,
+            GachaAccumulateGroupInfo: Some(GachaAccumulateGroupInfo {
+                GroupId: 1,
+                CurGachaNum: 0,
+                GachaAccumulateRewardInfos: Vec::new(),
+            }),
+        }),
+    })
+}
+
+pub fn handle_gacha_accumulate_reward_request(
+    state: &mut State,
+    req: GachaAccumulateRewardRequest,
+) -> Result<GachaAccumulateRewardResponse, String> {
+    let mut dirty = false;
+    for rid in req.RewardId {
+        let k = format!("gacha_acc:{}:{rid}", req.GachaAccumulateId);
+        if state.player_components.progress.info.mark_claim(&k) {
+            dirty = true;
+            let mut rctx = state.reward_context();
+            reward::grant_items(
+                &mut rctx,
+                0,
+                true,
+                &[reward::RewardItem {
+                    item_id: 3,
+                    count: 160,
+                }],
+                19500,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    if dirty {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(GachaAccumulateRewardResponse {
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_total_top_up_score_info_request(
+    state: &mut State,
+    _req: TotalTopUpScoreInfoRequest,
+) -> Result<TotalTopUpScoreInfoResponse, String> {
+    let score = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("topup:score")
+        .max(0) as i32;
+    Ok(TotalTopUpScoreInfoResponse {
+        ErrorCode: Some(ErrorCode::Success),
+        Infos: vec![TotalTopUpScoreInfo {
+            Id: 1,
+            Score: score,
+            ..Default::default()
+        }],
+    })
+}
+
+pub fn handle_total_top_up_reward_request(
+    state: &mut State,
+    req: TotalTopUpRewardRequest,
+) -> Result<TotalTopUpRewardResponse, String> {
+    let k = format!("topup:clm:{}", req.TotalTopUpRewardId);
+    if state.player_components.progress.info.mark_claim(&k) {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        let mut rctx = state.reward_context();
+        reward::grant_items(
+            &mut rctx,
+            0,
+            true,
+            &[reward::RewardItem {
+                item_id: 3,
+                count: 300,
+            }],
+            19500,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(TotalTopUpRewardResponse {
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_influence_info_request(
+    state: &mut State,
+    _req: InfluenceInfoRequest,
+) -> Result<InfluenceInfoResponse, String> {
+    let infos = state
+        .player_components
+        .progress
+        .info
+        .dynamic
+        .ints
+        .iter()
+        .filter_map(|entry| {
+            let rest = entry.key.strip_prefix("inf:idx:")?;
+            let inf_id = rest.parse::<i32>().ok()?;
+            let val = entry.val.max(0) as i32;
+            Some(InfluenceInfo {
+                InfluenceId: inf_id,
+                RewardIndex: val,
+                Relation: val,
+            })
+        })
+        .collect();
+    Ok(InfluenceInfoResponse {
+        InfluenceInfos: infos,
+    })
+}
+
+pub fn handle_influence_reward_request(
+    state: &mut State,
+    req: InfluenceRewardRequest,
+) -> Result<InfluenceRewardResponse, String> {
+    let k = format!("inf:idx:{}", req.InfluenceId);
+    let next_idx = state.player_components.progress.info.add_key_int(&k, 1) as i32;
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    let mut rctx = state.reward_context();
+    reward::grant_items(
+        &mut rctx,
+        0,
+        true,
+        &[
+            reward::RewardItem {
+                item_id: 3,
+                count: 50,
+            },
+            reward::RewardItem {
+                item_id: 2,
+                count: 15000,
+            },
+        ],
+        19500,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut items = std::collections::BTreeMap::new();
+    items.insert(3, 50);
+    Ok(InfluenceRewardResponse {
+        Code: Some(ErrorCode::Success),
+        InfluenceId: req.InfluenceId,
+        RewardIndex: next_idx,
+        RewardItems: items,
+    })
+}
+
+pub fn handle_storage_info_request(
+    state: &mut State,
+    _req: StorageInfoRequest,
+) -> Result<StorageInfoResponse, String> {
+    let mut infos = Vec::new();
+    pb_kv::append_stored_client_storage_infos(&state.player_components.progress, &mut infos);
+    Ok(StorageInfoResponse { Infos: infos })
+}
+
+pub fn handle_storage_info_update_request(
+    state: &mut State,
+    req: StorageInfoUpdateRequest,
+) -> Result<StorageInfoUpdateResponse, String> {
+    let mut dirty = false;
+    for info in &req.Infos {
+        let Some(data) = info.Data.as_ref() else {
+            continue;
+        };
+        let mkey = format!("cstorage:msg:{}", info.SystemId);
+        pb_kv::save_msg(&state.fs, &mut state.player_components.progress, &mkey, info)
+            .map_err(|e| e.to_string())?;
+        dirty = true;
+        match data {
+            ClientStorageInfoDataOneof::IntData(v) => {
+                state.player_components.progress.info.set_key_int(
+                    &format!("cstorage:i:{}", info.SystemId),
+                    i64::from(v.Data),
+                );
+            }
+            ClientStorageInfoDataOneof::LongData(v) => {
+                state
+                    .player_components
+                    .progress
+                    .info
+                    .set_key_int(&format!("cstorage:i:{}", info.SystemId), v.Data);
+            }
+            ClientStorageInfoDataOneof::BoolData(v) => {
+                state.player_components.progress.info.set_key_int(
+                    &format!("cstorage:i:{}", info.SystemId),
+                    i64::from(v.Data),
+                );
+            }
+            ClientStorageInfoDataOneof::StringData(v) => {
+                let s = String::from_utf8_lossy(&v.Data);
+                state
+                    .player_components
+                    .progress
+                    .info
+                    .set_key_str(&format!("cstorage:s:{}", info.SystemId), &s);
+            }
+            _ => {}
+        }
+    }
+    if dirty {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(StorageInfoUpdateResponse {
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}

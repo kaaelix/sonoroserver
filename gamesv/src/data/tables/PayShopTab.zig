@@ -1,6 +1,0 @@
-ShopId: i32,
-TabId: i32 = 0,
-Sort: i32 = 0,
-Name: []const u8 = "",
-Logic: i32 = 0,
-Enable: bool = true,

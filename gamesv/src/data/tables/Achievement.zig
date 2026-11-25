@@ -1,7 +1,0 @@
-Id: i32,
-GroupId: i32 = 0,
-Level: i32 = 1,
-OverrideDropId: i32 = 0,
-Hidden: bool = false,
-NextLink: i32 = -1,
-ClientTrigger: bool = false,

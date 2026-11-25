@@ -1,0 +1,6 @@
+[package]
+name = "sonoro-proto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

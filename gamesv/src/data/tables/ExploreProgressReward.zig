@@ -1,5 +1,0 @@
-Id: i32,
-Area: i32,
-StepId: i32,
-DropReward: i32,
-NeedExploreProgress: i32,

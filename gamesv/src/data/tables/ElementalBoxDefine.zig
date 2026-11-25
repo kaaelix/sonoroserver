@@ -1,5 +1,0 @@
-Id: i32,
-ElementalType: []const u8,
-Priority: i32 = 0,
-InitState: []const u8 = "",
-CustomBoxPrefab: []const u8 = "",

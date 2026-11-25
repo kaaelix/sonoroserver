@@ -1,8 +1,0 @@
-Id: i32,
-Season: i32 = 0,
-Difficulty: i32 = 1,
-AreaNum: i32 = 1,
-Floor: i32 = 1,
-InstanceId: i32 = 0,
-Cost: i32 = 0,
-Target: []const i32 = &.{},

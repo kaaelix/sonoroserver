@@ -1,5 +1,0 @@
-Id: i32,
-CurveId: i32,
-Level: i32,
-BreachLevel: i32,
-CurveValue: i32,

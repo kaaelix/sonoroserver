@@ -1,6 +1,0 @@
-Id: i32,
-ActivityId: i32 = 0,
-CastType: i32 = 0,
-LevelGroupId: i32 = 0,
-Quality: i32 = 0,
-PhantomItemId: i32 = 0,

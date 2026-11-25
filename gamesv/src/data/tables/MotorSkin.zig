@@ -1,5 +1,0 @@
-Id: i32,
-DefaultFlag: bool,
-BindSticker: []const i32,
-BindFrame: i32,
-BindDecorations: []const i32,

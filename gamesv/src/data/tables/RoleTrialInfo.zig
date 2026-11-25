@@ -1,5 +1,0 @@
-Id: i32,
-RoleId: i32 = 0,
-TrialRoleId: i32 = 0,
-InstanceId: i32 = 0,
-GachaId: i32 = 0,

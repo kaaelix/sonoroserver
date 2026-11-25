@@ -1,6 +1,0 @@
-Id: i32,
-WeaponId: i32 = 0,
-WeaponLevel: i32 = 1,
-WeaponSkinId: i32 = 0,
-WeaponResonanceLevel: i32 = 1,
-FullLevelTrialId: i32 = 0,

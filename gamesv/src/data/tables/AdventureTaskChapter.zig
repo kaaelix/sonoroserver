@@ -1,5 +1,0 @@
-Id: i32,
-DropIds: i32 = 0,
-UnLockCondition: i32 = 0,
-LevelUnlockCount: i32 = 0,
-RewardUnlockCount: i32 = 0,
