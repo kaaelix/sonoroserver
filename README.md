@@ -10,7 +10,7 @@ No Rust, compiler, or `assets.db` required.
 ## Host (Windows)
 
 Put `launch.bat` in an empty folder or the repo folder, run it, and choose `2. Local Server` (`Solo` or `Co-op`).
-Downloads server files (without `assets/BinData/`), `assets.db`, MSVC Build Tools, Rust, and Python if missing.
+Downloads server files, `assets.db`, MSVC Build Tools, Rust, and Python if missing.
 
 ## Host (Linux)
 
