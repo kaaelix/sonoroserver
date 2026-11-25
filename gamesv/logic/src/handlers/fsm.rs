@@ -343,6 +343,14 @@ pub fn handle_fsm_server_action<S: PushSink + ?Sized>(
                     buff_timers,
                 );
             }
+            scene.set_battle_entity_active(entity.net_id, false);
+            let mut battle_data = Vec::new();
+            if scene.append_battle_state_notify(&mut battle_data) {
+                sink.push(
+                    CombatReceivePackNotify::MSG_ID,
+                    &CombatReceivePackNotify { Data: battle_data },
+                );
+            }
             scene.mark_fsm_dirty(entity.net_id, wake_reason::ATTRIBUTE | wake_reason::BUFF);
         }
         FsmServerActionKind::SetRageFull => {

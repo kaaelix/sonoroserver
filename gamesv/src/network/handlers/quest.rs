@@ -195,9 +195,16 @@ pub fn handle_submit_photo_node_request(
     events: &mut EventQueue,
     req: SubmitPhotoNodeRequest,
 ) -> Result<SubmitPhotoNodeResponse, String> {
+    state
+        .player_components
+        .progress
+        .info
+        .mark_claim("photo:submitted");
+    let _ = state.player_components.progress.save(&state.fs);
     let mut qctx = state.quest_context(events);
     quest_engine::events::on_photo_submitted(&mut qctx, req.TreeOwnerId, req.TreeIncId, req.NodeId)
         .map_err(|e| e.to_string())?;
+    let _ = quest_engine::events::on_condition_state_changed(&mut qctx);
     if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx) {
         let _ = level_play::on_submit_photo_level_play_node(
             &mut lp_ctx,

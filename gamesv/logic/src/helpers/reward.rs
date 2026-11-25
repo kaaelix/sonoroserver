@@ -62,18 +62,144 @@ pub fn grant_drop_package_popup<S: PushSink + ?Sized>(
     grant_drop_package_internal(ctx, drop_id, reason, Some(true))
 }
 
-fn preview_item_count(item_id: i32, raw_count: i32) -> i32 {
-    if raw_count > 0 {
-        raw_count
-    } else if item_id == 1 {
-        50
-    } else if item_id == 2 {
-        200
-    } else if item_id == 3 {
-        10
-    } else {
-        1
+fn chest_drop_override_items(drop_id: i32) -> Option<&'static [RewardItem]> {
+    const BASIC: &[RewardItem] = &[
+        RewardItem { item_id: 3, count: 5 },
+        RewardItem { item_id: 1, count: 10 },
+        RewardItem { item_id: 2, count: 1000 },
+        RewardItem { item_id: 43_010_001, count: 2 },
+        RewardItem { item_id: 43_020_001, count: 2 },
+    ];
+    const STANDARD: &[RewardItem] = &[
+        RewardItem { item_id: 3, count: 10 },
+        RewardItem { item_id: 1, count: 20 },
+        RewardItem { item_id: 2, count: 2000 },
+        RewardItem { item_id: 43_010_002, count: 2 },
+        RewardItem { item_id: 43_020_002, count: 2 },
+        RewardItem { item_id: 41_100_021, count: 1 },
+    ];
+    const OVERFLOWING: &[RewardItem] = &[
+        RewardItem { item_id: 3, count: 20 },
+        RewardItem { item_id: 1, count: 30 },
+        RewardItem { item_id: 2, count: 4000 },
+        RewardItem { item_id: 43_010_002, count: 3 },
+        RewardItem { item_id: 43_020_002, count: 3 },
+        RewardItem { item_id: 41_100_031, count: 1 },
+    ];
+    const PREMIUM: &[RewardItem] = &[
+        RewardItem { item_id: 3, count: 40 },
+        RewardItem { item_id: 1, count: 40 },
+        RewardItem { item_id: 2, count: 8000 },
+        RewardItem { item_id: 43_010_003, count: 2 },
+        RewardItem { item_id: 43_020_003, count: 2 },
+        RewardItem { item_id: 41_100_031, count: 2 },
+    ];
+    const TIDE_CHEST: &[RewardItem] = &[
+        RewardItem { item_id: 50_001, count: 1 },
+        RewardItem { item_id: 3, count: 20 },
+        RewardItem { item_id: 1, count: 30 },
+        RewardItem { item_id: 2, count: 4000 },
+        RewardItem { item_id: 43_010_002, count: 3 },
+    ];
+    const PHANTOM_GREEN: &[RewardItem] = &[
+        RewardItem { item_id: 3, count: 10 },
+        RewardItem { item_id: 1, count: 20 },
+        RewardItem { item_id: 2, count: 2000 },
+        RewardItem { item_id: 36_000_002, count: 2 },
+    ];
+    const PHANTOM_PURPLE: &[RewardItem] = &[
+        RewardItem { item_id: 3, count: 20 },
+        RewardItem { item_id: 1, count: 30 },
+        RewardItem { item_id: 2, count: 4000 },
+        RewardItem { item_id: 36_000_003, count: 2 },
+    ];
+    const PHANTOM_GOLD: &[RewardItem] = &[
+        RewardItem { item_id: 3, count: 40 },
+        RewardItem { item_id: 1, count: 40 },
+        RewardItem { item_id: 2, count: 8000 },
+        RewardItem { item_id: 36_000_003, count: 4 },
+    ];
+    const SUPPLY_LOW: &[RewardItem] = &[
+        RewardItem { item_id: 3, count: 20 },
+        RewardItem { item_id: 1, count: 30 },
+        RewardItem { item_id: 2, count: 6000 },
+        RewardItem { item_id: 43_010_002, count: 3 },
+    ];
+    const SUPPLY_HIGH: &[RewardItem] = &[
+        RewardItem { item_id: 3, count: 40 },
+        RewardItem { item_id: 1, count: 60 },
+        RewardItem { item_id: 2, count: 12000 },
+        RewardItem { item_id: 43_010_002, count: 4 },
+        RewardItem { item_id: 43_020_002, count: 3 },
+    ];
+
+    match drop_id {
+        1001 | 1011 | 1091 | 1101 | 1301 | 1314..=1317 | 1330 => Some(BASIC),
+        1002 | 1012 | 1092 | 1102 | 1302 | 1318..=1321 | 1331 => Some(STANDARD),
+        1003 | 1013 | 1093 | 1303 | 1322..=1325 | 1332 => Some(OVERFLOWING),
+        1004 | 1014 | 1094 | 1304 | 1326..=1329 | 1333 | 45143 => Some(PREMIUM),
+        1308 | 1334 => Some(TIDE_CHEST),
+        1305 => Some(PHANTOM_GREEN),
+        1306 => Some(PHANTOM_PURPLE),
+        1307 => Some(PHANTOM_GOLD),
+        2201..=2203 | 2205..=2212 => Some(SUPPLY_LOW),
+        2204 | 2213 => Some(SUPPLY_HIGH),
+        5_120_601..=5_120_690 | 5_200_101 => Some(STANDARD),
+        20_400_001..=20_400_057 | 110_153 | 110_159 => Some(BASIC),
+        _ => None,
     }
+}
+
+fn preview_item_count(drop_id: i32, item_id: i32, raw_count: i32) -> i32 {
+    if raw_count > 0 {
+        return raw_count;
+    }
+    let tier = match drop_id % 10 {
+        2 | 6 => 2,
+        3 | 7 => 3,
+        4 | 8 => 4,
+        _ => 1,
+    };
+    match item_id {
+        1 => tier * 10,
+        2 => match tier {
+            1 => 1000,
+            2 => 2000,
+            3 => 4000,
+            _ => 8000,
+        },
+        3 => match tier {
+            1 => 5,
+            2 => 10,
+            3 => 20,
+            _ => 40,
+        },
+        43_010_001..=43_029_999 | 36_000_001..=36_000_999 => (tier + 1).min(4),
+        _ => 1,
+    }
+}
+
+pub fn preview_drop_items(assets: &Assets, drop_id: i32) -> Vec<RewardItem> {
+    if drop_id <= 0 {
+        return Vec::new();
+    }
+    if let Some(items) = chest_drop_override_items(drop_id) {
+        return items.to_vec();
+    }
+    let Some(pkg) = assets.tables.drop_package.get_data_by_id(&drop_id) else {
+        return Vec::new();
+    };
+    let mut grants = Vec::new();
+    for (&item_id, &raw_count) in pkg.DropPreview.iter() {
+        if item_id <= 0 {
+            continue;
+        }
+        grants.push(RewardItem {
+            item_id,
+            count: preview_item_count(drop_id, item_id, raw_count),
+        });
+    }
+    grants
 }
 
 fn grant_drop_package_internal<S: PushSink + ?Sized>(
@@ -85,80 +211,41 @@ fn grant_drop_package_internal<S: PushSink + ?Sized>(
     if drop_id <= 0 {
         return Ok(GrantResult::default());
     }
-    let Some(pkg) = ctx.assets.tables.drop_package.get_data_by_id(&drop_id) else {
-        tracing::debug!("DropPackage {drop_id} not found, skipping");
-        return Ok(GrantResult::default());
-    };
-
-    let mut grants = Vec::new();
-    for (&item_id, &raw_count) in pkg.DropPreview.iter() {
-        if item_id <= 0 {
-            continue;
-        }
-        grants.push(RewardItem {
-            item_id,
-            count: preview_item_count(item_id, raw_count),
-        });
-    }
+    let grants = preview_drop_items(ctx.assets, drop_id);
     if grants.is_empty() {
+        tracing::debug!("DropPackage {drop_id} has no preview/override items, skipping");
         return Ok(GrantResult::default());
     }
-    grant_items(ctx, drop_id, force_popup.unwrap_or(pkg.ShowBg), &grants, reason)
+    let show_bg = ctx
+        .assets
+        .tables
+        .drop_package
+        .get_data_by_id(&drop_id)
+        .is_none_or(|pkg| pkg.ShowBg);
+    grant_items(ctx, drop_id, force_popup.unwrap_or(show_bg), &grants, reason)
 }
 
 pub fn grant_treasure_box_reward<S: PushSink + ?Sized>(
     ctx: &mut RewardContext<'_, S>,
-    chest_type_id: i32,
+    _chest_type_id: i32,
     drop_id: i32,
     reason: i32,
 ) -> io::Result<GrantResult> {
+    let effective_reason = if reason <= 2 { 7000 } else { reason };
     if drop_id > 0 {
-        let pkg_res = grant_drop_package_popup(ctx, drop_id, reason)?;
+        let pkg_res = grant_drop_package_popup(ctx, drop_id, effective_reason)?;
         if pkg_res.granted_count > 0 {
             return Ok(pkg_res);
         }
     }
 
-    let tier = if chest_type_id > 0 {
-        chest_type_id
-    } else {
-        1
-    }
-    .clamp(1, 4);
-    let astrite = match tier {
-        1 => 5,
-        2 => 10,
-        3 => 20,
-        _ => 40,
-    };
-    let items = [
-        RewardItem {
-            item_id: 3,
-            count: astrite,
-        },
-        RewardItem {
-            item_id: 1,
-            count: tier * 10,
-        },
-        RewardItem {
-            item_id: 2,
-            count: tier * 1000,
-        },
-        RewardItem {
-            item_id: 41_100_011,
-            count: 1 + tier / 2,
-        },
-        RewardItem {
-            item_id: 41_100_021,
-            count: 1 + tier / 2,
-        },
-    ];
+    let items = chest_drop_override_items(1002).expect("standard chest override");
     grant_items(
         ctx,
-        if drop_id > 0 { drop_id } else { 1001 },
+        if drop_id > 0 { drop_id } else { 1002 },
         true,
-        &items,
-        reason,
+        items,
+        effective_reason,
     )
 }
 
@@ -325,6 +412,15 @@ pub fn grant_items<S: PushSink + ?Sized>(
     let mut energy_dirty = false;
     let mut morale_dirty = false;
     let mut bonus_union_exp = 0i32;
+
+    let effective_reason = if reason > 2 { reason } else { 19_500 };
+    let mut show_plan_id = match effective_reason {
+        7000 | 19_500 | 6003 | 18_500 | 15_008 | 20_200 => 1,
+        _ => 3,
+    };
+    if ctx.assets.tables.drop_show_plan.get_data_by_id(&show_plan_id).is_none() {
+        show_plan_id = 1;
+    }
 
     let mut add_normal_list = Vec::new();
     let mut upd_normal_list = Vec::new();
@@ -679,7 +775,9 @@ pub fn grant_items<S: PushSink + ?Sized>(
     }
 
     if show_popup && !reward_infos.is_empty() {
-        let effective_reason = if reason > 2 { reason } else { 19_500 };
+        for info in &mut reward_infos {
+            info.ShowPlanId = show_plan_id;
+        }
         let mut reward_entries = BTreeMap::new();
         reward_entries.insert(
             0,
@@ -694,7 +792,7 @@ pub fn grant_items<S: PushSink + ?Sized>(
                 {
                     drop_id
                 } else {
-                    1201
+                    1001
                 },
                 Reason: effective_reason,
                 Magnification: 1,
@@ -746,21 +844,7 @@ fn apply_player_exp_level_up(assets: &Assets, level_ptr: &mut i32, exp_ptr: &mut
 }
 
 pub fn collect_drop_items(assets: &Assets, drop_id: i32, out_items: &mut Vec<RewardItem>) {
-    if drop_id <= 0 {
-        return;
-    }
-    let Some(pkg) = assets.tables.drop_package.get_data_by_id(&drop_id) else {
-        return;
-    };
-    for (&item_id, &raw_count) in pkg.DropPreview.iter() {
-        if item_id <= 0 {
-            continue;
-        }
-        out_items.push(RewardItem {
-            item_id,
-            count: preview_item_count(item_id, raw_count),
-        });
-    }
+    out_items.extend(preview_drop_items(assets, drop_id));
 }
 
 #[allow(clippy::too_many_arguments)]

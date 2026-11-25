@@ -168,11 +168,50 @@ pub fn handle_player_motion_request(
     })
 }
 
+pub(crate) fn resolve_entity_world_position(
+    state: &State,
+    target_inst_or_map: i32,
+    req_cfg_id: i32,
+) -> Option<Vector> {
+    if req_cfg_id <= 0 {
+        return None;
+    }
+    let resolved_map_id = state.assets.resolve_map_config_id(target_inst_or_map);
+    if let Some(scene) = state.scene.as_ref()
+        && (scene.instance_id == target_inst_or_map
+            || state.assets.resolve_map_config_id(scene.instance_id) == resolved_map_id)
+        && let Some(net_id) = scene.find_entity_net_id_by_config_id(req_cfg_id)
+        && let Some(pos) = scene.entity(net_id).and_then(|s| s.position)
+    {
+        return Some(Vector {
+            X: pos.location[0],
+            Y: pos.location[1],
+            Z: pos.location[2],
+        });
+    }
+    if let Some(cfg) = state
+        .assets
+        .find_level_entity(resolved_map_id, i64::from(req_cfg_id))
+        .or_else(|| {
+            state
+                .assets
+                .find_level_entity(target_inst_or_map, i64::from(req_cfg_id))
+        })
+        && let Some(pos) = entity_world_pos(&cfg)
+    {
+        return Some(Vector {
+            X: pos[0],
+            Y: pos[1],
+            Z: pos[2],
+        });
+    }
+    None
+}
+
 pub fn handle_entity_position_request(
     state: &mut State,
     req: EntityPositionRequest,
 ) -> Result<EntityPositionResponse, String> {
-    let req_cfg_id = req.ConfigId;
     let target_map_id = if req.DungeonInstanceId > 0 {
         req.DungeonInstanceId
     } else if let Some(scene) = state.scene.as_ref() {
@@ -181,35 +220,11 @@ pub fn handle_entity_position_request(
         8
     };
 
-    if req_cfg_id > 0 {
-        if let Some(scene) = state.scene.as_ref()
-            && scene.instance_id == target_map_id
-            && let Some(net_id) = scene.find_entity_net_id_by_config_id(req_cfg_id)
-            && let Some(pos) = scene.entity(net_id).and_then(|s| s.position)
-        {
-            return Ok(EntityPositionResponse {
-                ErrorCode: Some(ErrorCode::Success),
-                Pos: Some(Vector {
-                    X: pos.location[0],
-                    Y: pos.location[1],
-                    Z: pos.location[2],
-                }),
-            });
-        }
-        if let Some(cfg) = state
-            .assets
-            .find_level_entity(target_map_id, i64::from(req_cfg_id))
-            && let Some(pos) = entity_world_pos(&cfg)
-        {
-            return Ok(EntityPositionResponse {
-                ErrorCode: Some(ErrorCode::Success),
-                Pos: Some(Vector {
-                    X: pos[0],
-                    Y: pos[1],
-                    Z: pos[2],
-                }),
-            });
-        }
+    if let Some(pos) = resolve_entity_world_position(state, target_map_id, req.ConfigId) {
+        return Ok(EntityPositionResponse {
+            ErrorCode: Some(ErrorCode::Success),
+            Pos: Some(pos),
+        });
     }
 
     Ok(EntityPositionResponse {
@@ -1120,13 +1135,23 @@ pub fn handle_entity_dynamic_interact_request(
                 }
                 handled = true;
             } else if opt.quest_id > 0 && opt.node_id > 0 {
-                let _ = quest_engine::events::on_submit_node(
+                if !quest_engine::triggers::complete_do_interact_from_dynamic_option(
                     &mut qctx,
                     opt.quest_id,
-                    i64::from(opt.quest_id),
                     opt.node_id,
+                    target_entity_id,
+                    &guid,
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
+                {
+                    let _ = quest_engine::events::on_submit_node(
+                        &mut qctx,
+                        opt.quest_id,
+                        i64::from(opt.quest_id),
+                        opt.node_id,
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
                 handled = true;
             }
         }

@@ -469,9 +469,11 @@ pub struct EntityGroupComponent {
     #[serde(default)]
     pub EntityIds: Option<Vec<i64>>,
     #[serde(default)]
-    pub FailureState: Option<crate::tables::EmptyObj>,
+    pub StateTriggers: Option<Vec<serde_json::Value>>,
     #[serde(default)]
-    pub FinishState: Option<crate::tables::EmptyObj>,
+    pub FailureState: Option<serde_json::Value>,
+    #[serde(default)]
+    pub FinishState: Option<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]

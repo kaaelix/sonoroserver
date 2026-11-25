@@ -352,6 +352,39 @@ pub fn handle_change_entity_role_request(
     state: &mut State,
     req: ChangeEntityRoleRequest,
 ) -> Result<ChangeEntityRoleResponse, String> {
+    if req.Id != 0 {
+        let mut resolved_cfg_id = req.Id;
+        if let Some(scene) = state.scene.as_mut() {
+            let net_id_opt = if scene.net_id_map.contains_key(&req.Id) {
+                resolved_cfg_id = scene
+                    .find_config_id_by_net_id(req.Id)
+                    .map(i64::from)
+                    .unwrap_or(req.Id);
+                Some(req.Id)
+            } else if let Ok(cid32) = i32::try_from(req.Id) {
+                scene.find_entity_net_id_by_config_id(cid32)
+            } else {
+                None
+            };
+            if let Some(net_id) = net_id_opt
+                && let Some(storage) = scene.entity_mut(net_id)
+            {
+                storage.visible = true;
+            }
+        }
+        let target_player = if req.PlayerId != 0 {
+            req.PlayerId
+        } else {
+            state.player_id
+        };
+        pb_kv::persist_int(
+            &state.fs,
+            &mut state.player_components.progress,
+            &format!("ent_role:{resolved_cfg_id}"),
+            i64::from(target_player),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(ChangeEntityRoleResponse {
         Success: true,
         PlayerId: if req.PlayerId != 0 {
@@ -2163,7 +2196,7 @@ fn resolve_and_grant_entity_collect_or_capture(
             let _ = reward::grant_echo_capture_only(&mut rctx, vision_id, calabash_lvl)
                 .map_err(|e| e.to_string())?;
         } else if tb_type > 0 {
-            let _ = reward::grant_treasure_box_reward(&mut rctx, tb_type, reward_id, 1)
+            let _ = reward::grant_treasure_box_reward(&mut rctx, tb_type, reward_id, 7000)
                 .map_err(|e| e.to_string())?;
         } else if reward_id > 0 {
             let res = reward::grant_drop_package(&mut rctx, reward_id, 1)
@@ -2781,7 +2814,7 @@ pub fn handle_timeline_trace_control_request(
     let key = format!("timeline_cp:{}", req.EntityId);
     let max_key = format!("timeline_cp_max:{}", req.EntityId);
     let saved_max = state.player_components.progress.info.get_key_int(&max_key);
-    let max_cp = if saved_max > 0 { saved_max } else { 1 };
+    let max_cp = if saved_max > 0 { saved_max } else { 5 };
     let cur = state
         .player_components
         .progress
@@ -2997,7 +3030,7 @@ pub fn handle_pick_up_drop_item_request(
                     .unwrap_or(0);
                 let mut rctx = state.reward_context();
                 if tb_type > 0 {
-                    let res = reward::grant_treasure_box_reward(&mut rctx, tb_type, reward_id, 1)
+                    let res = reward::grant_treasure_box_reward(&mut rctx, tb_type, reward_id, 7000)
                         .map_err(|e| e.to_string())?;
                     granted_any = res.granted_count > 0;
                 } else if reward_id > 0 {
@@ -3419,6 +3452,7 @@ pub fn handle_well_streaming_finis_request(
 
 pub fn handle_read_display_info_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: ReadDisplayInfoRequest,
 ) -> Result<ReadDisplayInfoResponse, String> {
     pb_kv::persist_claim(
@@ -3427,6 +3461,8 @@ pub fn handle_read_display_info_request(
         &format!("display_read:{}", req.DisplayId),
     )
     .map_err(|e| e.to_string())?;
+    let mut qctx = state.quest_context(events);
+    let _ = quest_engine::events::on_information_view_read(&mut qctx, req.DisplayId);
     Ok(ReadDisplayInfoResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -3910,54 +3946,68 @@ pub fn handle_inst_entity_teleport_request(
         i64::from(req.EntityConfigId),
     )
     .map_err(|e| e.to_string())?;
-    let tp_data = if let Some(scene) = state.scene.as_ref() {
-        let target_map = if req.InstId > 0 {
-            req.InstId
-        } else {
-            scene.instance_id
-        };
-        if target_map == scene.instance_id && req.EntityConfigId > 0 {
-            state
-                .assets
-                .find_level_entity(target_map, i64::from(req.EntityConfigId))
-                .and_then(|cfg| {
-                    let pos = entity_world_pos(cfg.as_ref())?;
-                    let rot = entity_world_rot(cfg.as_ref());
-                    Some((scene.instance_id, pos, rot))
-                })
-        } else {
-            None
-        }
+    let cur_inst = state
+        .scene
+        .as_ref()
+        .map_or(state.player_components.scene.last_scene_info.instance_id, |s| s.instance_id);
+    let target_inst = if req.InstId > 0 { req.InstId } else { cur_inst };
+    let target_map = state.assets.resolve_map_config_id(target_inst);
+    let tp_data = if req.EntityConfigId > 0 {
+        state
+            .assets
+            .find_level_entity(target_map, i64::from(req.EntityConfigId))
+            .or_else(|| {
+                state
+                    .assets
+                    .find_level_entity(target_inst, i64::from(req.EntityConfigId))
+            })
+            .and_then(|cfg| {
+                let pos = entity_world_pos(cfg.as_ref())?;
+                let rot = entity_world_rot(cfg.as_ref());
+                Some((target_inst, target_map, pos, rot))
+            })
     } else {
         None
     };
-    if let Some((inst_id, pos, rot)) = tp_data {
-        let map_id = state.assets.resolve_map_config_id(inst_id);
+    if let Some((inst_id, map_id, pos, rot)) = tp_data {
         let mut events = EventQueue::new();
-        {
-            let mut qctx = state.quest_context(&mut events);
-            quest_actions::update_player_scene_state(&mut qctx, pos, Some(rot))
-                .map_err(|e| e.to_string())?;
-        }
-        drain_event_queue_best_effort(&mut events, state);
-        let _ = state.conn.push_msg(
-            TeleportNotify::MSG_ID,
-            &TeleportNotify {
-                MapId: map_id,
-                Pos: Some(Vector {
-                    X: pos[0],
-                    Y: pos[1],
-                    Z: pos[2],
-                }),
-                Rot: Some(Vector {
-                    X: rot[0],
-                    Y: rot[1],
-                    Z: rot[2],
-                }),
-                Reason: Some(TeleportReason::Action),
-                ..Default::default()
-            },
+        role_helper::dismount_active_vehicle(
+            &mut state.conn,
+            state.scene.as_mut(),
+            &mut state.player_components.progress,
+            &state.assets,
+            &state.fs,
+            state.player_id,
         );
+        if inst_id == cur_inst && state.scene.is_some() {
+            {
+                let mut qctx = state.quest_context(&mut events);
+                quest_actions::update_player_scene_state(&mut qctx, pos, Some(rot))
+                    .map_err(|e| e.to_string())?;
+            }
+            drain_event_queue_best_effort(&mut events, state);
+            let _ = state.conn.push_msg(
+                TeleportNotify::MSG_ID,
+                &TeleportNotify {
+                    MapId: map_id,
+                    Pos: Some(Vector {
+                        X: pos[0],
+                        Y: pos[1],
+                        Z: pos[2],
+                    }),
+                    Rot: Some(Vector {
+                        X: rot[0],
+                        Y: rot[1],
+                        Z: rot[2],
+                    }),
+                    Reason: Some(TeleportReason::Action),
+                    ..Default::default()
+                },
+            );
+        } else {
+            super::teleport::enqueue_scene_transfer(state, &mut events, inst_id, pos, rot[2])?;
+            drain_event_queue_best_effort(&mut events, state);
+        }
     }
     flush_quest_condition_changed(state);
     Ok(InstEntityTeleportResponse {
@@ -4123,15 +4173,13 @@ pub fn handle_revive_request(
 
 pub fn handle_low_memory_change_scene_finish_request(
     state: &mut State,
+    events: &mut EventQueue,
     _req: LowMemoryChangeSceneFinishRequest,
 ) -> Result<LowMemoryChangeSceneFinishResponse, String> {
     if state.scene.is_some() {
-        let mut events = EventQueue::new();
-        {
-            let mut qctx = state.quest_context(&mut events);
-            let _ = quest_engine::on_scene_loading_finish(&mut qctx);
-        }
-        drain_event_queue_best_effort(&mut events, state);
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_program_special_process_finish(&mut qctx);
+        let _ = quest_engine::on_scene_loading_finish(&mut qctx);
     }
     pb_kv::persist_claim(
         &state.fs,

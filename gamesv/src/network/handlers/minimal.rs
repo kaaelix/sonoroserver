@@ -8,7 +8,9 @@ use sonoro_gamesv_logic::fsm::types::wake_reason;
 use sonoro_gamesv_logic::helpers::quest_engine;
 use sonoro_gamesv_logic::helpers::reward::RewardItem;
 use sonoro_gamesv_logic::helpers::{attributes as attributes_helper, pb_kv, reward, role as role_helper};
-use sonoro_proto::enums::{EAttributeType, ErrorCode, LivingStatus, PhantomFuncValue, PhantomSettingType};
+use sonoro_proto::enums::{
+    DetectionType, EAttributeType, ErrorCode, LivingStatus, PhantomFuncValue, PhantomSettingType,
+};
 use sonoro_proto::pb::{
     AdviceSetRequest, AdviceSetResponse, BlackScreenStatePush, BtnStateRequest, BtnStateResponse,
     ButtonEnableResult, CdKeyVerifyRequest, CdKeyVerifyResponse, CharacterDeathPush,
@@ -16,8 +18,8 @@ use sonoro_proto::pb::{
     ClientPullResourcePackageRequest, ClientPullResourcePackageResponse,
     CombatMessagePostInfoRequest, CombatMessagePostInfoResponse, CombatMessagePrefixInfoRequest,
     CombatMessagePrefixInfoResponse, CombatReceiveData, CombatReceiveDataMessageOneof,
-    CombatReceivePackNotify, DErrorResult, DetectionRequest, DetectionResponse, DollDeliveryInfo,
-    DollSmallMapInfoRequest, DollSmallMapInfoResponse, DrownEndTeleportRequest,
+    CombatReceivePackNotify, DErrorResult, DetectionRequest, DetectionResponse, DetectionTarget,
+    DollDeliveryInfo, DollSmallMapInfoRequest, DollSmallMapInfoResponse, DrownEndTeleportRequest,
     DrownEndTeleportResponse, DrownRequest, DrownResponse, EnterViewDirectionRequest,
     EnterViewDirectionResponse, EntityFollowTrackRequest, EntityFollowTrackResponse,
     EntityLivingStatusNotify, EntityOnLandedRequest, EntityOnLandedResponse,
@@ -29,7 +31,7 @@ use sonoro_proto::pb::{
     ItemExchangeInfoResponse, ItemFuncValueUpdateNotify, LevelPlayStateMsg, LevelPlayStateRequest,
     LevelPlayStateResponse, LevelPlayVarAsyncRequest, LevelPlayVarAsyncResponse,
     MainPhantomRecommendInfo, MaxMessageIdPush, MonsterDetectionInfoRequest,
-    MonsterDetectionInfoResponse, NetTestDataPush, PayInfoRequest, PayInfoResponse,
+    MonsterDetectionInfoResponse, NetTestDataPush, PayInfoRequest, PayInfoResponse, PayItemInfo,
     PhBaOneAllSuitPlan, PhBaPlanBatchOperRequest, PhBaPlanBatchOperResponse,
     PhBaPlanFindPlanRequest, PhBaPlanFindPlanResponse, PhBaPlanSaveUsePlanRequest,
     PhBaPlanSaveUsePlanResponse, PhBaPlanSetFiveStarSwitchRequest,
@@ -40,7 +42,8 @@ use sonoro_proto::pb::{
     PhantomManageConfigUpdateResponse, PhantomSettingBatchUpdateRequest,
     PhantomSettingBatchUpdateResponse, PhotoMemoryRequest, PhotoMemoryResponse,
     PlayerGameTokenRequest, PlayerGameTokenResponse, PlayerNetStatePush,
-    PlayerXboxBlockListRequest, PlayerXboxBlockListResponse,
+    PlayerXboxBlockListRequest, PlayerXboxBlockListResponse, TeamRecommendInfo, TeamRecommendRole,
+    TeamRecommendRoleInfo, TeamRecommendTeammate,
     PrivateChatOperateRequest, PrivateChatOperateResponse, RobotDestinationPush,
     RoleDevelopConfigRequest, RoleDevelopConfigResponse, RoleOperateSelfBgmRequest,
     RoleOperateSelfBgmResponse, RoleVisionMainPhantomRequest, RoleVisionMainPhantomResponse,
@@ -426,10 +429,43 @@ pub fn handle_select_detection_target_request(
 }
 
 pub fn handle_monster_detection_info_request(
-    _state: &mut State,
+    state: &mut State,
     _req: MonsterDetectionInfoRequest,
 ) -> Result<MonsterDetectionInfoResponse, String> {
-    Ok(MonsterDetectionInfoResponse::default())
+    let mut targets = Vec::new();
+    for m in &state.assets.tables.monster_detection.items {
+        targets.push(DetectionTarget {
+            Id: m.Id,
+            Type: Some(DetectionType::NormalMonster),
+            UnlockState: true,
+            RefresherTime: 0,
+            DetectionId: m.Id,
+            IsTrace: 0,
+        });
+    }
+    for d in &state.assets.tables.dungeon_detection.items {
+        targets.push(DetectionTarget {
+            Id: d.Id,
+            Type: Some(DetectionType::Dungeon),
+            UnlockState: true,
+            RefresherTime: 0,
+            DetectionId: d.Id,
+            IsTrace: 0,
+        });
+    }
+    for s in &state.assets.tables.silent_area_detection.items {
+        targets.push(DetectionTarget {
+            Id: s.Id,
+            Type: Some(DetectionType::SilentArea),
+            UnlockState: true,
+            RefresherTime: 0,
+            DetectionId: s.Id,
+            IsTrace: 0,
+        });
+    }
+    Ok(MonsterDetectionInfoResponse {
+        DetectionTarget: targets,
+    })
 }
 
 pub fn handle_level_play_var_async_request(
@@ -672,39 +708,187 @@ pub fn handle_player_xbox_block_list_request(
 }
 
 pub fn handle_team_recommend_request(
-    _state: &mut State,
+    state: &mut State,
     _req: TeamRecommendRequest,
 ) -> Result<TeamRecommendResponse, String> {
-    Ok(TeamRecommendResponse::default())
+    let mut role_ids: Vec<i32> = state
+        .player_components
+        .role
+        .role_map
+        .keys()
+        .copied()
+        .collect();
+    role_ids.sort_unstable();
+    if role_ids.is_empty() {
+        role_ids = vec![1402, 1102, 1202];
+    }
+
+    let list = role_ids
+        .iter()
+        .take(6)
+        .map(|&rid| {
+            let teammates = role_ids
+                .iter()
+                .copied()
+                .filter(|&other| other != rid)
+                .take(2)
+                .map(|other| TeamRecommendTeammate {
+                    Main: Some(TeamRecommendRoleInfo {
+                        RoleId: other,
+                        SkillBranchId: 0,
+                    }),
+                    Spares: Vec::new(),
+                })
+                .collect();
+            TeamRecommendRole {
+                RoleId: rid,
+                Teams: vec![TeamRecommendInfo {
+                    SkillBranchId: 0,
+                    Teammates: teammates,
+                }],
+            }
+        })
+        .collect();
+
+    Ok(TeamRecommendResponse {
+        TeamRecommendList: list,
+    })
 }
 
 pub fn handle_item_exchange_info_request(
-    _state: &mut State,
+    state: &mut State,
     _req: ItemExchangeInfoRequest,
 ) -> Result<ItemExchangeInfoResponse, String> {
-    let infos = [3, 50001, 50002, 50005, 50007, 50008]
-        .into_iter()
-        .map(|item_id| ItemExchangeInfo {
-            ItemId: item_id,
-            TodayTimes: 0,
-            TotalTimes: 0,
-            DailyLimit: 100,
-            TotalLimit: 0,
-        })
-        .collect();
+    let counts = &state.player_components.progress.info.shop.item_exchange_counts;
+    let infos: Vec<ItemExchangeInfo> = if !state.assets.tables.item_exchange_content.items.is_empty()
+    {
+        state
+            .assets
+            .tables
+            .item_exchange_content
+            .items
+            .iter()
+            .filter(|cfg| cfg.ItemId > 0)
+            .map(|cfg| {
+                let used = counts
+                    .iter()
+                    .find(|c| c.id == cfg.ItemId)
+                    .map_or(0, |c| c.count);
+                ItemExchangeInfo {
+                    ItemId: cfg.ItemId,
+                    TodayTimes: used,
+                    TotalTimes: used,
+                    DailyLimit: cfg.Times.max(100),
+                    TotalLimit: 0,
+                }
+            })
+            .collect()
+    } else {
+        [3, 50001, 50002, 50005, 50007, 50008]
+            .into_iter()
+            .map(|item_id| {
+                let used = counts
+                    .iter()
+                    .find(|c| c.id == item_id)
+                    .map_or(0, |c| c.count);
+                ItemExchangeInfo {
+                    ItemId: item_id,
+                    TodayTimes: used,
+                    TotalTimes: used,
+                    DailyLimit: 100,
+                    TotalLimit: 0,
+                }
+            })
+            .collect()
+    };
     Ok(ItemExchangeInfoResponse {
         ItemExchangeInfos: infos,
     })
 }
 
+fn format_pay_usd(amount: f64) -> String {
+    let rounded = (amount * 100.0).round() / 100.0;
+    let s = format!("{rounded:.2}");
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    format!("${trimmed}")
+}
+
 pub fn handle_pay_info_request(
-    _state: &mut State,
+    state: &mut State,
     req: PayInfoRequest,
 ) -> Result<PayInfoResponse, String> {
+    let infos = state
+        .assets
+        .tables
+        .pay_item
+        .items
+        .iter()
+        .map(|item| {
+            let pay_cfg = state
+                .assets
+                .tables
+                .pay
+                .items
+                .iter()
+                .find(|p| p.PayId == item.PayId && p.Region == "Default")
+                .or_else(|| {
+                    state
+                        .assets
+                        .tables
+                        .pay
+                        .items
+                        .iter()
+                        .find(|p| p.PayId == item.PayId)
+                });
+            let (prod, amt) = match pay_cfg {
+                Some(p) => (
+                    if p.ProductId.is_empty() {
+                        format!("com.kurogame.aki.pay{}", item.PayId)
+                    } else {
+                        p.ProductId.clone()
+                    },
+                    format_pay_usd(if p.GlobalAmount > 0.0 {
+                        p.GlobalAmount
+                    } else if p.Amount > 0.0 {
+                        p.Amount
+                    } else {
+                        0.99
+                    }),
+                ),
+                None => (
+                    format!("com.kurogame.aki.pay{}", item.PayId),
+                    "$0.99".to_string(),
+                ),
+            };
+            let first_bought = state
+                .player_components
+                .progress
+                .info
+                .get_key_int(&format!("payitem:{}", item.Id))
+                > 0;
+            PayItemInfo {
+                Id: item.Id,
+                PayId: item.PayId,
+                ItemId: item.ItemId,
+                ItemCount: item.ItemCount,
+                BonusItemCount: item.BonusItemCount,
+                SpecialBonusItemCount: item.SpecialBonusItemCount,
+                CanSpecialBonus: item.SpecialBonusItemCount > 0 && !first_bought,
+                StageImage: item.StageImage.as_bytes().to_vec(),
+                ProductId: prod.into_bytes(),
+                Amount: amt.into_bytes(),
+                ..Default::default()
+            }
+        })
+        .collect();
     Ok(PayInfoResponse {
-        Version: req.Version,
+        Version: if req.Version.is_empty() {
+            b"3.8.11".to_vec()
+        } else {
+            req.Version
+        },
         ErrorCode: Some(ErrorCode::Success),
-        ..Default::default()
+        Infos: infos,
     })
 }
 

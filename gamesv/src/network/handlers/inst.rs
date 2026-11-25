@@ -236,7 +236,7 @@ pub fn handle_level_play_reward_request(
     if reward_id > 0 {
         for _ in 0..cnt {
             let mut rctx = state.reward_context();
-            let res = reward::grant_treasure_box_reward(&mut rctx, 2, reward_id, 18500)
+            let res = reward::grant_treasure_box_reward(&mut rctx, 0, reward_id, 15_008)
                 .map_err(|e| e.to_string())?;
             if res.granted_count > 0 {
                 granted_any = true;

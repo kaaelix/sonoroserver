@@ -15,26 +15,6 @@ fn ok_resp<M: PbMessage>(resp_id: u16, resp: &M) -> AkiResult {
     AkiResult::ok(resp_id, resp)
 }
 
-fn get_or_create_gm_sign_token(player_id: i32) -> String {
-    if player_id <= 0 {
-        return String::new();
-    }
-    if let Some(existing) = sqlite_store::get_kv(player_id, "gm", "sign_token")
-        && existing.len() >= 16
-    {
-        return existing;
-    }
-    let mut bytes = [0u8; 12];
-    let _ = getrandom::fill(&mut bytes);
-    let mut token = String::with_capacity(24);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(token, "{b:02x}");
-    }
-    sqlite_store::set_kv(player_id, "gm", "sign_token", &token);
-    token
-}
-
 fn grant_claim_reward<M: PbMessage>(
     player_id: i32,
     claim_key: &str,
@@ -114,15 +94,6 @@ pub fn register_all(map: &mut HashMap<u16, HandlerFn>) {
             &FormationSwitchRoleResponse {
                 ErrorCode: Some(ErrorCode::Success),
                 RoleIndex: req.RoleIndex,
-            },
-        )
-    });
-    map.insert(msg_id::MAIN_PHANTOM_RECOMMEND_REQUEST, |_, _| {
-        ok_resp(
-            msg_id::MAIN_PHANTOM_RECOMMEND_RESPONSE,
-            &MainPhantomRecommendResponse {
-                ErrorCode: Some(ErrorCode::Success),
-                ..Default::default()
             },
         )
     });
@@ -330,25 +301,11 @@ pub fn register_all(map: &mut HashMap<u16, HandlerFn>) {
             },
         )
     });
-    map.insert(msg_id::TRACE_ENTITY_POS_REQUEST, |_, _| {
-        AkiResult::ok_raw(
-            msg_id::TRACE_ENTITY_POS_RESPONSE,
-            vec![0x48, 0x00, 0x2A, 0x00],
-        )
-    });
     map.insert(msg_id::SCHEDULE_NPC_UPDATE_POS_REQUEST, |_, _| {
         ok_resp(
             msg_id::SCHEDULE_NPC_UPDATE_POS_RESPONSE,
             &ScheduleNpcUpdatePosResponse {
                 ErrCode: Some(ErrorCode::Success),
-            },
-        )
-    });
-    map.insert(msg_id::SNEAK_FINISH_REQUEST, |_, _| {
-        ok_resp(
-            msg_id::SNEAK_FINISH_RESPONSE,
-            &SneakFinishResponse {
-                ErrorCode: Some(ErrorCode::Success),
             },
         )
     });
@@ -631,24 +588,6 @@ pub fn register_all(map: &mut HashMap<u16, HandlerFn>) {
             },
         )
     });
-    map.insert(msg_id::DIRECT_TRAIN_INFO_REQUEST, |_, _| {
-        ok_resp(
-            msg_id::DIRECT_TRAIN_INFO_RESPONSE,
-            &DirectTrainInfoResponse {
-                MainActivity: Some(ActivityData {
-                    Type: Some(ActivityType::ThroughTrain),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        )
-    });
-    map.insert(msg_id::EXCHANGE_REWARD_INFO_REQUEST, |_, _| {
-        ok_resp(
-            msg_id::EXCHANGE_REWARD_INFO_RESPONSE,
-            &ExchangeRewardInfoResponse::default(),
-        )
-    });
     map.insert(msg_id::TRAP_DEFENSE_QUICK_EQUIP_REQUEST, |_, _| {
         ok_resp(
             msg_id::TRAP_DEFENSE_QUICK_EQUIP_RESPONSE,
@@ -801,14 +740,6 @@ pub fn register_all(map: &mut HashMap<u16, HandlerFn>) {
             },
         )
     });
-    map.insert(msg_id::PLAYER_GAME_TOKEN_REQUEST, |pid, _| {
-        ok_resp(
-            msg_id::PLAYER_GAME_TOKEN_RESPONSE,
-            &PlayerGameTokenResponse {
-                GameToken: get_or_create_gm_sign_token(pid).into_bytes(),
-            },
-        )
-    });
     map.insert(msg_id::MUTIPLAYER_TEAM_REFRESH_NEAR_LIST_REQUEST, |_, _| {
         ok_resp(
             msg_id::MUTIPLAYER_TEAM_REFRESH_NEAR_LIST_RESPONSE,
@@ -819,20 +750,11 @@ pub fn register_all(map: &mut HashMap<u16, HandlerFn>) {
             },
         )
     });
-    map.insert(msg_id::PLAYER_PSN_BLOCK_LIST_REQUEST, |_, _| {
-        ok_resp(
-            msg_id::PLAYER_PSN_BLOCK_LIST_RESPONSE,
-            &PlayerPsnBlockListResponse::default(),
-        )
-    });
     map.insert(msg_id::PLAYER_CREATE_XBOX_SESSION_REQUEST, |_, _| {
         ok_resp(
             msg_id::PLAYER_CREATE_XBOX_SESSION_RESPONSE,
             &PlayerCreateXboxSessionResponse::default(),
         )
-    });
-    map.insert(msg_id::PSN_SETTING_REQUEST, |_, _| {
-        ok_resp(msg_id::PSN_SETTING_RESPONSE, &PsnSettingResponse::default())
     });
     map.insert(msg_id::GATEWAY_ECHO_REQUEST, |_, payload| {
         let req = GatewayEchoRequest::decode(payload).unwrap_or_default();

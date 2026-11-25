@@ -4,7 +4,7 @@ use std::io;
 use sonoro_common::fs::FileSystem;
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_data::asset_indexes::{
-    self, CellRange, entity_world_pos, is_spawnable_blueprint_and_template,
+    self, CellRange, entity_world_pos, entity_world_rot, is_spawnable_blueprint_and_template,
 };
 use sonoro_gamesv_data::tables::blueprint_config::{EntityLogic, EntityType as BpEntityType};
 use sonoro_gamesv_data::tables::entity_components::components::gravity_flip_from_default;
@@ -621,6 +621,69 @@ fn has_scene_data(fs: &FileSystem, player_id: i32) -> bool {
     )
 }
 
+fn apply_save_block_pos_rollback(
+    scene: &mut Scene,
+    assets: &Assets,
+    rollback: crate::helpers::save_block::PosRollback,
+) {
+    if scene.instance.players.is_empty() {
+        return;
+    }
+    let player_loc = scene.instance.players[0].location;
+    let Some(range_cfg) =
+        assets.find_level_entity(scene.instance_id, i64::from(rollback.range_entity_id))
+    else {
+        return;
+    };
+    let Some(center) = entity_world_pos(&range_cfg) else {
+        return;
+    };
+    let Some(shape) = range_cfg
+        .ComponentsData
+        .RangeComponent
+        .as_ref()
+        .and_then(|r| r.Shape.as_ref())
+    else {
+        return;
+    };
+    let inside = if shape.Type.as_deref().is_some_and(|t| !t.is_empty()) {
+        crate::helpers::condition::is_pos_inside_range_shape(
+            player_loc,
+            center,
+            entity_world_rot(&range_cfg),
+            shape,
+            0.0,
+            0.0,
+        )
+    } else if let Some(radius) = shape.Radius {
+        let dx = player_loc[0] - center[0];
+        let dy = player_loc[1] - center[1];
+        let dz = player_loc[2] - center[2];
+        dx * dx + dy * dy + dz * dz <= radius * radius
+    } else {
+        false
+    };
+    if !inside {
+        return;
+    }
+
+    let Some(position_cfg) =
+        assets.find_level_entity(scene.instance_id, i64::from(rollback.position_entity_id))
+    else {
+        return;
+    };
+    let Some(target) = entity_world_pos(&position_cfg) else {
+        return;
+    };
+    tracing::info!(
+        target: "initial_scene_join",
+        "login restore: moving player to save block position entity {}",
+        rollback.position_entity_id
+    );
+    scene.instance.players[0].location = target;
+    scene.instance.players[0].rotation = entity_world_rot(&position_cfg);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn on_initial_scene_join(
     target_instance_id: Option<i32>,
@@ -727,6 +790,12 @@ pub fn on_initial_scene_join(
                 instance_dungeon.BornRotation[2] as f32,
             ]),
         };
+    }
+
+    if location.is_none()
+        && let Some(rollback) = quest_comp.login_restore.pos_rollback
+    {
+        apply_save_block_pos_rollback(&mut scene, assets, rollback);
     }
 
     if no_scene_data {
@@ -1041,6 +1110,7 @@ pub fn notify_join_scene<S: PushSink + ?Sized>(
         .map(|s| (s.net_id, s.config.config_id, s.config.entity_type))
         .collect();
 
+    let map_id = assets.resolve_map_config_id(scene.instance_id);
     for &(net_id, config_id, entity_type) in &entity_snap {
         if entity_type != EntityType::Player && entity_type != EntityType::PlayerEntity {
             let _ = apply_stored_world_entity_overrides(
@@ -1051,6 +1121,21 @@ pub fn notify_join_scene<S: PushSink + ?Sized>(
                 config_id,
                 net_id,
             )?;
+            if config_id > 0
+                && let Some(state_name) = saved_spawn_state(
+                    assets,
+                    quest_comp,
+                    map_comp,
+                    map_id,
+                    i64::from(config_id),
+                )
+            {
+                let _ = scene.update_entity_state_tag(
+                    &assets.tables.gameplay_tag_remap,
+                    net_id,
+                    state_name,
+                );
+            }
         }
     }
 
@@ -1923,6 +2008,20 @@ pub fn is_blocked_world_entity_config(
     false
 }
 
+fn saved_spawn_state<'a>(
+    assets: &Assets,
+    quest_comp: &'a PlayerQuestComponent,
+    map_comp: &PlayerMapComponent,
+    map_id: i32,
+    entity_config_id: i64,
+) -> Option<&'a str> {
+    if let Some(saved) = quest_comp.info.get_entity_state(entity_config_id) {
+        return (!saved.is_empty()).then_some(saved);
+    }
+    is_unlocked_teleporter_entity(assets, map_comp, map_id, entity_config_id)
+        .then_some("关卡.Common.状态.激活")
+}
+
 fn is_unlocked_teleporter_entity(
     assets: &Assets,
     map_comp: &PlayerMapComponent,
@@ -2133,6 +2232,15 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
                     cfg_id,
                     net_id,
                 )?;
+                if let Some(state_name) =
+                    saved_spawn_state(assets, quest_comp, map_comp, map_id, cfg.EntityId)
+                {
+                    let _ = scene.update_entity_state_tag(
+                        &assets.tables.gameplay_tag_remap,
+                        net_id,
+                        state_name,
+                    );
+                }
                 if entity_cmd::publish_world_spawn(
                     scene,
                     fs,
@@ -2211,15 +2319,8 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
             }
 
             if i32::try_from(cfg.EntityId).is_ok() {
-                let desired_state = quest_comp
-                    .info
-                    .get_entity_state(cfg.EntityId)
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| {
-                        is_unlocked_teleporter_entity(assets, map_comp, map_id, cfg.EntityId)
-                            .then_some("关卡.Common.状态.激活")
-                    });
-                if let Some(state_name) = desired_state
+                if let Some(state_name) =
+                    saved_spawn_state(assets, quest_comp, map_comp, map_id, cfg.EntityId)
                     && let Ok(cfg_id32) = i32::try_from(cfg.EntityId)
                     && let Some(nid) = scene.find_entity_net_id_by_config_id(cfg_id32)
                     && let Some(upd) = scene.update_entity_state_tag(

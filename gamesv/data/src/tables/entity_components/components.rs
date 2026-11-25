@@ -372,6 +372,7 @@ impl MergeFields for super::destructible_item::DestructibleItem {
         if self.Disabled.is_none() { self.Disabled = template.Disabled.clone(); }
         if self.Durability.is_none() { self.Durability = template.Durability.clone(); }
         if self.DurabilityId.is_none() { self.DurabilityId = template.DurabilityId.clone(); }
+        if self.WeaponDamage.is_none() { self.WeaponDamage = template.WeaponDamage.clone(); }
     }
 }
 

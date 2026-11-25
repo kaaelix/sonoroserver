@@ -323,6 +323,11 @@ impl QuestInfo {
         }
     }
 
+    pub fn forget_child_quest_finished(&mut self, quest_id: i32, node_id: i32) {
+        self.finished_child_quests
+            .retain(|r| r.quest_id != quest_id || r.node_id != node_id);
+    }
+
     pub fn remove_active_quest(&mut self, quest_id: i32) {
         self.active_quests.retain(|aq| aq.quest_id != quest_id);
     }

@@ -44,6 +44,7 @@ pub struct BuffAdditionEntry {
     pub message_id: i64,
     pub skill_id: i64,
     pub level: i32,
+    pub notify_client: bool,
 }
 
 impl Default for BuffAdditionEntry {
@@ -57,6 +58,7 @@ impl Default for BuffAdditionEntry {
             message_id: 0,
             skill_id: 0,
             level: 1,
+            notify_client: true,
         }
     }
 }

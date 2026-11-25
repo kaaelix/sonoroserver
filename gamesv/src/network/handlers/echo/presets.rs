@@ -10,7 +10,8 @@ use sonoro_proto::pb::{
     AddVisionEquipGroupRequest, AddVisionEquipGroupResponse, ApplyVisionGroupRequest,
     ApplyVisionGroupResponse, ChangeVisionGroupNameRequest, ChangeVisionGroupNameResponse,
     CostCombinationInfo, CostPhantomAttrRecommendInfo, DeleteVisionEquipGroupRequest,
-    DeleteVisionEquipGroupResponse, ItemFuncValueUpdateNotify, OnePhantomSetting,
+    DeleteVisionEquipGroupResponse, ItemFuncValueUpdateNotify, MainPhantomRecommendInfo,
+    OnePhantomSetting,
     PhantomAttrRecommendInfo, PhantomAttrRecommendRequest, PhantomAttrRecommendResponse,
     PhantomBatchOperRequest, PhantomBatchOperResponse, PhantomFetterGroupInfo,
     PhantomFetterRecommendInfo, PhantomFetterRecommendRequest, PhantomFetterRecommendResponse,
@@ -428,18 +429,68 @@ pub fn build_cost_attr_recommends() -> Vec<CostPhantomAttrRecommendInfo> {
         .collect()
 }
 
-pub fn build_fetter_recommends(assets: &Assets) -> Vec<PhantomFetterRecommendInfo> {
-    let groups = assets
+pub fn build_fetter_recommends(
+    assets: &Assets,
+    role_id: i32,
+) -> Vec<PhantomFetterRecommendInfo> {
+    let mut selected_group_ids: Vec<i32> = assets
         .tables
-        .phantom_fetter_group
-        .items
+        .phantom_recommend
+        .get_data_by_id(&role_id)
+        .map(|cfg| {
+            cfg.RecommendFetterGroups
+                .iter()
+                .copied()
+                .filter(|&id| id > 0)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if selected_group_ids.is_empty() {
+        selected_group_ids = assets
+            .tables
+            .phantom_fetter_group
+            .items
+            .iter()
+            .take(3)
+            .map(|fg| fg.Id)
+            .collect();
+    }
+
+    let groups: Vec<PhantomFetterGroupInfo> = selected_group_ids
         .iter()
-        .take(3)
-        .map(|fg| PhantomFetterGroupInfo {
-            PhantomFetterGroupId: fg.Id,
+        .map(|&group_id| PhantomFetterGroupInfo {
+            PhantomFetterGroupId: group_id,
             CountNeed: 5,
         })
         .collect();
+
+    let mut seen_monsters = HashSet::new();
+    let mut main_phantoms = Vec::new();
+    for pi in &assets.tables.phantom_item.items {
+        if pi.MonsterId <= 0 {
+            continue;
+        }
+        let Some(&matched_group) = pi
+            .FetterGroup
+            .iter()
+            .find(|g| selected_group_ids.contains(g))
+        else {
+            continue;
+        };
+        if !seen_monsters.insert(pi.MonsterId) {
+            continue;
+        }
+        main_phantoms.push(MainPhantomRecommendInfo {
+            Usage: 1,
+            MonsterId: pi.MonsterId,
+            FetterGroupId: matched_group,
+        });
+        if main_phantoms.len() >= 3 {
+            break;
+        }
+    }
+
     vec![PhantomFetterRecommendInfo {
         Usage: 1,
         PhantomFetterGroupInfos: groups,
@@ -447,7 +498,7 @@ pub fn build_fetter_recommends(assets: &Assets) -> Vec<PhantomFetterRecommendInf
             CostId: 43311,
             Usage: 1,
         }],
-        MainPhantomRecommendInfos: Vec::new(),
+        MainPhantomRecommendInfos: main_phantoms,
     }]
 }
 
@@ -463,10 +514,10 @@ pub fn handle_phantom_attr_recommend_request(
 
 pub fn handle_phantom_fetter_recommend_request(
     state: &mut State,
-    _req: PhantomFetterRecommendRequest,
+    req: PhantomFetterRecommendRequest,
 ) -> Result<PhantomFetterRecommendResponse, String> {
     Ok(PhantomFetterRecommendResponse {
         ErrorCode: Some(ErrorCode::Success),
-        PhantomFetterRecommendInfos: build_fetter_recommends(&state.assets),
+        PhantomFetterRecommendInfos: build_fetter_recommends(&state.assets, req.RoleId),
     })
 }

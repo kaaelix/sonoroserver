@@ -245,17 +245,29 @@ impl PlayerProgressComponent {
     }
 }
 
+/// Ephemeral login restore state for save blocks (never persisted).
+#[derive(Debug, Default)]
+pub struct LoginRestore {
+    pub reenter_quests: Vec<i32>,
+    pub pos_rollback: Option<crate::helpers::save_block::PosRollback>,
+}
+
 #[derive(Debug, Default)]
 pub struct PlayerQuestComponent {
     pub player_id: i32,
     pub info: QuestInfo,
+    pub login_restore: LoginRestore,
 }
 
 impl PlayerQuestComponent {
     pub fn init(fs: &FileSystem, player_id: i32) -> io::Result<Self> {
         let info =
             load_or_create_zon::<QuestInfo>(fs, &format!("player/{player_id}/{}", QuestInfo::DATA_PATH))?;
-        Ok(Self { player_id, info })
+        Ok(Self {
+            player_id,
+            info,
+            login_restore: LoginRestore::default(),
+        })
     }
 
     pub fn save(&self, fs: &FileSystem) -> io::Result<()> {

@@ -25,6 +25,7 @@ use crate::helpers::quest_actions;
 use crate::helpers::quest_types::{ActionCallbacks, QuestContext, json_bool, json_int, json_str};
 use crate::helpers::reward;
 use crate::helpers::role::{self, RoleRepairSummary};
+use crate::helpers::save_block;
 use crate::sink::PushSink;
 
 pub use events::*;
@@ -82,7 +83,136 @@ pub fn action_callbacks<S: PushSink + ?Sized>() -> ActionCallbacks<'static, S> {
     }
 }
 
+fn discard_save_block_progress_on_login<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+) -> io::Result<()> {
+    ctx.quest_comp.login_restore.reenter_quests.clear();
+    ctx.quest_comp.login_restore.pos_rollback = None;
+
+    let quest_ids = triggers::snapshot_active_quest_ids(ctx);
+    for quest_id in quest_ids {
+        let Ok(nodes) = ctx.assets.quest_nodes.get_owner_nodes(quest_id) else {
+            continue;
+        };
+        let Some((active_nodes, finished_nodes)) = ctx
+            .quest_comp
+            .info
+            .find_active_quest(quest_id)
+            .map(|aq| (aq.active_nodes.clone(), aq.finished_nodes.clone()))
+        else {
+            continue;
+        };
+        let discard = save_block::plan_login_discard(&nodes, &active_nodes, &finished_nodes);
+        if discard.is_empty() {
+            continue;
+        }
+
+        if let Some(aq) = ctx.quest_comp.info.find_active_quest_mut(quest_id) {
+            for &node_id in &discard.reenter {
+                aq.mark_node_inactive(node_id);
+            }
+            for &node_id in &discard.unfinish {
+                remove_int_value(&mut aq.finished_nodes, node_id);
+            }
+        }
+        for &node_id in &discard.unfinish {
+            ctx.quest_comp
+                .info
+                .forget_child_quest_finished(quest_id, node_id);
+        }
+        forget_save_block_node_progress(ctx, quest_id, &nodes, &discard.blocks)?;
+
+        ctx.quest_comp.login_restore.reenter_quests.push(quest_id);
+        if ctx.quest_comp.login_restore.pos_rollback.is_none() {
+            for &block_id in &discard.blocks {
+                if let Some(rollback) = save_block::pos_rollback_of(&nodes, block_id) {
+                    ctx.quest_comp.login_restore.pos_rollback = Some(rollback);
+                    break;
+                }
+            }
+        }
+        tracing::info!(
+            target: "quest_engine",
+            "login restore: quest {quest_id} resumes at save block(s) {:?}; re-entering {} node(s), forgetting {} finished",
+            discard.blocks,
+            discard.reenter.len(),
+            discard.unfinish.len()
+        );
+    }
+    Ok(())
+}
+
+fn forget_save_block_node_progress<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    quest_id: i32,
+    nodes: &[NodeEntry],
+    blocks: &[i32],
+) -> io::Result<()> {
+    let mut target_ids = Vec::new();
+    for node in nodes {
+        let in_block = blocks
+            .iter()
+            .any(|&block_id| save_block::is_in_block(nodes, node.id, block_id));
+        if !in_block {
+            continue;
+        }
+        for target_id in extract_node_target_entity_ids(node) {
+            target_ids.push((node.id, target_id));
+        }
+    }
+
+    let mut claims_changed = false;
+    for (node_id, target_id) in target_ids {
+        if let Some(aq) = ctx.quest_comp.info.find_active_quest_mut(quest_id) {
+            remove_int_value(&mut aq.killed_entities, target_id);
+        }
+        if let Some(progress) = ctx.progress_comp.as_deref_mut() {
+            let key = format!("interact_done:{quest_id}:{node_id}:{target_id}");
+            if progress.info.remove_claim(&key) {
+                claims_changed = true;
+            }
+        }
+    }
+    if claims_changed && let Some(progress) = ctx.progress_comp.as_deref_mut() {
+        progress.save(ctx.fs)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn is_login_reentry_pending<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    quest_id: i32,
+) -> bool {
+    ctx.quest_comp
+        .login_restore
+        .reenter_quests
+        .contains(&quest_id)
+}
+
+fn reenter_save_blocks_after_login<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+) -> io::Result<()> {
+    ctx.quest_comp.login_restore.pos_rollback = None;
+    if ctx.quest_comp.login_restore.reenter_quests.is_empty() {
+        return Ok(());
+    }
+    let pending = std::mem::take(&mut ctx.quest_comp.login_restore.reenter_quests);
+    for quest_id in pending {
+        if !ctx.quest_comp.info.has_active_quest(quest_id) {
+            continue;
+        }
+        tracing::info!(
+            target: "quest_engine",
+            "login restore: entering save block of quest {quest_id} again"
+        );
+        tree::advance_quest_tree(ctx, quest_id, true)?;
+    }
+    tree::finalize_progression(ctx)?;
+    Ok(())
+}
+
 pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>) -> io::Result<()> {
+    discard_save_block_progress_on_login(ctx)?;
     ctx.quest_comp.info.unlock_system(10035);
     if !ctx.quest_comp.info.has_finished_quest(PROLOGUE_QUEST_ID)
         && !ctx.quest_comp.info.has_active_quest(PROLOGUE_QUEST_ID)
@@ -252,6 +382,7 @@ pub fn on_scene_loading_finish<S: PushSink + ?Sized>(
     if ctx.scene.is_none() {
         return Ok(());
     }
+    reenter_save_blocks_after_login(ctx)?;
     ensure_active_quest_targets_spawned(ctx);
     tree::ensure_active_quest_timers_scheduled(ctx)?;
     triggers::push_quest_state_notifies(ctx)?;
@@ -1529,16 +1660,11 @@ pub fn claim_daily_rewards<S: PushSink + ?Sized>(
                 q.Data.RewardId,
                 6003,
             )?;
-            if let Some(pkg) = ctx.assets.tables.drop_package.get_data_by_id(&q.Data.RewardId) {
-                for (&iid, &cnt) in pkg.DropPreview.iter() {
-                    if iid <= 0 {
-                        continue;
-                    }
-                    rewards.push(DailyQuestReward {
-                        ItemId: iid,
-                        ItemCount: if cnt > 0 { cnt } else { 1 },
-                    });
-                }
+            for item in reward::preview_drop_items(ctx.assets, q.Data.RewardId) {
+                rewards.push(DailyQuestReward {
+                    ItemId: item.item_id,
+                    ItemCount: item.count,
+                });
             }
         }
         append_unique_int(&mut ctx.quest_comp.info.daily.claimed_daily_rewards, qid);

@@ -4,6 +4,7 @@ use std::hash::Hash;
 use crate::assets_db::AssetsDb;
 use crate::data_tables::{DataTables, TableRef};
 use crate::tables::blueprint_config::{BlueprintConfig, EntityLogic, EntityType};
+use crate::tables::entity_components::extra::{EntityGroupComponent, ExtraEntry, ExtraKind};
 use crate::tables::level_entity_config::LevelEntityConfig;
 use crate::tables::level_play_data::LevelPlayData;
 use crate::tables::teleporter::Teleporter;
@@ -95,6 +96,12 @@ pub struct Inputs<'a> {
     pub level_play_data: &'a [LevelPlayData],
 }
 
+#[derive(Debug, Clone)]
+pub struct EntityGroupSpec {
+    pub group_entity_id: i64,
+    pub component: EntityGroupComponent,
+}
+
 #[derive(Default)]
 pub struct AssetIndexes {
     pub entity_by_map_pair: HashMap<MapEntityKey, u32>,
@@ -107,6 +114,7 @@ pub struct AssetIndexes {
     pub level_plays_by_reward_entity: SpanTable<i32>,
     pub blueprint_by_type: HashMap<String, u32>,
     pub template_by_type: HashMap<String, u32>,
+    pub entity_groups_by_member: HashMap<MapEntityKey, Vec<EntityGroupSpec>>,
 }
 
 impl AssetIndexes {
@@ -497,7 +505,50 @@ fn build_level_entity_indexes_from_db(
     out.entity_by_id = SpanTable::from_pairs(id_pairs);
     out.spawnables_by_map_cell = SpanTable::from_pairs(cell_pairs);
     out.spawnables_by_map = SpanTable::from_pairs(map_pairs);
+    if let Ok(group_rows) = db.query_entity_group_rows() {
+        for (map_id, group_entity_id, raw) in group_rows {
+            if let Ok(cfg) = serde_json::from_str::<LevelEntityConfig>(&raw)
+                && let Some(ExtraEntry::EntityGroupComponent(egc)) =
+                    cfg.ComponentsData.find_extra_entry(ExtraKind::EntityGroupComponent)
+            {
+                register_entity_group_spec(
+                    map_id,
+                    group_entity_id,
+                    (**egc).clone(),
+                    &mut out.entity_groups_by_member,
+                );
+            }
+        }
+    }
     Ok(())
+}
+
+fn register_entity_group_spec(
+    map_id: i32,
+    group_entity_id: i64,
+    component: EntityGroupComponent,
+    map: &mut HashMap<MapEntityKey, Vec<EntityGroupSpec>>,
+) {
+    if component.Disabled == Some(true) {
+        return;
+    }
+    let Some(ids) = component.EntityIds.as_ref() else {
+        return;
+    };
+    let spec = EntityGroupSpec {
+        group_entity_id,
+        component: component.clone(),
+    };
+    for &member_id in ids {
+        if member_id > 0 {
+            map.entry(MapEntityKey {
+                map_id,
+                entity_id: member_id,
+            })
+            .or_default()
+            .push(spec.clone());
+        }
+    }
 }
 
 fn build_level_entity_indexes(
@@ -519,6 +570,16 @@ fn build_level_entity_indexes(
             })
             .or_insert(idx_u32);
         id_pairs.push((cfg.EntityId, idx_u32));
+        if let Some(ExtraEntry::EntityGroupComponent(egc)) =
+            cfg.ComponentsData.find_extra_entry(ExtraKind::EntityGroupComponent)
+        {
+            register_entity_group_spec(
+                cfg.MapId,
+                cfg.EntityId,
+                (**egc).clone(),
+                &mut out.entity_groups_by_member,
+            );
+        }
         if let Some(cell) = spawnable_cell_for_entity(
             cfg,
             blueprints,

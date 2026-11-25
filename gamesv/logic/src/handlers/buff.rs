@@ -542,14 +542,16 @@ pub fn add_buff_to_entity<S: PushSink + ?Sized>(
             next_buff.IsActive = entry.is_active;
             next_buff.MessageId = -1;
 
-            append_stack_count_notify(&mut notify_data, &combat_common, &next_buff, disposition);
-            if was_active != next_buff.IsActive {
-                append_activate_buff_notify(
-                    &mut notify_data,
-                    &combat_common,
-                    next_buff.HandleId,
-                    next_buff.IsActive,
-                );
+            if entry.notify_client {
+                append_stack_count_notify(&mut notify_data, &combat_common, &next_buff, disposition);
+                if was_active != next_buff.IsActive {
+                    append_activate_buff_notify(
+                        &mut notify_data,
+                        &combat_common,
+                        next_buff.HandleId,
+                        next_buff.IsActive,
+                    );
+                }
             }
             enqueue_buff_change_once(events, target, &mut buff_change_enqueued, player_id);
             buff_timers.refresh_buff(&next_buff, &buff_data, target.net_id, now_ms, disposition);
@@ -600,35 +602,37 @@ pub fn add_buff_to_entity<S: PushSink + ?Sized>(
             apply_buff_duration(&mut new_buff, &buff_data, entry.duration_seconds);
             let disposition =
                 BuffTimerScheduler::application_disposition(&buff_data, true, false, entry.is_active);
-            notify_data.push(CombatReceiveData {
-                Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
-                    CombatNotifyData {
-                        CombatCommon: Some(combat_common.clone()),
-                        Message: Some(CombatNotifyDataMessageOneof::ApplyGameplayEffectNotify(
-                            ApplyGameplayEffectNotify {
-                                Handle: new_buff.HandleId,
-                                Id: new_buff.BuffId,
-                                Level: new_buff.Level,
-                                EntityId: new_buff.EntityId,
-                                InstigatorId: new_buff.InstigatorId,
-                                ApplyType: Some(new_buff.ApplyType.unwrap_or(ApplyGEType::Common)),
-                                IsActive: new_buff.IsActive,
-                                ServerId: new_buff.ServerId,
-                                StackCount: new_buff.StackCount,
-                                CRoundAction: Some(
-                                    ApplyGameplayEffectNotifyCRoundActionOneof::Duration(
-                                        new_buff.Duration,
+            if entry.notify_client {
+                notify_data.push(CombatReceiveData {
+                    Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
+                        CombatNotifyData {
+                            CombatCommon: Some(combat_common.clone()),
+                            Message: Some(CombatNotifyDataMessageOneof::ApplyGameplayEffectNotify(
+                                ApplyGameplayEffectNotify {
+                                    Handle: new_buff.HandleId,
+                                    Id: new_buff.BuffId,
+                                    Level: new_buff.Level,
+                                    EntityId: new_buff.EntityId,
+                                    InstigatorId: new_buff.InstigatorId,
+                                    ApplyType: Some(new_buff.ApplyType.unwrap_or(ApplyGEType::Common)),
+                                    IsActive: new_buff.IsActive,
+                                    ServerId: new_buff.ServerId,
+                                    StackCount: new_buff.StackCount,
+                                    CRoundAction: Some(
+                                        ApplyGameplayEffectNotifyCRoundActionOneof::Duration(
+                                            new_buff.Duration,
+                                        ),
                                     ),
-                                ),
-                                Time: Some(ApplyGameplayEffectNotifyTimeOneof::LeftDuration(
-                                    new_buff.LeftDuration,
-                                )),
-                                ConfBuffId: new_buff.ConfBuffId,
-                            },
-                        )),
-                    },
-                )),
-            });
+                                    Time: Some(ApplyGameplayEffectNotifyTimeOneof::LeftDuration(
+                                        new_buff.LeftDuration,
+                                    )),
+                                    ConfBuffId: new_buff.ConfBuffId,
+                                },
+                            )),
+                        },
+                    )),
+                });
+            }
             enqueue_buff_change_once(events, target, &mut buff_change_enqueued, player_id);
             buff_timers.schedule_new_buff(&new_buff, &buff_data, target.net_id, now_ms);
             if let Some(buffs) = scene.entities[handle.index].buffs.as_mut() {

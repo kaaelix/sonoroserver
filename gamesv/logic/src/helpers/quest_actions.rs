@@ -12,11 +12,11 @@ use sonoro_gamesv_fs::last_scene_info::LastSceneInfo;
 use sonoro_gamesv_fs::quest_info::{QuestInfo, append_unique_int, append_unique_str, remove_int_value, remove_str_value};
 use sonoro_proto::enums::{
     BtType, ERemoveEntityType, ExitVehicleType, GameCtxType, GravityFlipType, IllustratedType,
-    MoveStatus, TeleportReason,
+    MoveStatus, SuspendType, TeleportReason,
 };
 use sonoro_proto::pb::{
     AddGuestNotify, AlertArea, AlertAreaNotify, AudioStatePb, AudioStateUpdateNotify,
-    BehaviorTreeCtxPb, BtVarUpdateNotify, CommonTagData, ElevatorMoveNotify,
+    BehaviorTreeCtxPb, BtSuspendNotify, BtVarUpdateNotify, CommonTagData, ElevatorMoveNotify,
     EntityAddBubbleNotify, EntityAddDynamicInteractNotify, EntityCommonTagNotify, EntityCtxPb,
     EntityPosResetNotify, EntityRemoveBubbleNotify, EntityRemoveDynamicInteractNotify,
     EntityRemoveInfo, EntityRemoveNotify, EntityStateReadyNotify, FlowActionCtxPb,
@@ -26,14 +26,14 @@ use sonoro_proto::pb::{
     LevelPlayStateNotify, MailInfosNotify, MapMarkShowIdInfoUpdateNotify, ModifyEntityCampNotify,
     MovePackageNotify, MoveReplaySample, MoveSplineConfig, MoveSplineConfigEndPointOneof,
     MoveSplineConfigLookDirOneof, MoveSplineConfigStartPointOneof, MoveSplineStatusNotify,
-    MovingEntityData, NormalItem, NormalItemUpdateNotify, PlayerReviveNotify, PlayerVarNotify,
-    RemoveGuestNotify, RoleTrialCloseNotify, RoleTrialOpenNotify, Rotator,
-    RoverRogueRoomInfoNotify, SceneAreaState, SceneAreaStateNotify, SceneChangeDataLayerNotify,
-    SceneItemMoveTargetInfo, SceneItemMoveTargetNotify, SceneItemSplineRuntimeData,
-    SceneSubLevelsChangedNotify, SceneTimeInfo, SyncSceneTimeNotify, TeleportNotify,
-    TeleportUpdateNotify, TemporaryTeleportAllInfoNotify, TimeLockInfoNotify, TrialRoleItem,
-    VarDefinePb, VarDefinePbValueOneof, Vector, VehicleUpdateEntityNotify, VehicleUpdateNotify,
-    WeatherNotify,
+    MovingEntityData, NormalItem, NormalItemUpdateNotify, OccupationPbInfo,
+    OperationRestrictionNotify, PlayerReviveNotify, PlayerVarNotify, RemoveGuestNotify,
+    RoleTrialCloseNotify, RoleTrialOpenNotify, Rotator, RoverRogueRoomInfoNotify, SceneAreaState,
+    SceneAreaStateNotify, SceneChangeDataLayerNotify, SceneItemMoveTargetInfo,
+    SceneItemMoveTargetNotify, SceneItemSplineRuntimeData, SceneSubLevelsChangedNotify,
+    SceneTimeInfo, SummonEntityNotify, SyncSceneTimeNotify, TeleportNotify, TeleportUpdateNotify,
+    TemporaryTeleportAllInfoNotify, TimeLockInfoNotify, TrialRoleItem, VarDefinePb,
+    VarDefinePbValueOneof, Vector, VehicleUpdateEntityNotify, VehicleUpdateNotify, WeatherNotify,
 };
 use sonoro_proto::wire::PbEnum;
 
@@ -179,7 +179,21 @@ pub fn execute_action<S: PushSink + ?Sized>(
                 cb(ctx, quest_id)?;
             }
         }
-        "SetPlayerOperationRestriction" => {}
+        "SetPlayerOperationRestriction" => {
+            let is_enable_all = json_str(params.get("Type")) == Some("EnableAll");
+            let encoded_params = if is_enable_all {
+                Vec::new()
+            } else {
+                serde_json::to_vec(&Value::Object(params.clone())).unwrap_or_default()
+            };
+            ctx.sink.push(
+                OperationRestrictionNotify::MSG_ID,
+                &OperationRestrictionNotify {
+                    IsNull: is_enable_all,
+                    Params: encoded_params,
+                },
+            );
+        }
         "DestroyQuest" => {
             if let Some(target_qid) = json_int(params.get("QuestId"))
                 && let Some(cb) = callbacks.on_destroy_quest
@@ -645,16 +659,7 @@ pub fn execute_action<S: PushSink + ?Sized>(
             }
         }
         "CreatePrefab" | "DestroyPrefab" => {
-            if let Some(vn) = params.get("VarName").and_then(|v| v.as_object())
-                && let Some(pname) = json_str(vn.get("Name"))
-            {
-                record_progress_int(
-                    ctx,
-                    &format!("prefab:{pname}"),
-                    i64::from(name == "CreatePrefab"),
-                    false,
-                )?;
-            }
+            apply_prefab_action(ctx, name, params)?;
         }
         _ if is_tracked_or_client_action(name) => return Ok(()),
         "ClearEntityVisibleTag" => apply_entity_visibility_list(ctx, params.get("EntityIds"), true)?,
@@ -675,7 +680,9 @@ pub fn execute_action<S: PushSink + ?Sized>(
         "EnableHostility" | "EnableAI" | "OverrideAiBehaviorTree" => {
             apply_ai_control_action(ctx, name, params)?;
         }
-        "ManualOccupations" | "ForceOccupations" => apply_occupation_action(ctx, params)?,
+        "ManualOccupations" | "ForceOccupations" => {
+            apply_occupation_action(ctx, quest_id, node_id, name == "ForceOccupations", params)?;
+        }
         "SetNpcGroupPerform" => apply_set_npc_group_perform(ctx, params)?,
         "RemoveNpcGroupPerform" => {
             if let Some(key) = json_str(params.get("Key")) {
@@ -686,6 +693,150 @@ pub fn execute_action<S: PushSink + ?Sized>(
         "PlayBubble" => {
             let guid = json_str(act_obj.get("ActionGuid")).unwrap_or("");
             apply_add_play_bubble(ctx, params, guid);
+        }
+        "ChangeNpcPerformState" => {
+            let eid = json_int(params.get("EntityId")).unwrap_or(0);
+            let st = json_str(params.get("State")).unwrap_or("Default");
+            if eid > 0 {
+                record_progress_claim(ctx, &format!("npc_perform:{eid}:{st}"))?;
+            }
+        }
+        "ToggleDragActorPlay" => {
+            let enabled = params
+                .get("Config")
+                .and_then(Value::as_object)
+                .and_then(|c| json_str(c.get("Type")))
+                .is_none_or(|t| t != "Disable");
+            record_progress_int(ctx, "drag_actor:in_play", i64::from(enabled), false)?;
+        }
+        "EnableSplineMoveModel" => {
+            if let Some(cfg) = params.get("Config").and_then(Value::as_object) {
+                let sid = json_int(cfg.get("SplineEntityId")).unwrap_or(0);
+                let on = json_str(cfg.get("Type")).is_none_or(|t| t != "Close");
+                record_progress_int(ctx, &format!("spline_move:{sid}"), i64::from(on), false)?;
+            }
+        }
+        "EnableNearbyTracking" => {
+            let on = json_bool(params.get("IsEnable")).unwrap_or(true);
+            record_progress_int(ctx, "nearby_tracking:enabled", i64::from(on), false)?;
+        }
+        "FocusOnMapMark" => {
+            if let Some(mt) = params.get("MapMarkType").and_then(Value::as_object) {
+                let qid = json_int(mt.get("QuestId")).unwrap_or(0);
+                if qid > 0 {
+                    record_progress_int(ctx, "map:focus_quest", i64::from(qid), false)?;
+                }
+            }
+        }
+        "LeisureInteract" | "NpcLeisureInteract" => {
+            let eid = json_int(params.get("SceneEntity"))
+                .or_else(|| json_int(params.get("EntityId")))
+                .or_else(|| {
+                    params
+                        .get("Option")
+                        .and_then(Value::as_object)
+                        .and_then(|o| json_int(o.get("EntityId")))
+                })
+                .unwrap_or(0);
+            if eid > 0 {
+                record_progress_int(ctx, &format!("leisure:entity:{eid}"), 1, false)?;
+                if let Some(scene) = ctx.scene.as_deref_mut() {
+                    wake_entity_fsm(scene, eid, wake_reason::EVENT);
+                }
+            }
+        }
+        "RestoreAiBehaviorTree" => {
+            let eids = parse_int_list(params.get("EntityIds"));
+            for cfg_id in eids {
+                if cfg_id <= 0 {
+                    continue;
+                }
+                record_progress_int(ctx, &format!("ai_bt_cur:{cfg_id}"), 0, false)?;
+                if let Some(scene) = ctx.scene.as_deref_mut() {
+                    wake_entity_fsm(scene, cfg_id, wake_reason::INITIAL | wake_reason::BLACKBOARD);
+                }
+            }
+        }
+        "StartRoadNetworkNavigation" => {
+            let tid = params
+                .get("Target")
+                .and_then(Value::as_object)
+                .and_then(|t| json_int(t.get("TargetId")))
+                .unwrap_or(0);
+            record_progress_int(ctx, &format!("road_nav:{tid}"), 1, false)?;
+        }
+        "GiantTriggerResponse" => {
+            record_progress_claim(ctx, "giant_trigger:active")?;
+        }
+        "OpenSystemBoard" | "OpenSystemBoardWithReturn" | "OpenSimpleGameplay" => {
+            if let Some(st) = params.get("SystemType").and_then(Value::as_object) {
+                if let Some(bid) = json_int(st.get("Id")) {
+                    record_progress_int(ctx, &format!("system_board:{bid}"), 1, false)?;
+                }
+                if let Some(rv) = st.get("ReturnVar").and_then(Value::as_object)
+                    && let Some(vname) = json_str(rv.get("Name"))
+                {
+                    ctx.quest_comp.info.set_var_int(vname, 1);
+                    ctx.quest_comp.save(ctx.fs)?;
+                }
+            } else if let Some(bid) = json_int(params.get("BoardId")) {
+                record_progress_int(ctx, &format!("system_board:{bid}"), 1, false)?;
+            } else {
+                let st = params
+                    .get("GameplayConfig")
+                    .and_then(Value::as_object)
+                    .and_then(|g| json_str(g.get("Type")))
+                    .or_else(|| json_str(params.get("SystemType")))
+                    .unwrap_or("default");
+                record_progress_claim(ctx, &format!("simple_gameplay:{st}"))?;
+            }
+        }
+        "PlayDynamicSettlement" => {
+            let dtype = params
+                .get("DynamicSettlementConfig")
+                .and_then(Value::as_object)
+                .and_then(|d| json_str(d.get("Type")))
+                .unwrap_or("Battle");
+            record_progress_claim(ctx, &format!("dynamic_settlement:{dtype}"))?;
+        }
+        "DriveMotorInSpecConfig" => {
+            record_progress_int(ctx, "motor:spec_cfg", 1, false)?;
+        }
+        "ExecClientBattleAction" => {
+            if let Some(opt) = params.get("ClientBattleOption").and_then(Value::as_object) {
+                if let Some(msid) = json_int(opt.get("MotorSkillId"))
+                    && msid > 0
+                {
+                    record_progress_claim(ctx, &format!("skill:used:{msid}"))?;
+                }
+                let atype = json_str(opt.get("Type")).unwrap_or("default");
+                record_progress_claim(ctx, &format!("client_battle_action:{atype}"))?;
+            }
+        }
+        "SlideRailEnd" => {
+            record_progress_int(ctx, "slide_rail:active", 0, false)?;
+        }
+        "TakePlotPhoto" => {
+            record_progress_claim(ctx, "photo:submitted")?;
+        }
+        "WaitBattleCondition" => {
+            let eid = params
+                .get("StateOption")
+                .and_then(Value::as_object)
+                .and_then(|o| json_int(o.get("EntityId")))
+                .unwrap_or(0);
+            if eid > 0 {
+                record_progress_int(ctx, &format!("battle_cond:{eid}"), 1, false)?;
+            }
+        }
+        "WaitUntilLevelSequenceReachMark" => {
+            let eid = json_int(params.get("EntityId")).unwrap_or(0);
+            let mark = json_str(params.get("Mark")).unwrap_or("default");
+            record_progress_claim(ctx, &format!("lvl_seq_mark:{eid}:{mark}"))?;
+        }
+        "PromptQuestChapterUI" => {
+            let ch_state = json_int(params.get("ChapterState")).unwrap_or(1);
+            record_progress_int(ctx, "quest:chapter_ui", i64::from(ch_state), false)?;
         }
         _ => {
             tracing::debug!("unhandled quest action: {name}");
@@ -2628,6 +2779,41 @@ fn is_tracked_or_client_action(name: &str) -> bool {
             | "VehicleSprint"
             | "VehicleWaterfallClimbing"
             | "VisionDisplayTarget"
+            | "AdjustPlayerCamera"
+            | "CameraLookAt"
+            | "CharacterLookAt"
+            | "CommonTip"
+            | "CommonTip2"
+            | "EnableClientFunction"
+            | "EnableEntityLookAt"
+            | "EnterMovieCamera"
+            | "EnterMovieMode"
+            | "EntityLookAt"
+            | "EntityTurnTo"
+            | "ExitMovieCamera"
+            | "ExitMovieMode"
+            | "FadeInScreen"
+            | "FadeOutScreen"
+            | "GuestOperateUiAnimation"
+            | "Log"
+            | "PlayEffect"
+            | "PlayEffect2"
+            | "PlayMontage"
+            | "PlayRegisteredMontage"
+            | "PlayerLookAt"
+            | "PostAkEvent"
+            | "Prompt"
+            | "ResetPlayerCameraFocus"
+            | "RestorePlayerCameraAdjustment"
+            | "SetSubScreenMode"
+            | "SetTimeScale"
+            | "StopCameraLookAt"
+            | "StopUiScreenEffect"
+            | "ToggleHighlightExploreUi"
+            | "ToggleScanSplineEffect"
+            | "TriggerCameraShake"
+            | "TriggerGamepadShake"
+            | "Wait"
     )
 }
 
@@ -3882,6 +4068,59 @@ fn apply_reset_level_play_action<S: PushSink + ?Sized>(
     Ok(())
 }
 
+fn resolve_spawn_anchor<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    pos_eid: i32,
+) -> ([f32; 3], [f32; 3]) {
+    if let Some(scene) = ctx.scene.as_deref() {
+        if pos_eid > 0 {
+            if let Some(nid) = scene.find_entity_net_id_by_config_id(pos_eid)
+                && let Some(pos) = scene.entity(nid).and_then(|s| s.position)
+            {
+                return (pos.location, pos.rotation);
+            }
+            if let Some(cfg) = ctx
+                .assets
+                .find_level_entity(scene.instance_id, i64::from(pos_eid))
+                && let Some(loc) = asset_indexes::entity_world_pos(&cfg)
+            {
+                return (loc, asset_indexes::entity_world_rot(&cfg));
+            }
+        }
+        if let Some(p) = scene.instance.players.first() {
+            return (p.location, p.rotation);
+        }
+    }
+    ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+}
+
+fn despawn_tracked_net_ids<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    net_ids: Vec<i64>,
+) {
+    let Some(scene) = ctx.scene.as_deref_mut() else {
+        return;
+    };
+    let mut infos = Vec::new();
+    for nid in net_ids {
+        if scene.remove(ctx.fs, nid).is_ok() {
+            infos.push(EntityRemoveInfo {
+                EntityId: nid,
+                Type: Some(ERemoveEntityType::RemoveTypeNormal),
+            });
+        }
+    }
+    if !infos.is_empty() {
+        ctx.sink.push(
+            EntityRemoveNotify::MSG_ID,
+            &EntityRemoveNotify {
+                RemoveInfos: infos,
+                IsRemove: true,
+            },
+        );
+    }
+}
+
 fn apply_summon_entity_action<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     params: &Map<String, Value>,
@@ -3893,6 +4132,46 @@ fn apply_summon_entity_action<S: PushSink + ?Sized>(
         return Ok(());
     };
     let pos_eid = json_int(cfg_val.get("PositionEntityId")).unwrap_or(0);
+    let (loc, rot) = resolve_spawn_anchor(ctx, pos_eid);
+    let (player_nid, spawned_nid) = {
+        let Some(scene) = ctx.scene.as_deref_mut() else {
+            return record_progress_int(
+                ctx,
+                &format!("summon:{tpl_id}"),
+                if pos_eid > 0 { i64::from(pos_eid) } else { 1 },
+                true,
+            );
+        };
+        let pn = scene.current_role_entity_id();
+        let nid = crate::commands::entity::spawn_synthetic_template_entity(
+            scene,
+            ctx.fs,
+            ctx.assets,
+            ctx.sink,
+            ctx.basic_comp,
+            tpl_id,
+            i64::from(pos_eid),
+            loc,
+            rot,
+        );
+        if let Some(id) = nid {
+            scene
+                .summoned_entities
+                .entry(tpl_id.to_string())
+                .or_default()
+                .push(id);
+        }
+        (pn, nid)
+    };
+    if let Some(id) = spawned_nid {
+        ctx.sink.push(
+            SummonEntityNotify::MSG_ID,
+            &SummonEntityNotify {
+                SummonerId: player_nid,
+                SummonIds: vec![id],
+            },
+        );
+    }
     record_progress_int(
         ctx,
         &format!("summon:{tpl_id}"),
@@ -3913,13 +4192,117 @@ fn apply_destroy_summoned_action<S: PushSink + ?Sized>(
         return Ok(());
     };
     if let Some(tpl_id) = json_str(cfg_val.get("TemplateId")) {
+        let removed = ctx
+            .scene
+            .as_deref_mut()
+            .and_then(|s| s.summoned_entities.remove(tpl_id))
+            .unwrap_or_default();
+        despawn_tracked_net_ids(ctx, removed);
         return record_progress_int(ctx, &format!("summon:{tpl_id}"), 0, false);
     }
     if name == "DestroyDynamicEntities" {
         let dtype = json_str(cfg_val.get("Type")).unwrap_or("dynamic");
+        let all_summoned = ctx
+            .scene
+            .as_deref_mut()
+            .map(|s| s.summoned_entities.drain().flat_map(|(_, v)| v).collect())
+            .unwrap_or_default();
+        despawn_tracked_net_ids(ctx, all_summoned);
         return record_progress_int(ctx, &format!("dyn_ent:{dtype}"), 0, false);
     }
     Ok(())
+}
+
+fn apply_prefab_action<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    name: &str,
+    params: &Map<String, Value>,
+) -> io::Result<()> {
+    let pname = params
+        .get("VarName")
+        .and_then(Value::as_object)
+        .and_then(|vn| json_str(vn.get("Name")))
+        .unwrap_or("prefab");
+    if name == "DestroyPrefab" {
+        let removed = ctx
+            .scene
+            .as_deref_mut()
+            .and_then(|s| s.prefab_entities.remove(pname))
+            .unwrap_or_default();
+        despawn_tracked_net_ids(ctx, removed);
+        return record_progress_int(ctx, &format!("prefab:{pname}"), 0, false);
+    }
+
+    let pos_eid = json_int(params.get("PosEntityId")).unwrap_or(0);
+    let prefab_id = params
+        .get("Config")
+        .and_then(Value::as_object)
+        .and_then(|c| json_int(c.get("PrefabId")))
+        .unwrap_or(0);
+    let (anchor_loc, anchor_rot) = resolve_spawn_anchor(ctx, pos_eid);
+    if prefab_id > 0
+        && let Some(prefab) = ctx
+            .assets
+            .tables
+            .prefab_config
+            .get_data_by_id(&prefab_id)
+            .map(|p| p.into_owned())
+    {
+        let mut spawned = Vec::new();
+        if let Some(scene) = ctx.scene.as_deref_mut() {
+            for ent in &prefab.Entities {
+                let Some(ed) = ent.get("EntityData").and_then(Value::as_object) else {
+                    continue;
+                };
+                let Some(bp) = json_str(ed.get("BlueprintType")) else {
+                    continue;
+                };
+                let cfg_id = json_i64(ed.get("Id")).unwrap_or(0);
+                let tf = ed.get("Transform").and_then(Value::as_object);
+                let pos = tf
+                    .and_then(|t| t.get("Pos"))
+                    .and_then(Value::as_object)
+                    .map_or(anchor_loc, |p| {
+                        [
+                            anchor_loc[0] + json_float(p.get("X")).unwrap_or(0.0),
+                            anchor_loc[1] + json_float(p.get("Y")).unwrap_or(0.0),
+                            anchor_loc[2] + json_float(p.get("Z")).unwrap_or(0.0),
+                        ]
+                    });
+                let rot = tf
+                    .and_then(|t| t.get("Rot"))
+                    .and_then(Value::as_object)
+                    .map_or(anchor_rot, |r| {
+                        [
+                            json_float(r.get("X")).unwrap_or(0.0),
+                            json_float(r.get("Y")).unwrap_or(0.0),
+                            json_float(r.get("Z")).unwrap_or(0.0),
+                        ]
+                    });
+                if let Some(nid) = crate::commands::entity::spawn_synthetic_template_entity(
+                    scene,
+                    ctx.fs,
+                    ctx.assets,
+                    ctx.sink,
+                    ctx.basic_comp,
+                    bp,
+                    cfg_id,
+                    pos,
+                    rot,
+                ) {
+                    spawned.push(nid);
+                }
+            }
+            if !spawned.is_empty() {
+                scene
+                    .prefab_entities
+                    .entry(pname.to_string())
+                    .or_default()
+                    .extend(spawned);
+            }
+        }
+    }
+    record_progress_int(ctx, &format!("prefab:{pname}"), 1, false)
 }
 
 fn destroy_config_ids<S: PushSink + ?Sized>(
@@ -5068,16 +5451,64 @@ fn apply_ai_control_action<S: PushSink + ?Sized>(
 
 fn apply_occupation_action<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
+    quest_id: i32,
+    node_id: i32,
+    is_force: bool,
     params: &Map<String, Value>,
 ) -> io::Result<()> {
     let otype = json_str(params.get("OccupationType")).unwrap_or("Request");
     let is_req = otype != "Release";
+    let inc_id = i64::from(quest_id);
+    let mut occ_names = Vec::new();
     if let Some(Value::Array(arr)) = params.get("Occupations") {
         for item in arr {
             let Some(occ_name) = json_str(Some(item)) else {
                 continue;
             };
+            occ_names.push(occ_name.to_string());
             record_progress_int(ctx, &format!("occ:{occ_name}"), i64::from(is_req), false)?;
+        }
+    }
+    if let Some(scene) = ctx.scene.as_deref_mut() {
+        if is_req {
+            for occ_name in &occ_names {
+                if is_force
+                    && let Some(prev) = scene
+                        .bt_occupations
+                        .iter()
+                        .find(|o| o.resource_name == *occ_name && (o.owner_id != quest_id || o.inc_id != inc_id))
+                        .cloned()
+                {
+                    ctx.sink.push(
+                        BtSuspendNotify::MSG_ID,
+                        &BtSuspendNotify {
+                            NodeId: prev.node_id,
+                            SuspendType: SuspendType::Occupation as i32,
+                            OccupationInfo: vec![OccupationPbInfo {
+                                ResourceName: occ_name.as_bytes().to_vec(),
+                                NodeId: node_id,
+                                IncId: inc_id,
+                            }],
+                            TreeOwnerId: prev.owner_id,
+                            TreeIncId: prev.inc_id,
+                            IsScreenOccupy: false,
+                        },
+                    );
+                }
+                scene.upsert_occupation(
+                    BtType::BtTypeQuest,
+                    quest_id,
+                    inc_id,
+                    node_id,
+                    occ_name,
+                );
+            }
+        } else if !occ_names.is_empty() {
+            scene
+                .bt_occupations
+                .retain(|o| !occ_names.iter().any(|n| n == &o.resource_name));
+        } else if quest_id > 0 {
+            scene.release_occupations_for_node(quest_id, node_id);
         }
     }
     record_progress_int(ctx, "world:occupation", i64::from(is_req), false)

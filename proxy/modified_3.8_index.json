@@ -1,0 +1,727 @@
+{
+  "default": {
+    "CdnEvalCfg": {
+      "Broadband": {
+        "Shuffle": false,
+        "EvalTime": 3,
+        "SkipSize": 180
+      },
+      "Cellular": {
+        "Shuffle": false,
+        "EvalTime": 3,
+        "SkipSize": 90
+      }
+    },
+    "CdnScoreCfg": {
+      "UsedCandidate": "legacy_linear",
+      "Candidates": [
+        {
+          "Name": "legacy_linear",
+          "Steps": [
+            {
+              "Let": "speedScore",
+              "Op": "mul",
+              "A": "speed",
+              "B": 1
+            },
+            {
+              "Let": "priceCost",
+              "Op": "mul",
+              "A": "weight",
+              "B": 1
+            },
+            {
+              "Let": "score",
+              "Op": "sub",
+              "A": "speedScore",
+              "B": "priceCost"
+            }
+          ],
+          "Output": "score",
+          "Order": "desc"
+        }
+      ]
+    },
+    "CdnUrl": [
+      {
+        "url": "https://cdn-huoshan-hw-mc.aki-game.net/prod/client/",
+        "weight": "0"
+      },
+      {
+        "url": "https://cdn-akamai-hw-mc.aki-game.net/prod/client/",
+        "weight": "2177"
+      },
+      {
+        "url": "https://cdn-qcloud-hw-mc.aki-game.net/prod/client/",
+        "weight": "1"
+      }
+    ],
+    "SecondaryUrl": [],
+    "PriceRatio": 1,
+    "SpeedRatio": 1,
+    "GachaUrl": {
+      "GachaRecord": "https://aki-gm-resources-oversea.aki-game.net",
+      "GachaPoolDetail": "https://aki-gm-resources-oversea.aki-game.net"
+    },
+    "LogReport": {
+      "name": "hw-aki-upload-log-1319073642",
+      "region": "ap-singapore"
+    },
+    "PackageUpdateDescUrl": {
+      "MainUrl": "https://aki-gm-resources-back.aki-game.net/force_update/UpdateDesc.html",
+      "SubUrl": "https://aki-gm-resources-back-aws.aki-game.net/force_update/UpdateDesc.html"
+    },
+    "ParallelPackageDescUrl": {
+      "MainUrl": "https://aki-gm-resources-back.aki-game.net/force_update/OptionalUpdate.json",
+      "SubUrl": "https://aki-gm-res-back-akamai.aki-game.net/force_update/OptionalUpdate.json"
+    },
+    "PackageUpdateUrl": {
+      "MainUrl": "https://aki-gm-resources-back.aki-game.net/force_update/UpdateJs.html",
+      "SubUrl": "https://aki-gm-resources-back-aws.aki-game.net/force_update/UpdateJs.html"
+    },
+    "GARUrl": "https://gar-service.aki-game.net",
+    "TDCfg": {
+      "URL": "http://us-datareceiver.aki-game.net",
+      "AppID": "bf3f44edc6cf43c582e347ba660876c0"
+    },
+    "KDCfg": {
+      "URL": "https://aki-gb-sdklog.kurogames.net",
+      "AppID": "bf3f44edc6cf43c582e347ba660876c0"
+    },
+    "GmOpen": false,
+    "RptOpen": false,
+    "IosAuditFirstDownloadTip": false,
+    "SDKEnvironment": {
+      "PS5": "Product"
+    },
+    "NoticeUrl": "http://127.0.0.1:5500/gm-notice",
+    "MixUri": "zXGBurT1FHY5eBpEhgbCw7n85imvi3XR",
+    "ResUri": "zXGBurT1FHY5eBpEhgbCw7n85imvi3XR",
+    "ServerTimeUrl": [
+      "https://st-sg1.aki-game.net/current_time",
+      "https://st-sg2.aki-game.net/current_time",
+      "https://st-sg3.aki-game.net/current_time"
+    ],
+    "GrayBox": {
+      "Items": [
+        {
+          "Name": "TestBox1",
+          "Divisor": 100,
+          "Left": 0,
+          "Right": 20
+        },
+        {
+          "Name": "OptionalResourceDownloadGrayBox",
+          "Divisor": 100000,
+          "Left": 0,
+          "Right": 100000
+        },
+        {
+          "Name": "ClearVideoResGrayBox",
+          "Divisor": 100000,
+          "Left": 0,
+          "Right": 100000
+        }
+      ]
+    },
+    "LoginServers": [
+      {
+        "KDCfg": {
+          "AppID": "12c7c870b57541caa2093e275212f083",
+          "URL": "https://aki-gb-sdklog.kurogames.net"
+        },
+        "LoginUrl": [
+          "https://login1-us.aki-game.net",
+          "https://login2-us.aki-game.net",
+          "https://login3-us.aki-game.net"
+        ],
+        "PingUrl": "43.130.170.120",
+        "Region": "America",
+        "TDCfg": {
+          "AppID": "12c7c870b57541caa2093e275212f083",
+          "URL": "http://us-datareceiver.aki-game.net"
+        },
+        "id": "591d6af3a3090d8ea00d8f86cf6d7501",
+        "ip": "https://login1-us.aki-game.net",
+        "name": "America"
+      },
+      {
+        "KDCfg": {
+          "AppID": "dc2e8c02609546e89d78c2eb2974becb",
+          "URL": "https://aki-gb-sdklog.kurogames.net"
+        },
+        "LoginUrl": [
+          "https://login1-jp.aki-game.net",
+          "https://login2-jp.aki-game.net",
+          "https://login3-jp.aki-game.net"
+        ],
+        "PingUrl": "43.153.165.66",
+        "Region": "Asia",
+        "TDCfg": {
+          "AppID": "dc2e8c02609546e89d78c2eb2974becb",
+          "URL": "http://jp-datareceiver.aki-game.net"
+        },
+        "id": "86d52186155b148b5c138ceb41be9650",
+        "ip": "https://login1-jp.aki-game.net",
+        "name": "Asia"
+      },
+      {
+        "KDCfg": {
+          "AppID": "0fb77e4801db41a7a1fb1a3431625fbd",
+          "URL": "https://aki-gb-sdklog.kurogames.net"
+        },
+        "LoginUrl": [
+          "https://login1-eu.aki-game.net",
+          "https://login2-eu.aki-game.net",
+          "https://login3-eu.aki-game.net"
+        ],
+        "PingUrl": "43.158.123.63",
+        "Region": "Europe",
+        "TDCfg": {
+          "AppID": "0fb77e4801db41a7a1fb1a3431625fbd",
+          "URL": "http://eu-datareceiver.aki-game.net"
+        },
+        "id": "6eb2a235b30d05efd77bedb5cf60999e",
+        "ip": "https://login1-eu.aki-game.net",
+        "name": "Europe"
+      },
+      {
+        "KDCfg": {
+          "AppID": "5ccd297c928d405a9e6b18a122f4d48d",
+          "URL": "https://aki-gb-sdklog.kurogames.net"
+        },
+        "LoginUrl": [
+          "https://login1-hk.aki-game.net",
+          "https://login2-hk.aki-game.net",
+          "https://login3-hk.aki-game.net"
+        ],
+        "PingUrl": "43.135.111.186",
+        "Region": "HMT",
+        "TDCfg": {
+          "AppID": "5ccd297c928d405a9e6b18a122f4d48d",
+          "URL": "http://hk-datareceiver.aki-game.net"
+        },
+        "id": "919752ae5ea09c1ced910dd668a63ffb",
+        "ip": "https://login1-hk.aki-game.net",
+        "name": "HMT(HK, MO, TW)"
+      },
+      {
+        "KDCfg": {
+          "AppID": "dffd1143291b4877a8866fb24c623038",
+          "URL": "https://aki-gb-sdklog.kurogames.net"
+        },
+        "LoginUrl": [
+          "https://login1-sg.aki-game.net",
+          "https://login2-sg.aki-game.net",
+          "https://login3-sg.aki-game.net"
+        ],
+        "PingUrl": "101.33.100.199",
+        "Region": "SEA",
+        "TDCfg": {
+          "AppID": "dffd1143291b4877a8866fb24c623038",
+          "URL": "http://as-datareceiver.aki-game.net"
+        },
+        "id": "10cd7254d57e58ae560b15d51e34b4c8",
+        "ip": "https://login1-sg.aki-game.net",
+        "name": "SEA"
+      },
+      {
+        "KDCfg": {
+          "AppID": "dffd1143291b4877a8866fb24c623038",
+          "URL": "http://127.0.0.1:5500/log"
+        },
+        "LoginUrl": [
+          "http://127.0.0.1:5500"
+        ],
+        "PingUrl": "127.0.0.1",
+        "Region": "Local",
+        "TDCfg": {
+          "AppID": "dffd1143291b4877a8866fb24c623038",
+          "URL": "http://127.0.0.1:5500/td"
+        },
+        "id": "local_server_01",
+        "ip": "http://127.0.0.1:5500",
+        "name": "Local Server"
+      }
+    ],
+    "UdpDelay": {
+      "America": {
+        "Probe": [
+          {
+            "ip": "43.166.173.107",
+            "port": 13100,
+            "ext": {
+              "provider": "Origin",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "240d:c000:3000:7b01:6:495c:30a6:c526",
+            "port": 13100,
+            "ext": {
+              "provider": "Origin",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "prod-eo-us-0.aki-game.net",
+            "port": 13100,
+            "ext": {
+              "provider": "EO",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "prod-eo-us-0.aki-game.net",
+            "port": 13101,
+            "ext": {
+              "provider": "EO",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "eo-delay-test-us-0.2vuqovex3noi.eo.dnse0.com",
+            "port": 13116,
+            "ext": {
+              "provider": "EO-High",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "eo-delay-test-us-0.2vuqovex3noi.eo.dnse0.com",
+            "port": 13117,
+            "ext": {
+              "provider": "EO-High",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "103.41.70.148",
+            "port": 13100,
+            "ext": {
+              "provider": "Akamai",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "2a02:2370:1000:0:0:0:0:4",
+            "port": 13100,
+            "ext": {
+              "provider": "Akamai",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "prod-ali-0.aki-game.net",
+            "port": 13100,
+            "ext": {
+              "provider": "Ali",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "prod-ali-0.aki-game.net",
+            "port": 13101,
+            "ext": {
+              "provider": "Ali",
+              "type": "ipv6"
+            }
+          }
+        ],
+        "ProbeInterval": 600,
+        "ProbeOpen": false
+      },
+      "Asia": {
+        "Probe": [
+          {
+            "ip": "43.130.251.69",
+            "port": 13100,
+            "ext": {
+              "provider": "Origin",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "240d:c000:f06f:f401:6:495c:232d:3db1",
+            "port": 13100,
+            "ext": {
+              "provider": "Origin",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "prod-eo-jp-0.aki-game.net",
+            "port": 13102,
+            "ext": {
+              "provider": "EO",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "prod-eo-jp-0.aki-game.net",
+            "port": 13103,
+            "ext": {
+              "provider": "EO",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "eo-delay-test-jp-0.2vuqovex3noi.eo.dnse0.com",
+            "port": 13112,
+            "ext": {
+              "provider": "EO-High",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "eo-delay-test-jp-0.2vuqovex3noi.eo.dnse0.com",
+            "port": 13113,
+            "ext": {
+              "provider": "EO-High",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "103.41.70.149",
+            "port": 13100,
+            "ext": {
+              "provider": "Akamai",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "2a02:2370:1000:0:0:0:0:5",
+            "port": 13100,
+            "ext": {
+              "provider": "Akamai",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "prod-ali-0.aki-game.net",
+            "port": 13102,
+            "ext": {
+              "provider": "Ali",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "prod-ali-0.aki-game.net",
+            "port": 13103,
+            "ext": {
+              "provider": "Ali",
+              "type": "ipv6"
+            }
+          }
+        ],
+        "ProbeInterval": 600,
+        "ProbeOpen": false
+      },
+      "SEA": {
+        "Probe": [
+          {
+            "ip": "129.226.196.203",
+            "port": 13100,
+            "ext": {
+              "provider": "Origin",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "240d:c000:1001:b02:6:495c:24cc:521",
+            "port": 13100,
+            "ext": {
+              "provider": "Origin",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "prod-eo-sg-0.aki-game.net",
+            "port": 13104,
+            "ext": {
+              "provider": "EO",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "prod-eo-sg-0.aki-game.net",
+            "port": 13105,
+            "ext": {
+              "provider": "EO",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "eo-delay-test-sg-0.2vuqovex3noi.eo.dnse0.com",
+            "port": 13118,
+            "ext": {
+              "provider": "EO-High",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "eo-delay-test-sg-0.2vuqovex3noi.eo.dnse0.com",
+            "port": 13119,
+            "ext": {
+              "provider": "EO-High",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "103.41.70.150",
+            "port": 13100,
+            "ext": {
+              "provider": "Akamai",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "2a02:2370:1000:0:0:0:0:6",
+            "port": 13100,
+            "ext": {
+              "provider": "Akamai",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "prod-ali-0.aki-game.net",
+            "port": 13104,
+            "ext": {
+              "provider": "Ali",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "prod-ali-0.aki-game.net",
+            "port": 13105,
+            "ext": {
+              "provider": "Ali",
+              "type": "ipv6"
+            }
+          }
+        ],
+        "ProbeInterval": 600,
+        "ProbeOpen": false
+      },
+      "Europe": {
+        "Probe": [
+          {
+            "ip": "43.157.118.224",
+            "port": 13100,
+            "ext": {
+              "provider": "Origin",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "240d:c000:f04f:f901:6:495c:318d:80cd",
+            "port": 13100,
+            "ext": {
+              "provider": "Origin",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "prod-eo-eu-0.aki-game.net",
+            "port": 13106,
+            "ext": {
+              "provider": "EO",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "prod-eo-eu-0.aki-game.net",
+            "port": 13107,
+            "ext": {
+              "provider": "EO",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "eo-delay-test-eu-0.2vuqovex3noi.eo.dnse0.com",
+            "port": 13114,
+            "ext": {
+              "provider": "EO-High",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "eo-delay-test-eu-0.2vuqovex3noi.eo.dnse0.com",
+            "port": 13115,
+            "ext": {
+              "provider": "EO-High",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "103.41.70.151",
+            "port": 13100,
+            "ext": {
+              "provider": "Akamai",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "2a02:2370:1000:0:0:0:0:7",
+            "port": 13100,
+            "ext": {
+              "provider": "Akamai",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "prod-ali-0.aki-game.net",
+            "port": 13106,
+            "ext": {
+              "provider": "Ali",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "prod-ali-0.aki-game.net",
+            "port": 13107,
+            "ext": {
+              "provider": "Ali",
+              "type": "ipv6"
+            }
+          }
+        ],
+        "ProbeInterval": 600,
+        "ProbeOpen": false
+      },
+      "HMT": {
+        "Probe": [
+          {
+            "ip": "119.28.177.17",
+            "port": 13100,
+            "ext": {
+              "provider": "Origin",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "240d:c000:2022:e402:6:495c:2261:acde",
+            "port": 13100,
+            "ext": {
+              "provider": "Origin",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "prod-eo-hk-0.aki-game.net",
+            "port": 13108,
+            "ext": {
+              "provider": "EO",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "prod-eo-hk-0.aki-game.net",
+            "port": 13109,
+            "ext": {
+              "provider": "EO",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "eo-delay-test-hk-1.2vuqovex3noi.eo.dnse0.com",
+            "port": 13110,
+            "ext": {
+              "provider": "EO-High",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "eo-delay-test-hk-1.2vuqovex3noi.eo.dnse0.com",
+            "port": 13111,
+            "ext": {
+              "provider": "EO-High",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "2a02:2370:1000:0:0:0:0:8",
+            "port": 13100,
+            "ext": {
+              "provider": "Akamai",
+              "type": "ipv6"
+            }
+          },
+          {
+            "ip": "103.41.70.152",
+            "port": 13100,
+            "ext": {
+              "provider": "Akamai",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "prod-ali-0.aki-game.net",
+            "port": 13108,
+            "ext": {
+              "provider": "Ali",
+              "type": "ipv4"
+            }
+          },
+          {
+            "ip": "prod-ali-0.aki-game.net",
+            "port": 13109,
+            "ext": {
+              "provider": "Ali",
+              "type": "ipv6"
+            }
+          }
+        ],
+        "ProbeInterval": 600,
+        "ProbeOpen": false
+      },
+      "Local": {
+        "Probe": [],
+        "ProbeInterval": 600,
+        "ProbeOpen": false
+      }
+    },
+    "UdpPort": [
+      13100,
+      13101,
+      13102,
+      13103,
+      13104,
+      13105,
+      13106,
+      13107,
+      13108,
+      13109,
+      13110,
+      13111,
+      13112,
+      13113,
+      13114,
+      13115,
+      23100,
+      23101,
+      23102,
+      23103,
+      23104,
+      23105,
+      23106,
+      23107,
+      23108,
+      23109,
+      23110,
+      23111,
+      23112,
+      23113,
+      23114,
+      23115
+    ],
+    "PrivateServers": {
+      "enable": true,
+      "serverUrl": "http://127.0.0.1:5500"
+    }
+  },
+  "p1": {
+    "IosAuditFirstDownloadTip": false
+  },
+  "ModifyTime": 1899999999
+}

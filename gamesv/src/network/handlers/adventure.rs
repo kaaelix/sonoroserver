@@ -13,8 +13,9 @@ use sonoro_proto::pb::{
     AdventureItemData, AdventureManualData, AdventureManualDataRequest,
     AdventureManualDataResponse, AdventureManualRequest, AdventureManualResponse,
     AdventureRewardData, ChapterResultRewardRequest, ChapterResultRewardResponse, DetectionTarget,
-    DetectionUnlock, GetChapterRewardRequest, GetChapterRewardResponse,
-    MulGetAdventureRewardRequest, MulGetAdventureRewardResponse, NormalMonsterManualInfoRequest,
+    DetectionUnlock, GetAdventureRewardRequest, GetAdventureRewardResponse,
+    GetChapterRewardRequest, GetChapterRewardResponse, MulGetAdventureRewardRequest,
+    MulGetAdventureRewardResponse, NormalMonsterManualInfoRequest,
     NormalMonsterManualInfoResponse, ReceivedSilentFirstAwardRequest,
     ReceivedSilentFirstAwardResponse, WeeklyFrameworkInfo, WeeklyFrameworkInfoRequest,
     WeeklyFrameworkInfoResponse, WeeklyFrameworkScoreRewardRequest,
@@ -383,19 +384,17 @@ fn append_reward_data_for_drop(
     if drop_id <= 0 || rewards.iter().any(|existing| existing.DropId == drop_id) {
         return;
     }
-    let Some(pkg) = assets.tables.drop_package.get_data_by_id(&drop_id) else {
+    let preview = reward::preview_drop_items(assets, drop_id);
+    if preview.is_empty() {
         return;
-    };
-    let mut items = Vec::new();
-    for (&item_id, &raw_count) in pkg.DropPreview.iter() {
-        if item_id <= 0 {
-            continue;
-        }
-        items.push(AdventureItemData {
-            ItemId: item_id,
-            ItemNum: if raw_count > 0 { raw_count } else { 1 },
-        });
     }
+    let items = preview
+        .into_iter()
+        .map(|it| AdventureItemData {
+            ItemId: it.item_id,
+            ItemNum: it.count,
+        })
+        .collect();
     rewards.push(AdventureRewardData {
         DropId: drop_id,
         Items: items,
@@ -605,6 +604,67 @@ pub fn handle_weekly_framework_info_request(
     })
 }
 
+fn claim_single_adventure_task(state: &mut State, task_id: i32) -> Result<bool, String> {
+    let k = format!("adv_task:{task_id}");
+    if !state.player_components.progress.info.mark_claim(&k) {
+        return Ok(false);
+    }
+
+    if let Some(cfg) = state
+        .assets
+        .tables
+        .adventure_task
+        .get_data_by_id(&task_id)
+        .map(|r| r.into_owned())
+    {
+        if cfg.DropIds > 0 {
+            let mut rctx = state.reward_context();
+            reward::grant_drop_package_popup(&mut rctx, cfg.DropIds, 19500)
+                .map_err(|e| e.to_string())?;
+        }
+    } else {
+        let mut rctx = state.reward_context();
+        reward::grant_table_reward(
+            &mut rctx,
+            "AdventureTaskV2",
+            i64::from(task_id),
+            false,
+            true,
+            19500,
+            &[
+                reward::RewardItem {
+                    item_id: 3,
+                    count: 40,
+                },
+                reward::RewardItem {
+                    item_id: 1,
+                    count: 100,
+                },
+            ],
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(true)
+}
+
+pub fn handle_get_adventure_reward_request(
+    state: &mut State,
+    req: GetAdventureRewardRequest,
+) -> Result<GetAdventureRewardResponse, String> {
+    if claim_single_adventure_task(state, req.Id)? {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(GetAdventureRewardResponse {
+        Id: req.Id,
+        Code: Some(ErrorCode::Success),
+    })
+}
+
 pub fn handle_mul_get_adventure_reward_request(
     state: &mut State,
     req: MulGetAdventureRewardRequest,
@@ -613,47 +673,9 @@ pub fn handle_mul_get_adventure_reward_request(
     let mut dirty = false;
 
     for task_id in req.Id {
-        let k = format!("adv_task:{task_id}");
-        if !state.player_components.progress.info.mark_claim(&k) {
-            continue;
-        }
-        dirty = true;
-        claimed.push(task_id);
-
-        if let Some(cfg) = state
-            .assets
-            .tables
-            .adventure_task
-            .get_data_by_id(&task_id)
-            .map(|r| r.into_owned())
-        {
-            if cfg.DropIds > 0 {
-                let mut rctx = state.reward_context();
-                reward::grant_drop_package_popup(&mut rctx, cfg.DropIds, 19500)
-                    .map_err(|e| e.to_string())?;
-            }
-        } else {
-            let mut rctx = state.reward_context();
-            reward::grant_table_reward(
-                &mut rctx,
-                "AdventureTaskV2",
-                i64::from(task_id),
-                false,
-                true,
-                19500,
-                &[
-                    reward::RewardItem {
-                        item_id: 3,
-                        count: 40,
-                    },
-                    reward::RewardItem {
-                        item_id: 1,
-                        count: 100,
-                    },
-                ],
-                None,
-            )
-            .map_err(|e| e.to_string())?;
+        if claim_single_adventure_task(state, task_id)? {
+            dirty = true;
+            claimed.push(task_id);
         }
     }
     if dirty {

@@ -1,0 +1,12 @@
+{
+  "version": "3.8.0-20261125",
+  "schema_version": 2,
+  "built_at": 1795444157,
+  "filename": "assets/assets.db",
+  "size": 724066304,
+  "sha256": "a0dcf3b1e31f3b3c98c556a013e080dc53b66de14d13ce6ca24cc54f337df11e",
+  "url": "https://github.com/kaaelix/sonoroserver/releases/download/assets-db/assets.db",
+  "mirrors": [
+    "https://github.com/kaaelix/wuwaserver/releases/download/assets-db/assets.db"
+  ]
+}

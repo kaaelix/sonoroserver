@@ -695,6 +695,22 @@ impl AssetsDb {
             .optional()
             .map_err(SqliteError::from)
     }
+
+    pub fn query_entity_group_rows(&self) -> Result<Vec<(i32, i64, String)>, SqliteError> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stmt = guard.conn.prepare_cached(
+            "SELECT map_id, entity_id, data FROM level_entities WHERE data LIKE '%EntityGroupComponent%'",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push((row.get(0)?, row.get(1)?, row.get(2)?));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

@@ -649,6 +649,10 @@ pub fn damage_entity(
                 if changed && after_hp > 0 {
                     scene.mark_fsm_dirty(request.TargetEntityId, wake_reason::ATTRIBUTE);
                 }
+                let target_is_monster = scene.entity_handle(request.TargetEntityId).is_some_and(|h| {
+                    scene.entities[h.index].config.entity_type
+                        == crate::component::entity::EntityType::Monster
+                });
                 if after_hp <= 0 {
                     killed_target = true;
                     let removed_handles = buff_helper::handle_entity_death(
@@ -662,10 +666,13 @@ pub fn damage_entity(
                             timers.cancel_handle(request.TargetEntityId, handle_id);
                         }
                     }
-                } else {
+                } else if target_is_monster {
                     scene.set_battle_entity_active(request.TargetEntityId, true);
                 }
-            } else {
+            } else if scene.entity_handle(request.TargetEntityId).is_some_and(|h| {
+                scene.entities[h.index].config.entity_type
+                    == crate::component::entity::EntityType::Monster
+            }) {
                 scene.set_battle_entity_active(request.TargetEntityId, true);
             }
             let _ = scene.append_battle_state_notify(combat_receive_pack);

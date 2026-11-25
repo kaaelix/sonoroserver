@@ -1,3 +1,4 @@
+use sonoro_gamesv_logic::coop_service::CoopService;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::level_play::LevelPlayEventKind;
 use sonoro_gamesv_logic::helpers::quest_engine;
@@ -13,7 +14,7 @@ use sonoro_proto::pb::{
     AbyssRankListRequest, AbyssRankListResponse, AbyssReviveCharacterRequest,
     AbyssReviveCharacterResponse, AbyssReviveNotify, AbyssRewardRequest, AbyssRewardResponse,
     AbyssSelfPassRequest, AbyssSelfPassResponse, AbyssShowNameRequest, AbyssShowNameResponse,
-    ActivityTask, AddCountItemInfo, ArrayIntInt, BabelActivitySettleInfoNotify,
+    ActivityTask, AddCountItemInfo, ArrayIntInt, BabelActivitySettleInfoNotify, BattleFormation,
     BabelTowerDailyTaskRewardRequest, BabelTowerDailyTaskRewardResponse,
     BabelTowerRankListRequest, BabelTowerRankListResponse, BabelTowerSelfPassRequest,
     BabelTowerSelfPassResponse, BabelTowerSettlementRequest, BabelTowerSettlementResponse,
@@ -30,7 +31,8 @@ use sonoro_proto::pb::{
     NewTowerCycleRecordPb, NewTowerCycleStartRequest, NewTowerCycleStartResponse,
     NewTowerLastCycleInfoRequest, NewTowerLastCycleInfoResponse, NewTowerMedalInfo,
     NewTowerMedalInfoRequest, NewTowerMedalInfoResponse, NewTowerRecommendData,
-    NewTowerRecommendRequest, NewTowerRecommendResponse, NewTowerRewardRequest,
+    NewTowerRecommendLevel, NewTowerRecommendRequest, NewTowerRecommendResponse,
+    NewTowerRecommendTeam, NewTowerRewardRequest,
     NewTowerRewardResponse, NewTowerRoleEnergyRequest, NewTowerRoleEnergyResponse,
     NewTowerSeasonRewardRequest, NewTowerSeasonRewardResponse, NewTowerSeasonScoreRewardRequest,
     NewTowerSeasonScoreRewardResponse, NewTowerSeasonTaskDataUpdateRequest,
@@ -148,15 +150,46 @@ pub fn handle_slash_and_tower_info_request(
     })
 }
 
+fn owned_role_ids_sorted(state: &State) -> Vec<i32> {
+    let mut ids: Vec<i32> = state
+        .player_components
+        .role
+        .role_map
+        .keys()
+        .copied()
+        .collect();
+    ids.sort_unstable();
+    if ids.is_empty() {
+        ids = vec![1402, 1102, 1202];
+    }
+    ids
+}
+
 pub fn handle_slash_and_tower_recommend_request(
-    _state: &mut State,
+    state: &mut State,
     _req: SlashAndTowerRecommendRequest,
 ) -> Result<SlashAndTowerRecommendResponse, String> {
+    let roles = owned_role_ids_sorted(state);
+    let first: Vec<i32> = roles.iter().copied().take(3).collect();
+    let second: Vec<i32> = if roles.len() > 3 {
+        roles.iter().copied().skip(3).take(3).collect()
+    } else {
+        first.clone()
+    };
     Ok(SlashAndTowerRecommendResponse {
         ErrorCode: Some(ErrorCode::Success),
         RecommendInfos: vec![SlashLevelRecommend {
+            FormationFirst: Some(BattleFormation {
+                SelectRoles: first,
+                BuffSelect: 0,
+                SkillBranchIds: Vec::new(),
+            }),
+            FormationSecond: Some(BattleFormation {
+                SelectRoles: second,
+                BuffSelect: 0,
+                SkillBranchIds: Vec::new(),
+            }),
             Usage: 1,
-            ..Default::default()
         }],
     })
 }
@@ -280,12 +313,46 @@ pub fn handle_new_tower_medal_info_request(
 }
 
 pub fn handle_new_tower_recommend_request(
-    _state: &mut State,
+    state: &mut State,
     _req: NewTowerRecommendRequest,
 ) -> Result<NewTowerRecommendResponse, String> {
+    let roles = owned_role_ids_sorted(state);
+    let team_roles: Vec<i32> = roles.into_iter().take(3).collect();
+    let mut levels: Vec<NewTowerRecommendLevel> = state
+        .assets
+        .reward_index
+        .get_rows("NewTowerLevel")
+        .iter()
+        .filter_map(|row| i32::try_from(row.key).ok().filter(|&id| id > 0))
+        .take(5)
+        .map(|level_id| NewTowerRecommendLevel {
+            LevelId: level_id,
+            RecommendId: level_id,
+            RecommendTeams: vec![NewTowerRecommendTeam {
+                RoleIds: team_roles.clone(),
+                SkillBranchIds: Vec::new(),
+                BuffIds: vec![1],
+                UsageRate: 5000,
+            }],
+        })
+        .collect();
+    if levels.is_empty() {
+        levels.push(NewTowerRecommendLevel {
+            LevelId: 1,
+            RecommendId: 1,
+            RecommendTeams: vec![NewTowerRecommendTeam {
+                RoleIds: team_roles,
+                SkillBranchIds: Vec::new(),
+                BuffIds: vec![1],
+                UsageRate: 5000,
+            }],
+        });
+    }
     Ok(NewTowerRecommendResponse {
         ErrorCode: Some(ErrorCode::Success),
-        NewTowerRecommendData: Some(NewTowerRecommendData::default()),
+        NewTowerRecommendData: Some(NewTowerRecommendData {
+            RecommendLevels: levels,
+        }),
     })
 }
 
@@ -455,6 +522,7 @@ pub fn handle_role_tower_challenge_settle_request(
                 floor as i32,
             );
         }
+        let _ = quest_engine::events::on_tower_floor_event(&mut qctx, floor as i32, 3);
     }
     drain_event_queue_best_effort(&mut events, state);
     let rec = RoleTowerBestRecord {
@@ -522,10 +590,49 @@ pub fn handle_role_tower_rank_request(
         .info
         .get_key_int("role_tower:stage")
         .max(0) as i32;
+    let mut peer_entries: Vec<RoleTowerRankEntry> = CoopService::collect_server_player_snapshots(
+        &state.fs,
+        state.coop_service.as_deref(),
+        state.player_id,
+    )
+    .into_iter()
+    .filter_map(|p| {
+        let p_floor = p.progress.get_key_int("role_tower:stage").max(0) as i32;
+        if p_floor <= 0 {
+            return None;
+        }
+        Some(RoleTowerRankEntry {
+            PlayerId: p.player_id,
+            Name: p.name.into_bytes(),
+            Rank: 0,
+            RankPercent: 1,
+            Record: Some(RoleTowerBestRecord {
+                ChallengeId: 1,
+                PassedFloorCount: p_floor,
+                IsAllPassed: p_floor > 0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    })
+    .collect();
+    peer_entries.sort_by(|a, b| {
+        let fa = a.Record.as_ref().map_or(0, |r| r.PassedFloorCount);
+        let fb = b.Record.as_ref().map_or(0, |r| r.PassedFloorCount);
+        fb.cmp(&fa)
+    });
+    for (idx, e) in peer_entries.iter_mut().enumerate() {
+        e.Rank = (idx + 1) as i32;
+    }
+    let self_rank = peer_entries
+        .iter()
+        .filter(|e| e.Record.as_ref().map_or(0, |r| r.PassedFloorCount) > floor)
+        .count() as i32
+        + 1;
     let self_entry = RoleTowerRankEntry {
         PlayerId: state.player_id,
         Name: state.player_components.basic.info.attributes.name.as_bytes().to_vec(),
-        Rank: 1,
+        Rank: self_rank,
         RankPercent: 1,
         Record: Some(RoleTowerBestRecord {
             ChallengeId: 1,
@@ -539,6 +646,7 @@ pub fn handle_role_tower_rank_request(
         ErrorCode: Some(ErrorCode::Success),
         RankInfo: vec![RoleTowerRankInfo {
             ChallengeId: 1,
+            FriendEntries: peer_entries,
             SelfServerEntry: Some(self_entry),
             CanGetServerRankReward: floor > 0,
             ..Default::default()
@@ -640,6 +748,7 @@ pub fn handle_role_tower_stage_settle_request(
                 floor as i32,
             );
         }
+        let _ = quest_engine::events::on_tower_floor_event(&mut qctx, floor as i32, 3);
     }
     drain_event_queue_best_effort(&mut events, state);
     Ok(RoleTowerStageSettleResponse {
@@ -847,8 +956,35 @@ pub fn handle_abyss_rank_list_request(
             .to_vec(),
         ..Default::default()
     };
+    let mut friend_pass: Vec<AbyssChallengeInfo> = CoopService::collect_server_player_snapshots(
+        &state.fs,
+        state.coop_service.as_deref(),
+        state.player_id,
+    )
+    .into_iter()
+    .filter_map(|p| {
+        let pw = p.progress.get_key_int("abyss:room").max(0) as i32;
+        if pw <= 0 {
+            return None;
+        }
+        Some(AbyssChallengeInfo {
+            PlayerInfos: vec![AbyssChallengePassPlayerInfo {
+                PlayerId: p.player_id,
+                Name: p.name.into_bytes(),
+                ..Default::default()
+            }],
+            ChallengeId: 1,
+            PassWave: pw,
+            IsSingle: true,
+            OwnerId: p.player_id,
+            ..Default::default()
+        })
+    })
+    .collect();
+    friend_pass.sort_by_key(|a| std::cmp::Reverse(a.PassWave));
     Ok(AbyssRankListResponse {
         ErrorCode: Some(ErrorCode::Success),
+        FriendPassData: friend_pass,
         SelfPassData: vec![AbyssChallengeInfo {
             PlayerInfos: vec![pinfo],
             ChallengeId: 1,
@@ -857,7 +993,6 @@ pub fn handle_abyss_rank_list_request(
             OwnerId: state.player_id,
             ..Default::default()
         }],
-        ..Default::default()
     })
 }
 
@@ -1032,25 +1167,70 @@ pub fn handle_boss_rush_settlement_request(
     state: &mut State,
     _req: BossRushSettlementRequest,
 ) -> Result<BossRushSettlementResponse, String> {
-    let score = state
+    let cur_score = state
         .player_components
         .progress
         .info
-        .add_key_int("bossrush:score", 2000);
+        .get_key_int("bossrush:score");
+    let next_tier_score = state
+        .assets
+        .tables
+        .boss_rush_score
+        .items
+        .iter()
+        .map(|cfg| i64::from(cfg.Score))
+        .filter(|&tier_score| tier_score > cur_score)
+        .min();
+    let new_score = match next_tier_score {
+        Some(target) => target,
+        None => cur_score + 2000,
+    };
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int("bossrush:score", new_score);
+    let prev_high = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("bossrush:high_score");
+    let high_score = prev_high.max(new_score);
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int("bossrush:high_score", high_score);
+    let activity_id = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("bossrush:act")
+        .max(1) as i32;
+    let inst_id = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("bossrush:inst")
+        .max(1) as i32;
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    let total_i32 = new_score.clamp(0, i64::from(i32::MAX)) as i32;
+    let kill_score = total_i32 / 2;
+    let timer_score = total_i32 / 4;
+    let tech_score = total_i32 - kill_score - timer_score;
     let _ = state.conn.push_msg(
         BossRushResultNotify::MSG_ID,
         &BossRushResultNotify {
-            ActivityId: 1,
-            InstId: 1,
-            KilMonsterScore: 1000,
-            TimerScore: 500,
-            TechnicalScore: 500,
-            HighScore: score.max(2000) as i32,
+            ActivityId: activity_id,
+            InstId: inst_id,
+            KilMonsterScore: kill_score,
+            TimerScore: timer_score,
+            TechnicalScore: tech_score,
+            HighScore: high_score.clamp(0, i64::from(i32::MAX)) as i32,
             LeftTime: 60,
         },
     );
@@ -1118,6 +1298,20 @@ pub fn handle_babel_tower_rank_list_request(
     state: &mut State,
     _req: BabelTowerRankListRequest,
 ) -> Result<BabelTowerRankListResponse, String> {
+    let peers: Vec<PublicBabelTowerInfo> = CoopService::collect_server_player_snapshots(
+        &state.fs,
+        state.coop_service.as_deref(),
+        state.player_id,
+    )
+    .into_iter()
+    .filter(|p| p.progress.get_key_int("babel:finish") > 0 || p.progress.get_key_int("babel:star") > 0)
+    .map(|p| PublicBabelTowerInfo {
+        PlayerId: p.player_id,
+        Name: p.name.into_bytes(),
+        HeadId: p.head_id,
+        ..Default::default()
+    })
+    .collect();
     Ok(BabelTowerRankListResponse {
         ErrorCode: Some(ErrorCode::Success),
         SelfPassData: Some(PublicBabelTowerInfo {
@@ -1133,7 +1327,7 @@ pub fn handle_babel_tower_rank_list_request(
             HeadId: state.player_components.basic.info.attributes.head_photo,
             ..Default::default()
         }),
-        ..Default::default()
+        FriendPassData: peers,
     })
 }
 

@@ -2036,6 +2036,18 @@ fn push_dynamic_interact_entry<S: PushSink + ?Sized>(
         actions_json = "[]".to_string();
     }
 
+    if let Some(existing) = scene.find_dynamic_interact_option(guid)
+        && existing.entity_net_id == net_id
+    {
+        sink.push(
+            EntityRemoveDynamicInteractNotify::MSG_ID,
+            &EntityRemoveDynamicInteractNotify {
+                OptionGuid: guid.as_bytes().to_vec(),
+                EntityId: net_id,
+            },
+        );
+    }
+
     scene.upsert_dynamic_interact_option_with_bt(
         guid,
         net_id,
@@ -2391,6 +2403,79 @@ pub fn mark_and_check_do_interact_complete<S: PushSink + ?Sized>(
         push_node_progress_notify(ctx, &aq, node);
     }
     Ok(all_done)
+}
+
+pub fn find_do_interact_option_by_guid<'a>(
+    cond: &'a Map<String, Value>,
+    guid: &str,
+) -> Option<&'a Map<String, Value>> {
+    if guid.is_empty() {
+        return None;
+    }
+    let Value::Array(opts) = cond.get("AddOptions")? else {
+        return None;
+    };
+    for entry in opts {
+        let Value::Object(entry_obj) = entry else {
+            continue;
+        };
+        let Some(Value::Object(inner)) = entry_obj.get("Option") else {
+            continue;
+        };
+        if json_str(inner.get("Guid")) == Some(guid) {
+            return Some(entry_obj);
+        }
+    }
+    None
+}
+
+/// Advances the active `DoInteract` ChildQuest that owns a dynamic interact option.
+/// `on_submit_node` intentionally rejects `DoInteract` so clients cannot self-submit it;
+/// a server-validated dynamic interact request completes it here instead.
+pub fn complete_do_interact_from_dynamic_option<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    quest_id: i32,
+    node_id: i32,
+    entity_id: i64,
+    option_guid: &str,
+) -> io::Result<bool> {
+    if !ctx
+        .quest_comp
+        .info
+        .find_active_quest(quest_id)
+        .is_some_and(|aq| aq.is_node_active(node_id))
+    {
+        return Ok(false);
+    }
+    let Ok(nodes) = ctx.assets.quest_nodes.get_owner_nodes(quest_id) else {
+        return Ok(false);
+    };
+    let Some(node) = find_node_by_id(&nodes, node_id).cloned() else {
+        return Ok(false);
+    };
+    if node.node_type != "ChildQuest" {
+        return Ok(false);
+    }
+    let Some(cond) = get_child_condition(&node.data).cloned() else {
+        return Ok(false);
+    };
+    if json_str(cond.get("Type")) != Some("DoInteract") {
+        return Ok(false);
+    }
+
+    let cfg_id = resolve_config_id(ctx.scene.as_deref(), entity_id);
+    let Some(opt_obj) = find_do_interact_option_by_guid(&cond, option_guid)
+        .or_else(|| match_do_interact(&cond, entity_id, cfg_id, 0))
+        .cloned()
+    else {
+        return Ok(false);
+    };
+
+    if mark_and_check_do_interact_complete(ctx, quest_id, &node, &cond, entity_id, &opt_obj)? {
+        super::tree::complete_child_quest(ctx, quest_id, &nodes, &node)?;
+    }
+    super::tree::finalize_progression(ctx)?;
+    Ok(true)
 }
 
 pub fn handle_interact_option<S: PushSink + ?Sized>(
@@ -3329,10 +3414,12 @@ pub fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
                 }
             } else if et_type == "VarValueChange"
                 && let Some(Value::Object(vobj)) = et.get("Var")
-                && let Some(want_v) = et.get("Value")
             {
                 let cur = resolve_var_int_for_owner(ctx, quest_id, Some(&Value::Object(vobj.clone())));
-                return json_int(Some(want_v)).is_some_and(|w| w == cur);
+                if let Some(want_v) = et.get("Value") {
+                    return json_int(Some(want_v)).is_some_and(|w| w == cur);
+                }
+                return cur != 0;
             }
             false
         }
@@ -3416,7 +3503,28 @@ pub fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
             }
             true
         }
-        "ProgramSpecialProcess" | "InformationViewCheck" | "GetSkill" => true,
+        "ProgramSpecialProcess" => ctx
+            .progress_comp
+            .as_deref()
+            .is_some_and(|pc| pc.info.has_claim(&format!("quest_psp:{quest_id}:{}", node.id))),
+        "InformationViewCheck" => json_int(cond.get("InformationViewId"))
+            .filter(|&id| id > 0)
+            .is_none_or(|id| {
+                ctx.progress_comp
+                    .as_deref()
+                    .is_some_and(|pc| pc.info.has_claim(&format!("display_read:{id}")))
+            }),
+        "GetSkill" => json_int(cond.get("SkillId"))
+            .filter(|&id| id > 0)
+            .is_none_or(|sid| {
+                ctx.progress_comp
+                    .as_deref()
+                    .is_some_and(|pc| pc.info.has_claim(&format!("skill_unlocked:{sid}")))
+                    || ctx.scene.as_deref().is_some_and(|s| {
+                        s.explore_tools_info.active_explore_skill == sid
+                            || s.explore_tools_info.unlocked_explore_skills.contains(&sid)
+                    })
+            }),
         "FinishBvbChallenge" => json_int(cond.get("BvbChallengeId"))
             .filter(|&id| id > 0)
             .is_none_or(|bvb_id| ctx.quest_comp.info.progress.completed_bvb.contains(&bvb_id)),
@@ -3430,6 +3538,50 @@ pub fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
             .is_some_and(|tid| {
                 ctx.quest_comp.info.progress.received_telecoms.contains(&tid)
             }),
+        "CheckFinishLoading"
+        | "CheckElementalBoxState"
+        | "CheckEntityBuffStack"
+        | "CheckEntitySelfDirection"
+        | "CheckIsInDragActorPlay"
+        | "CompareTeammateDie"
+        | "CompareCost"
+        | "IsCapableToEvolve"
+        | "IsCore"
+        | "ActiveSkillTag"
+        | "HasOptimalFactor"
+        | "CheckBVBEvent"
+        | "CheckChessWinner"
+        | "CheckHasFollowShooter"
+        | "CheckIsGramophonePlayingMusic"
+        | "CheckPhotographCameraParam"
+        | "CheckPlayerUseSkill"
+        | "CheckRoverRogueAbilitySelect" => {
+            let eval_ctx = ctx.make_eval_context_for_quest(quest_id);
+            condition::eval_single_inline_condition_obj(&eval_ctx, cond)
+        }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn find_do_interact_option_by_guid_matches_owning_entry() {
+        let cond = json!({
+            "Type": "DoInteract",
+            "AddOptions": [
+                { "EntityId": 1, "Option": { "Type": { "Type": "Actions", "Actions": [] }, "Guid": "aaa" } },
+                { "EntityId": 122000891, "Option": { "Type": { "Type": "Actions", "Actions": [] }, "Guid": "30e12028d6dd44c4ad30c72d7afcc113" } }
+            ]
+        });
+        let cond_obj = cond.as_object().unwrap();
+        let matched = find_do_interact_option_by_guid(cond_obj, "30e12028d6dd44c4ad30c72d7afcc113")
+            .expect("expected matching option");
+        assert_eq!(json_int(matched.get("EntityId")), Some(122000891));
+        assert!(find_do_interact_option_by_guid(cond_obj, "missing").is_none());
+        assert!(find_do_interact_option_by_guid(cond_obj, "").is_none());
     }
 }

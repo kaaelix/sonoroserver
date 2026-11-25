@@ -8,11 +8,12 @@ use sonoro_gamesv_logic::helpers::{gravity as gravity_helper, quest_actions, que
 use sonoro_proto::enums::{ErrorCode, LivingStatus, TeleportReason};
 use sonoro_proto::pb::{
     AddTemporaryTeleportInfoNotify, AddTemporaryTeleportRequest, AddTemporaryTeleportResponse,
-    GameCtxPb, GameCtxPbCtxInfoOneof, LeaveSceneNotify, RemoveTemporaryTeleportNotify,
-    RemoveTemporaryTeleportRequest, RemoveTemporaryTeleportResponse, TeleportDataRequest,
-    TeleportDataResponse, TeleportFinishRequest, TeleportFinishResponse, TeleportNotify,
-    TeleportToTargetRequest, TeleportToTargetResponse, TeleportTransferRequest,
-    TeleportTransferResponse, TransferCtxPb, Vector,
+    CombatReceivePackNotify, GameCtxPb, GameCtxPbCtxInfoOneof, LeaveSceneNotify,
+    RemoveTemporaryTeleportNotify, RemoveTemporaryTeleportRequest,
+    RemoveTemporaryTeleportResponse, TeleportDataRequest, TeleportDataResponse,
+    TeleportFinishRequest, TeleportFinishResponse, TeleportNotify, TeleportToTargetRequest,
+    TeleportToTargetResponse, TeleportTransferRequest, TeleportTransferResponse, TransferCtxPb,
+    Vector,
 };
 
 use super::State;
@@ -79,7 +80,7 @@ fn resolve_teleporter_spawn(
     })
 }
 
-fn enqueue_scene_transfer(
+pub(crate) fn enqueue_scene_transfer(
     state: &mut State,
     events: &mut EventQueue,
     target_inst_id: i32,
@@ -126,9 +127,15 @@ pub fn handle_teleport_data_request(
     state: &mut State,
     _req: TeleportDataRequest,
 ) -> Result<TeleportDataResponse, String> {
+    let mut ids = state.player_components.map.info.unlocked_teleporters.clone();
+    for tp in &state.assets.tables.teleporter.items {
+        if tp.Type == 3 && !ids.contains(&tp.Id) {
+            ids.push(tp.Id);
+        }
+    }
     Ok(TeleportDataResponse {
         ErrorCode: Some(ErrorCode::Success),
-        Ids: state.player_components.map.info.unlocked_teleporters.clone(),
+        Ids: ids,
     })
 }
 
@@ -224,10 +231,18 @@ pub fn handle_teleport_transfer_request(
         state.player_id,
     );
     if cur_inst_id == target_inst_id {
-        if spawn.has_gravity_config
-            && let Some(scene) = state.scene.as_mut()
-        {
-            scene.set_current_role_gravity(spawn.gravity);
+        if let Some(scene) = state.scene.as_mut() {
+            if spawn.has_gravity_config {
+                scene.set_current_role_gravity(spawn.gravity);
+            }
+            scene.force_battle_state(false);
+            let mut battle_data = Vec::new();
+            if scene.append_battle_state_notify(&mut battle_data) {
+                let _ = state.conn.push_msg(
+                    CombatReceivePackNotify::MSG_ID,
+                    &CombatReceivePackNotify { Data: battle_data },
+                );
+            }
         }
         {
             let mut qctx = state.quest_context(events);
@@ -389,6 +404,16 @@ pub fn handle_teleport_to_target_request(
         state.player_id,
     );
     if cur_map_id == tp_map_id {
+        if let Some(scene) = state.scene.as_mut() {
+            scene.force_battle_state(false);
+            let mut battle_data = Vec::new();
+            if scene.append_battle_state_notify(&mut battle_data) {
+                let _ = state.conn.push_msg(
+                    CombatReceivePackNotify::MSG_ID,
+                    &CombatReceivePackNotify { Data: battle_data },
+                );
+            }
+        }
         let mut qctx = state.quest_context(events);
         quest_actions::update_player_scene_state(&mut qctx, target_pos, Some([0.0, 0.0, yaw]))
             .map_err(|e| e.to_string())?;

@@ -340,3 +340,128 @@ pub struct BuffItem {
     #[serde(default, deserialize_with = "crate::tables::de_null_default")]
     pub Cd: i32,
 }
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct DropShowPlan {
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Id: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub ShowBg: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub ShowTime: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub ShowCout: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Adsorption: i32,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct PrefabConfig {
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Id: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Entities: Vec<serde_json::Value>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct PayItemCfg {
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Id: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub ItemId: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub ItemCount: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub PayId: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub StageImage: String,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub BonusItemCount: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub SpecialBonusItemCount: i32,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct PayCfg {
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Id: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub PayId: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Region: String,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Amount: f64,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub GlobalAmount: f64,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub ProductId: String,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub CurrencyType: String,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct PayGiftCfg {
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Id: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub ItemId: i32,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct BattlePassCfg {
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Id: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub LevelLimit: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub LevelUpExp: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub ConsumeId: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub ConsumeCount: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub IsRecurringLevel: bool,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub FreeRecurringReward: crate::tables::IntMap<i32, i32>,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub PayRecurringReward: crate::tables::IntMap<i32, i32>,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub RecurringLevelExp: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub WeekExpLimit: i32,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct PhantomRecommendCfg {
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub RoleId: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub PhantomPlanParamId: Vec<i32>,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub RecommendFetterGroups: Vec<i32>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct BossRushScoreCfg {
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Id: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Score: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub RewardId: i32,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct GachaAccumulateRewardCfg {
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub Id: i32,
+}

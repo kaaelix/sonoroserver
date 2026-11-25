@@ -1,16 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 
 use sonoro_common::fs::FileSystem;
 use sonoro_gamesv_data::Assets;
-use sonoro_gamesv_data::asset_indexes::entity_world_pos;
 use sonoro_proto::pb::{
     AdviceSettingNotify, BuffItem, BuffItemNotify, CalabashLevelsRewardNotify, ControlInfoNotify,
-    EntityMapMarkInfoPb, InstDataNotify, InstEnterInfoPb, ItemPkgOpenNotify, LevelPlayInfo,
-    LevelPlayInfoNotify, MapMarkInfoNotify, MapMarkShowInfo, MoonChasingTargetGetCountNotify,
+    InstDataNotify, InstEnterInfoPb, ItemPkgOpenNotify, LevelPlayInfo, LevelPlayInfoNotify,
+    MapMarkInfoNotify, MapMarkShowInfo, MoonChasingTargetGetCountNotify,
     MoonChasingTrackMoonHandbookRewardNotify, PassiveSkillNotify, PlayerVarNotify,
     RoguelikeCurrencyNotify, RoleConfigInfo, RoleConfigInfoNotify, SettingNotify, SilenceNpcNotify,
-    Vector,
 };
 
 use crate::component::player::{
@@ -221,37 +219,9 @@ pub fn build_level_play_info_notify(
     }
 }
 
-fn build_map_mark_info_notify(assets: &Assets, map_comp: &PlayerMapComponent) -> MapMarkInfoNotify {
-    let mut boss_entity_positions: HashMap<i64, Vector> = HashMap::new();
-    for mark in &assets.tables.map_mark.items {
-        if mark.MapId <= 0 || mark.EntityConfigId == 0 {
-            continue;
-        }
-        if mark.ObjectType != 19 && mark.ObjectType != 29 {
-            continue;
-        }
-        if boss_entity_positions.contains_key(&mark.EntityConfigId) {
-            continue;
-        }
-        let Some(cfg) = assets.find_level_entity(mark.MapId, mark.EntityConfigId) else {
-            continue;
-        };
-        let Some(pos) = entity_world_pos(&cfg) else {
-            continue;
-        };
-        boss_entity_positions.insert(
-            cfg.EntityId,
-            Vector {
-                X: pos[0],
-                Y: pos[1],
-                Z: pos[2],
-            },
-        );
-    }
-
+pub fn build_map_mark_info_notify(assets: &Assets, map_comp: &PlayerMapComponent) -> MapMarkInfoNotify {
     let mut show_marks = Vec::new();
     let mut unlock_marks = Vec::new();
-    let mut entity_marks = Vec::new();
 
     for &tp_id in &map_comp.info.unlocked_teleporters {
         unlock_marks.push(tp_id);
@@ -272,16 +242,6 @@ fn build_map_mark_info_notify(assets: &Assets, map_comp: &PlayerMapComponent) ->
                 ShowFlag: 1,
             });
             unlock_marks.push(mark.MarkId);
-            if mark.EntityConfigId != 0
-                && let Ok(inst_id32) = i32::try_from(mark.EntityConfigId)
-                && let Some(pos) = boss_entity_positions.get(&mark.EntityConfigId)
-            {
-                entity_marks.push(EntityMapMarkInfoPb {
-                    InstId: inst_id32,
-                    TemplateId: mark.RelativeId,
-                    Pos: Some(pos.clone()),
-                });
-            }
         } else if (!is_teleporter
             && mark.CreateOnStart == 1
             && (mark.FogHide == 0 || map_comp.info.unlocked_fogs.contains(&mark.FogHide)))
@@ -300,7 +260,6 @@ fn build_map_mark_info_notify(assets: &Assets, map_comp: &PlayerMapComponent) ->
     MapMarkInfoNotify {
         ShowMarkIds: show_marks,
         UnlockMarkIds: unlock_marks,
-        EntityMapMarkInfo: entity_marks,
         ..Default::default()
     }
 }

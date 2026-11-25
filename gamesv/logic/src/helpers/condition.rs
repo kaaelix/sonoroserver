@@ -1401,7 +1401,11 @@ pub fn eval_single_inline_condition(ctx: &EvalContext<'_>, c_val: &Value) -> boo
     if t_val.is_i64() || t_val.is_u64() {
         return eval_inline_condition_block(ctx, c_val);
     }
-    let Some(ct) = t_val.as_str() else {
+    eval_single_inline_condition_obj(ctx, obj)
+}
+
+pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String, Value>) -> bool {
+    let Some(ct) = obj.get("Type").and_then(Value::as_str) else {
         return true;
     };
 
@@ -3100,6 +3104,21 @@ pub fn eval_single_inline_condition(ctx: &EvalContext<'_>, c_val: &Value) -> boo
         "CheckPlayerRelativeAngle" | "CheckPlayerEnterClientTriggerDir" => {
             eval_check_player_relative_angle(ctx, obj)
         }
+        "CheckPlayerPosition" => eval_check_player_position(ctx, obj),
+        "SaveConfigEnterMethod" => {
+            let expected = get_param_str(obj, "EnterMethod").unwrap_or("FirstTime");
+            let cmp = get_param_str(obj, "Compare").unwrap_or("Eq");
+            let current = if ctx
+                .scene
+                .is_some_and(|s| s.last_server_rollback_quest_id == ctx.owner_quest_id && ctx.owner_quest_id > 0)
+            {
+                "FailureRollBack"
+            } else {
+                "FirstTime"
+            };
+            let matches = current == expected;
+            if cmp == "Ne" { !matches } else { matches }
+        }
         "CheckTrafficBlocked" => {
             let is_blocked = obj.get("IsBlocked").and_then(Value::as_bool).unwrap_or(true);
             let Some(player_pos) = current_player_pos_3d(ctx) else {
@@ -3114,8 +3133,280 @@ pub fn eval_single_inline_condition(ctx: &EvalContext<'_>, c_val: &Value) -> boo
             let in_zone = (dx * dx + dy * dy + dz * dz) <= 300.0 * 300.0;
             in_zone == is_blocked
         }
-        _ => false,
+        _ => eval_extra_inline_condition(ctx, ct, obj).unwrap_or(false),
     }
+}
+
+fn eval_extra_inline_condition(
+    ctx: &EvalContext<'_>,
+    ct: &str,
+    obj: &Map<String, Value>,
+) -> Option<bool> {
+    let pc = ctx.progress_comp;
+    let res = match ct {
+        "CheckFinishLoading" => ctx.scene.is_some(),
+        "CheckElementalBoxState" => {
+            let eid = obj
+                .get("Target")
+                .and_then(Value::as_object)
+                .and_then(|t| json_int(t.get("EntityId")))
+                .or_else(|| json_int(obj.get("EntityId")))?;
+            let want = obj
+                .get("Target")
+                .and_then(Value::as_object)
+                .and_then(|t| get_param_str(t, "State"))
+                .or_else(|| get_param_str(obj, "State"))
+                .unwrap_or("关卡.Common.状态.完成");
+            let cur = ctx
+                .quest_comp
+                .info
+                .get_entity_state(i64::from(eid))
+                .unwrap_or("关卡.Common.状态.常态");
+            cur == want
+        }
+        "CheckEntityBuffStack" => {
+            let scene = ctx.scene?;
+            let buff_id = json_int(obj.get("BuffId"))?;
+            let want_stack = json_int(obj.get("Stack")).unwrap_or(1);
+            let cmp = get_param_str(obj, "Compare").unwrap_or("Ge");
+            let target_nid = resolve_target_net_id(scene, obj.get("Target")).or_else(|| {
+                (ctx.self_entity_config_id > 0)
+                    .then(|| scene.find_entity_net_id_by_config_id(ctx.self_entity_config_id))
+                    .flatten()
+            })?;
+            let idx = *scene.net_id_map.get(&target_nid)?;
+            let cur_stack = scene
+                .entities
+                .get(idx)
+                .and_then(|e| e.buffs.as_ref())
+                .map_or(0, |b| b.stack_count_of(i64::from(buff_id)));
+            compare_ints(cur_stack, want_stack, cmp)
+        }
+        "CheckEntitySelfDirection" => {
+            let scene = ctx.scene?;
+            let dir = obj.get("Direction").and_then(Value::as_object)?;
+            let want_yaw = dir.get("Z").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+            let tol = obj
+                .get("Tolerance")
+                .and_then(Value::as_f64)
+                .map_or(25.0, |v| if v > 0.0 { v as f32 } else { 25.0 });
+            let nid = if ctx.self_entity_config_id > 0 {
+                scene.find_entity_net_id_by_config_id(ctx.self_entity_config_id)?
+            } else {
+                scene.current_role_entity_id()
+            };
+            let pos = scene.entity(nid)?.position?;
+            let mut diff = (pos.rotation[2] - want_yaw).abs() % 360.0;
+            if diff > 180.0 {
+                diff = 360.0 - diff;
+            }
+            diff <= tol
+        }
+        "CheckIsInDragActorPlay" => {
+            let want = obj.get("IsIn").and_then(Value::as_bool).unwrap_or(false);
+            let in_play = pc.is_some_and(|p| p.info.get_key_int("drag_actor:in_play") != 0);
+            in_play == want
+        }
+        "CompareTeammateDie" => {
+            let want_die = json_int(obj.get("DieCount")).unwrap_or(0);
+            let cmp = get_param_str(obj, "Compare").unwrap_or("Eq");
+            let dead_count = ctx.scene.map_or(0, |scene| {
+                let idx = usize::try_from(scene.formation_info.cur_formation).unwrap_or(0);
+                scene.formation_info.formations.get(idx).map_or(0, |f| {
+                    f.roles
+                        .iter()
+                        .flatten()
+                        .filter(|fr| fr.entity_id > 0)
+                        .filter(|fr| {
+                            scene.entity(fr.entity_id).is_some_and(|st| {
+                                st.attribute.as_ref().is_some_and(|attr_comp| {
+                                    let life_idx = sonoro_proto::PbEnum::to_i32(
+                                        sonoro_proto::enums::EAttributeType::Life,
+                                    ) as usize;
+                                    let max_idx = sonoro_proto::PbEnum::to_i32(
+                                        sonoro_proto::enums::EAttributeType::LifeMax,
+                                    ) as usize;
+                                    let life_max =
+                                        attr_comp.attributes.get(max_idx).map_or(0, |a| a.current);
+                                    let life =
+                                        attr_comp.attributes.get(life_idx).map_or(0, |a| a.current);
+                                    life_max > 0 && life <= 0
+                                })
+                            })
+                        })
+                        .count() as i32
+                })
+            });
+            compare_ints(dead_count, want_die, cmp)
+        }
+        "CompareCost" => {
+            let want_cost = json_int(obj.get("Cost")).unwrap_or(0);
+            let cmp = obj
+                .get("CompareType")
+                .or_else(|| obj.get("Compare"))
+                .and_then(Value::as_str)
+                .unwrap_or("Eq");
+            let cur_cost = pc.map_or(0, |p| p.info.get_key_int("bvb:last_cost") as i32);
+            compare_ints(cur_cost, want_cost, cmp)
+        }
+        "IsCapableToEvolve" => {
+            let want_cost = json_int(obj.get("Cost")).unwrap_or(0);
+            pc.is_some_and(|p| {
+                p.info.get_key_int("bvb:can_evolve") != 0
+                    || (want_cost > 0 && p.info.has_claim(&format!("bvb:evolve_cost:{want_cost}")))
+            })
+        }
+        "IsCore" => {
+            let want = obj.get("IsCore").and_then(Value::as_bool).unwrap_or(true);
+            let is_core = pc.is_some_and(|p| p.info.get_key_int("bvb:is_core") != 0);
+            is_core == want
+        }
+        "ActiveSkillTag" => {
+            let tag = json_int(obj.get("ActiveSkillTag")).unwrap_or(0);
+            pc.is_some_and(|p| {
+                p.info.has_claim(&format!("skill:active_tag:{tag}"))
+                    || p.info.get_key_int("skill:active_tag") == i64::from(tag)
+            })
+        }
+        "HasOptimalFactor" => {
+            resolve_var_value(ctx, obj.get("HandCard")) > 0
+                || pc.is_some_and(|p| p.info.get_key_int("bvb:optimal_factor") != 0)
+        }
+        "CheckBVBEvent" => {
+            let ev = get_param_str(obj, "EventName").unwrap_or("");
+            !ev.is_empty()
+                && pc.is_some_and(|p| {
+                    p.info.has_claim(&format!("bvb:event:{ev}"))
+                        || p.info.get_key_str("bvb:last_event") == ev
+                })
+        }
+        "CheckChessWinner" => {
+            let cid = json_int(obj.get("ChessboardId")).unwrap_or(0);
+            let want = get_param_str(obj, "Winner").unwrap_or("Player");
+            let cur = pc
+                .map(|p| p.info.get_key_str(&format!("chess:winner:{cid}")))
+                .unwrap_or("");
+            cur == want
+                || (cur.is_empty()
+                    && want == "Player"
+                    && pc.is_some_and(|p| p.info.has_claim(&format!("chess:done:{cid}"))))
+        }
+        "CheckHasFollowShooter" => {
+            let want = obj.get("Has").and_then(Value::as_bool).unwrap_or(true);
+            let sid = json_int(obj.get("Id")).unwrap_or(0);
+            let has = pc.is_some_and(|p| {
+                p.info.has_claim(&format!("follow_shooter:{sid}"))
+                    || (sid > 0 && p.info.get_key_int("follow_shooter:active") == i64::from(sid))
+            });
+            has == want
+        }
+        "CheckIsGramophonePlayingMusic" => {
+            let gid = json_int(obj.get("TargetGramophone")).unwrap_or(0);
+            let cur_music = pc.map_or(0, |p| {
+                let g_val = p.info.get_key_int(&format!("gramophone:music:{gid}"));
+                if g_val > 0 {
+                    g_val
+                } else {
+                    p.info.get_key_int("phantom_music:cur")
+                }
+            });
+            let playlist: Vec<i64> = obj
+                .get("CheckCondition")
+                .and_then(Value::as_object)
+                .and_then(|cc| cc.get("PlayList"))
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| json_int(Some(v)).map(i64::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if playlist.is_empty() {
+                cur_music > 0
+            } else {
+                playlist.contains(&cur_music)
+            }
+        }
+        "CheckPhotographCameraParam" => {
+            let params = obj
+                .get("CameraParam")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if params.is_empty() {
+                pc.is_some_and(|p| p.info.has_claim("photo:submitted"))
+            } else {
+                pc.is_some_and(|p| {
+                    p.info.has_claim("photo:submitted")
+                        || params.iter().any(|cp| {
+                            cp.as_object()
+                                .and_then(|co| json_int(co.get("TemplateId")))
+                                .is_some_and(|tid| p.info.has_claim(&format!("photo:param:{tid}")))
+                        })
+                })
+            }
+        }
+        "CheckPlayerUseSkill" => {
+            let skills = obj
+                .get("CheckSkills")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            pc.is_some_and(|p| {
+                skills.iter().any(|sk| {
+                    sk.as_object()
+                        .and_then(|so| json_int(so.get("SkillId")))
+                        .is_some_and(|sid| p.info.has_claim(&format!("skill:used:{sid}")))
+                })
+            })
+        }
+        "CheckRoverRogueAbilitySelect" => {
+            let want_recv = obj
+                .get("IsReceived")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let st = get_param_str(obj, "SelectType").unwrap_or("");
+            let selected = pc.is_some_and(|p| match st {
+                "BlessGroup" => {
+                    p.info.get_key_int("rover_rogue:bless_group") > 0
+                        || p.info.has_claim("rover_rogue:select:BlessGroup")
+                }
+                _ => p.info.has_claim(&format!("rover_rogue:select:{st}")),
+            });
+            selected == want_recv
+        }
+        _ => return None,
+    };
+    Some(res)
+}
+
+fn eval_check_player_position(ctx: &EvalContext<'_>, obj: &Map<String, Value>) -> bool {
+    let want_on = obj.get("IsOnRange").and_then(Value::as_bool).unwrap_or(true);
+    let Some(range_obj) = obj.get("Range").and_then(Value::as_object) else {
+        return !want_on;
+    };
+    let Some(base_pos) = parse_json_vector_pos(range_obj.get("Pos")) else {
+        return !want_on;
+    };
+    let Some(player_pos) = current_player_pos_3d(ctx) else {
+        return !want_on;
+    };
+    let mut shape = serde_json::from_value::<ShapeConfig>(Value::Object(range_obj.clone()))
+        .unwrap_or_default();
+    if shape.Type.as_deref() == Some("BoxRange") {
+        shape.Type = Some("Box".to_string());
+    } else if shape.Type.as_deref() == Some("CircleRange") {
+        shape.Type = Some("Sphere".to_string());
+    }
+    let inside = is_pos_inside_range_shape(
+        player_pos,
+        base_pos,
+        [0.0, 0.0, 0.0],
+        &shape,
+        500.0,
+        1.0,
+    );
+    inside == want_on
 }
 
 fn quest_state_value(ctx: &EvalContext<'_>, qid: i32) -> i32 {
@@ -5138,5 +5429,63 @@ mod tests {
                 ..Default::default()
             }
         ));
+
+        let scene_no_rb = Scene::from_parts(
+            1,
+            8,
+            sonoro_gamesv_fs::scene_instance::SceneInstance::default(),
+            sonoro_gamesv_fs::formation_info::FormationInfo::default(),
+            sonoro_gamesv_fs::explore_tools_info::ExploreToolsInfo::default(),
+        );
+        let mut scene_rb = Scene::from_parts(
+            1,
+            8,
+            sonoro_gamesv_fs::scene_instance::SceneInstance::default(),
+            sonoro_gamesv_fs::formation_info::FormationInfo::default(),
+            sonoro_gamesv_fs::explore_tools_info::ExploreToolsInfo::default(),
+        );
+        scene_rb.last_server_rollback_quest_id = 880_000_044;
+        scene_rb.instance.players.push(sonoro_gamesv_fs::scene_instance::ScenePlayer {
+            id: 1,
+            group_type: 1,
+            location: [1000.0, 2000.0, 300.0],
+            rotation: [0.0, 0.0, 0.0],
+        });
+
+        let mut ctx_first = EvalContext::new(&basic, &echo, &inv, &map, &quest);
+        ctx_first.owner_quest_id = 880_000_044;
+        ctx_first.scene = Some(&scene_no_rb);
+        let p_first: Value = serde_json::from_str(
+            r#"{"Type":"SaveConfigEnterMethod","EnterMethod":"FirstTime","Compare":"Eq"}"#,
+        )
+        .unwrap();
+        let p_rb: Value = serde_json::from_str(
+            r#"{"Type":"SaveConfigEnterMethod","EnterMethod":"FailureRollBack","Compare":"Eq"}"#,
+        )
+        .unwrap();
+        assert!(eval_single_inline_condition(&ctx_first, &p_first));
+        assert!(!eval_single_inline_condition(&ctx_first, &p_rb));
+
+        let mut ctx_rb = EvalContext::new(&basic, &echo, &inv, &map, &quest);
+        ctx_rb.owner_quest_id = 880_000_044;
+        ctx_rb.scene = Some(&scene_rb);
+        assert!(!eval_single_inline_condition(&ctx_rb, &p_first));
+        assert!(eval_single_inline_condition(&ctx_rb, &p_rb));
+
+        let p_pos_in: Value = serde_json::from_str(
+            r#"{"Type":"CheckPlayerPosition","Range":{"Type":"CircleRange","Pos":{"X":1000.0,"Y":2000.0,"Z":300.0},"Radius":500},"IsOnRange":true}"#,
+        )
+        .unwrap();
+        let p_pos_out: Value = serde_json::from_str(
+            r#"{"Type":"CheckPlayerPosition","Range":{"Type":"CircleRange","Pos":{"X":9000.0,"Y":9000.0,"Z":300.0},"Radius":100},"IsOnRange":true}"#,
+        )
+        .unwrap();
+        let p_pos_not_in: Value = serde_json::from_str(
+            r#"{"Type":"CheckPlayerPosition","Range":{"Type":"BoxRange","Pos":{"X":9000.0,"Y":9000.0,"Z":300.0},"Size":{"X":200,"Y":200,"Z":200}},"IsOnRange":false}"#,
+        )
+        .unwrap();
+        assert!(eval_single_inline_condition(&ctx_rb, &p_pos_in));
+        assert!(!eval_single_inline_condition(&ctx_rb, &p_pos_out));
+        assert!(eval_single_inline_condition(&ctx_rb, &p_pos_not_in));
     }
 }

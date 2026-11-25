@@ -12,11 +12,11 @@ use sonoro_gamesv_fs::quest_info::append_unique_int;
 use sonoro_gamesv_fs::quest_info::remove_int_value;
 use sonoro_proto::enums::{BtType, ChildQuestNodeStatus, FailReason, GameCtxType, NodeStatus};
 use sonoro_proto::pb::{
-    BtRollbackNotify, BtVarUpdateNotify, BehaviorTreeInfoNotify, ChildQuestNodeInfo,
-    EnterLevelPlayNotify, EntityAddNotify, EntityRemoveInfo, EntityRemoveNotify,
-    LeaveLevelPlayNotify, LevelPlayFirstNotify, LevelPlayInfo, LevelPlayInfoNotify,
-    LevelPlayStateNotify, NodeInfo, NodeInfoExtraInfoOneof, TimerInfoPb, TreeInfo,
-    UpdateNodeStatusNotify,
+    BtRollbackNotify, BtRollbackStartNotify, BtVarUpdateNotify, BehaviorTreeInfoNotify,
+    ChildQuestNodeInfo, EnterLevelPlayNotify, EntityAddNotify, EntityRemoveInfo,
+    EntityRemoveNotify, LeaveLevelPlayNotify, LevelPlayFirstNotify, LevelPlayInfo,
+    LevelPlayInfoNotify, LevelPlayStateNotify, NodeInfo, NodeInfoExtraInfoOneof, TimerInfoPb,
+    TreeInfo, UpdateNodeStatusNotify,
 };
 
 use crate::component::entity::small::{
@@ -3158,16 +3158,108 @@ pub fn on_dynamic_interact<S: PushSink + ?Sized>(
 pub fn on_var_changed<S: PushSink + ?Sized>(
     ctx: &mut LevelPlayContext<'_, S>,
     owner_id: i32,
-    _: &str,
+    var_name: &str,
 ) -> io::Result<()> {
+    let entered = ctx.quest_comp.info.progress.entered_level_plays.clone();
+    for lp_id in entered {
+        if ctx.quest_comp.info.completed_level_plays.contains(&lp_id) {
+            continue;
+        }
+        if owner_id > 0 && owner_id != lp_id {
+            continue;
+        }
+        let Ok(nodes) = ctx.assets.level_play_nodes.get_owner_nodes(lp_id) else {
+            continue;
+        };
+        let mut dirty_pc = false;
+        let mut changed = false;
+        for node in nodes.iter() {
+            if !is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id) {
+                continue;
+            }
+            let Some(cond) = quest_engine::get_child_condition_pub(&node.data) else {
+                continue;
+            };
+            if json_str(cond.get("Type")) != Some("ListenToEvent") {
+                continue;
+            }
+            let Some(Value::Object(et)) = cond.get("EventType") else {
+                continue;
+            };
+            if json_str(et.get("Type")) != Some("VarValueChange") {
+                continue;
+            }
+            let want_name = json_str(et.get("VarName"))
+                .or_else(|| json_str(et.get("Name")))
+                .or_else(|| {
+                    et.get("Var")
+                        .and_then(Value::as_object)
+                        .and_then(crate::helpers::quest_types::resolve_var_name)
+                })
+                .unwrap_or("");
+            if !var_name.is_empty() && !want_name.is_empty() && want_name != var_name {
+                continue;
+            }
+            complete_lp_child_quest(ctx, lp_id, node, true, &mut dirty_pc, None)?;
+            changed = true;
+        }
+        if dirty_pc && let Some(pc) = ctx.progress_comp.as_deref_mut() {
+            pc.save(ctx.fs)?;
+        }
+        if changed {
+            step_level_play_tree(ctx, lp_id, &nodes, true, None)?;
+        }
+    }
     evaluate_entered_level_play_trees(ctx, owner_id)
 }
 
 pub fn on_entity_state_changed<S: PushSink + ?Sized>(
     ctx: &mut LevelPlayContext<'_, S>,
-    _: i32,
-    _: &str,
+    entity_config_id: i32,
+    state_name: &str,
 ) -> io::Result<()> {
+    let entered = ctx.quest_comp.info.progress.entered_level_plays.clone();
+    for lp_id in entered {
+        if ctx.quest_comp.info.completed_level_plays.contains(&lp_id) {
+            continue;
+        }
+        let Ok(nodes) = ctx.assets.level_play_nodes.get_owner_nodes(lp_id) else {
+            continue;
+        };
+        let mut dirty_pc = false;
+        let mut changed = false;
+        for node in nodes.iter() {
+            if !is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id) {
+                continue;
+            }
+            let Some(cond) = quest_engine::get_child_condition_pub(&node.data) else {
+                continue;
+            };
+            if json_str(cond.get("Type")) != Some("ListenToEvent") {
+                continue;
+            }
+            let Some(Value::Object(et)) = cond.get("EventType") else {
+                continue;
+            };
+            if json_str(et.get("Type")) != Some("EntityStateChange") {
+                continue;
+            }
+            let eid = json_int(et.get("EntityId")).unwrap_or(0);
+            let want_state = json_str(et.get("State")).unwrap_or("");
+            if (eid == 0 || eid == entity_config_id)
+                && (want_state.is_empty() || want_state == state_name)
+            {
+                complete_lp_child_quest(ctx, lp_id, node, true, &mut dirty_pc, None)?;
+                changed = true;
+            }
+        }
+        if dirty_pc && let Some(pc) = ctx.progress_comp.as_deref_mut() {
+            pc.save(ctx.fs)?;
+        }
+        if changed {
+            step_level_play_tree(ctx, lp_id, &nodes, true, None)?;
+        }
+    }
     evaluate_entered_level_play_trees(ctx, 0)
 }
 
@@ -3281,6 +3373,16 @@ pub fn on_bt_rollback<S: PushSink + ?Sized>(
     fail_node_id: i32,
     reason: FailReason,
 ) -> io::Result<()> {
+    on_bt_rollback_with_select(ctx, lp_id, fail_node_id, reason, 2)
+}
+
+pub fn on_bt_rollback_with_select<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+    lp_id: i32,
+    fail_node_id: i32,
+    reason: FailReason,
+    select: i32,
+) -> io::Result<()> {
     if lp_id <= 0 || ctx.quest_comp.info.completed_level_plays.contains(&lp_id) {
         return Ok(());
     }
@@ -3329,6 +3431,15 @@ pub fn on_bt_rollback<S: PushSink + ?Sized>(
         pc.save(ctx.fs)?;
     }
 
+    ctx.sink.push(
+        BtRollbackStartNotify::MSG_ID,
+        &BtRollbackStartNotify {
+            TreeOwnerId: lp_id,
+            TreeIncId: i64::from(lp_id),
+            IsRollbackSubLevel: false,
+            IsRollbackPos: select == 1,
+        },
+    );
     ctx.sink.push(
         BtRollbackNotify::MSG_ID,
         &BtRollbackNotify {

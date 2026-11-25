@@ -11,9 +11,10 @@ use sonoro_proto::enums::{
 };
 use sonoro_proto::pb::{
     BehaviorTreeInfoNotify, BtRollbackInfo, BtRollbackInfoNotify, BtRollbackNotify,
-    BtRollbackStartNotify, BtSuspendNotify, FailRollbackData, OccupationPbInfo,
-    QuestFinishListNotify, QuestListNotify, QuestRollBackEndNotify, QuestShowListNotify,
-    QuestInfo as PbQuestInfo, TraceQuestNotify, UpdateNodeStatusNotify,
+    BtRollbackStartNotify, BtSuspendNotify, FailRollbackData, LowMemoryChangeSceneStartNotify,
+    OccupationPbInfo, OperationRestrictionNotify, QuestFinishListNotify, QuestListNotify,
+    QuestRollBackEndNotify, QuestShowListNotify, QuestInfo as PbQuestInfo, TraceQuestNotify,
+    UpdateNodeStatusNotify,
 };
 use sonoro_proto::wire::PbEnum;
 
@@ -214,6 +215,9 @@ where
     let active_snapshot = snapshot_active_quest_ids(ctx);
     let mut progressed = false;
     for qid in active_snapshot {
+        if super::is_login_reentry_pending(ctx, qid) {
+            continue;
+        }
         let Some(aq) = ctx.quest_comp.info.find_active_quest(qid).cloned() else {
             continue;
         };
@@ -270,6 +274,9 @@ fn recheck_pending_conditions_pass<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
 ) -> io::Result<bool> {
     advance_matching_child_nodes(ctx, &(), |c, _, qid, _aq, nodes, node, _cond, ctype| {
+        if super::is_login_reentry_pending(c, qid) {
+            return Ok(false);
+        }
         if matches!(
             ctype,
             "CheckConditionGroup"
@@ -289,6 +296,24 @@ fn recheck_pending_conditions_pass<S: PushSink + ?Sized>(
                 | "AtomicProcess"
                 | "CheckSpringFestivalGameplayCompleted"
                 | "CheckUiGame"
+                | "CheckFinishLoading"
+                | "CheckElementalBoxState"
+                | "CheckEntityBuffStack"
+                | "CheckEntitySelfDirection"
+                | "CheckIsInDragActorPlay"
+                | "CompareTeammateDie"
+                | "CompareCost"
+                | "IsCapableToEvolve"
+                | "IsCore"
+                | "ActiveSkillTag"
+                | "HasOptimalFactor"
+                | "CheckBVBEvent"
+                | "CheckChessWinner"
+                | "CheckHasFollowShooter"
+                | "CheckIsGramophonePlayingMusic"
+                | "CheckPhotographCameraParam"
+                | "CheckPlayerUseSkill"
+                | "CheckRoverRogueAbilitySelect"
         ) {
             if should_auto_complete_child_quest(c, qid, node) {
                 complete_child_quest(c, qid, nodes, node)?;
@@ -308,6 +333,9 @@ pub fn step_pending_control_nodes<S: PushSink + ?Sized>(
     let active_snapshot = snapshot_active_quest_ids(ctx);
     let mut progressed = false;
     for qid in active_snapshot {
+        if super::is_login_reentry_pending(ctx, qid) {
+            continue;
+        }
         let Some(aq) = ctx.quest_comp.info.find_active_quest(qid).cloned() else {
             continue;
         };
@@ -616,6 +644,9 @@ pub fn advance_quest_tree<S: PushSink + ?Sized>(
     quest_id: i32,
     push_updates: bool,
 ) -> io::Result<()> {
+    if super::is_login_reentry_pending(ctx, quest_id) {
+        return Ok(());
+    }
     let Ok(nodes) = ctx.assets.quest_nodes.get_owner_nodes(quest_id) else {
         return Ok(());
     };
@@ -1203,6 +1234,29 @@ fn on_enter_child_quest_special<S: PushSink + ?Sized>(
         && let Some(Value::Object(flow_val)) = cond.get("Flow")
     {
         start_flow_from_obj(ctx, quest_id, node.id, flow_val)?;
+    } else if ctype == "ProgramSpecialProcess"
+        && let Some(Value::Object(sp)) = cond.get("SpecialProcess")
+        && json_str(sp.get("Type")) == Some("LowMemorySceneSwitch")
+    {
+        let mut img_path = String::new();
+        if let Some(Value::Array(ops)) = sp.get("Operations") {
+            for op in ops {
+                if let Some(obj) = op.as_object()
+                    && json_str(obj.get("Type")) == Some("AssignLoadingBackground")
+                    && let Some(p) = json_str(obj.get("ImagePath"))
+                {
+                    img_path = p.to_string();
+                    break;
+                }
+            }
+        }
+        ctx.sink.push(
+            LowMemoryChangeSceneStartNotify::MSG_ID,
+            &LowMemoryChangeSceneStartNotify {
+                IsSwitchHLOD: false,
+                AssignLoadingBackgroundImagePath: img_path.into_bytes(),
+            },
+        );
     }
     Ok(())
 }
@@ -1976,6 +2030,13 @@ pub fn rollback_quest_to_node<S: PushSink + ?Sized>(
             scene.last_server_rollback_ms = now_millis();
         }
         interrupt_active_flow_for_quest(ctx, quest_id);
+        ctx.sink.push(
+            OperationRestrictionNotify::MSG_ID,
+            &OperationRestrictionNotify {
+                IsNull: true,
+                Params: Vec::new(),
+            },
+        );
     }
 
     let fail_node_opt = if fail_node_id > 0 {
@@ -2026,8 +2087,9 @@ pub fn rollback_quest_to_node<S: PushSink + ?Sized>(
             return Ok(());
         };
         let mut latest_ckpt = 0;
-        for &fid in &aq.finished_nodes {
-            if let Some(fnode) = find_node_by_id(&nodes, fid)
+        for &fid in aq.finished_nodes.iter().chain(aq.active_nodes.iter()) {
+            if (fail_node_id <= 0 || fid <= fail_node_id)
+                && let Some(fnode) = find_node_by_id(&nodes, fid)
                 && fnode.data.get("SaveConfig").is_some()
                 && fid > latest_ckpt
             {

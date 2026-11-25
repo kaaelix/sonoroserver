@@ -114,7 +114,7 @@ fn apply_buff_request_impl(
     stack_count: i32,
     is_active: bool,
     duration_seconds: Option<f32>,
-    echo_instant_notify: bool,
+    announce_client: bool,
     receive_data_pack: &mut Vec<CombatReceiveData>,
 ) -> bool {
     let Some(buff_data) = state
@@ -134,8 +134,8 @@ fn apply_buff_request_impl(
         // Client ApplyGameplayEffectPush originates after local AddBuffLocal execution.
         // Echoing ApplyGameplayEffectNotify { Handle: -2 } back to the same client re-triggers
         // AddBuffRemote(isIterable=true) -> ShareApplyBuffInner -> AddBuffLocal on teammates for
-        // SharedByFormation buffs (e.g. 1512310011), causing an exponential feedback loop.
-        if echo_instant_notify {
+        // SharedByFormation buffs (e.g. 1512310011, 600020016), causing a feedback loop.
+        if announce_client {
             receive_data_pack.push(CombatReceiveData {
                 Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
                     CombatNotifyData {
@@ -188,6 +188,7 @@ fn apply_buff_request_impl(
             stack_count,
             is_active,
             duration_seconds,
+            notify_client: announce_client,
             ..Default::default()
         }],
     });
@@ -1401,5 +1402,87 @@ mod tests {
                     Some(CombatNotifyDataMessageOneof::ApplyGameplayEffectNotify(_))
                 )
         )));
+    }
+
+    #[test]
+    fn duration_apply_gameplay_effect_push_records_buff_without_echoing_notify() {
+        let mut h = crate::audit_tests::TestHarness::new("duration_push_no_echo", Some(8));
+        let mut events = EventQueue::new();
+        let entity_id = {
+            use sonoro_gamesv_logic::component::entity::small::{
+                ConfigComponent, ConfigType, EntityState, EntityType,
+            };
+            use sonoro_gamesv_logic::component::entity::{
+                EntityComponentStorage, FightBuffComponent,
+            };
+            let sc = h.state.scene.as_mut().unwrap();
+            let mut s = EntityComponentStorage::new(
+                900_301,
+                ConfigComponent {
+                    camp: 0,
+                    config_id: 1506,
+                    config_type: ConfigType::Character,
+                    entity_type: EntityType::Player,
+                    state: EntityState::Default,
+                },
+            );
+            s.buffs = Some(FightBuffComponent::default());
+            sc.spawn_with_net_id(900_301, s).unwrap().net_id
+        };
+        let common = CombatCommon {
+            EntityId: entity_id,
+            ..Default::default()
+        };
+
+        // 3098 is HasDuration; ApplyGameplayEffectPush must record the buff without echoing
+        // ApplyGameplayEffectNotify or BuffStackCountNotify back to the client.
+        let mut push_pack = Vec::new();
+        handle_apply_gameplay_effect_push(
+            &mut h.state,
+            &mut events,
+            Some(&common),
+            &mut push_pack,
+            ApplyGameplayEffectPush {
+                Id: 3098,
+                InstigatorId: entity_id,
+                IsActive: true,
+                StackCount: 1,
+                ..Default::default()
+            },
+        );
+        assert!(push_pack.is_empty());
+
+        while let Some(ev) = events.dequeue() {
+            if let Event::BuffAddition {
+                target,
+                instigator,
+                buffs,
+            } = ev
+            {
+                assert!(buffs.iter().all(|b| !b.notify_client));
+                let mut rt_events = EventQueue::new();
+                let mut buff_timers =
+                    sonoro_gamesv_logic::schedulers::BuffTimerScheduler::default();
+                let assets = std::sync::Arc::clone(&h.state.assets);
+                let scene = h.state.scene.as_mut().unwrap();
+                sonoro_gamesv_logic::handlers::buff::add_buff_to_entity(
+                    &mut h.state.conn,
+                    &mut rt_events,
+                    scene,
+                    &mut buff_timers,
+                    &assets,
+                    target,
+                    instigator,
+                    &buffs,
+                );
+            }
+        }
+
+        let push_ids = h.drain_push_msg_ids();
+        assert!(!push_ids.contains(&CombatReceivePackNotify::MSG_ID));
+        let scene = h.state.scene.as_ref().unwrap();
+        let idx = *scene.net_id_map.get(&entity_id).unwrap();
+        let buffs = scene.entities[idx].buffs.as_ref().unwrap();
+        assert!(buffs.buffs.iter().any(|b| b.BuffId == 3098));
     }
 }

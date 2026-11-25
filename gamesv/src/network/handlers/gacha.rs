@@ -200,16 +200,16 @@ fn selected_pool_view(assets: &Assets, banner: &mut Banner) -> Option<GachaViewI
 fn pool_title(vt: i32) -> &'static str {
     match vt {
         view_type::NOVICE => "Novice Convene",
-        view_type::FEATURED_ROLE
-        | view_type::ANNIVERSARY_ROLE
-        | view_type::NEW_VOYAGE_ROLE
-        | view_type::COLLAB_ROLE
-        | view_type::RERUN_ROLE => "Featured Resonator Convene",
-        view_type::FEATURED_WEAPON
-        | view_type::ANNIVERSARY_WEAPON
-        | view_type::NEW_VOYAGE_WEAPON
-        | view_type::COLLAB_WEAPON
-        | view_type::RERUN_WEAPON => "Featured Weapon Convene",
+        view_type::FEATURED_ROLE => "Featured Resonator Convene",
+        view_type::ANNIVERSARY_ROLE => "Anniversary Resonator Convene",
+        view_type::NEW_VOYAGE_ROLE => "New Voyage Resonator Convene",
+        view_type::COLLAB_ROLE => "Collab Resonator Convene",
+        view_type::RERUN_ROLE => "Rerun Resonator Convene",
+        view_type::FEATURED_WEAPON => "Featured Weapon Convene",
+        view_type::ANNIVERSARY_WEAPON => "Anniversary Weapon Convene",
+        view_type::NEW_VOYAGE_WEAPON => "New Voyage Weapon Convene",
+        view_type::COLLAB_WEAPON => "Collab Weapon Convene",
+        view_type::RERUN_WEAPON => "Rerun Weapon Convene",
         view_type::STANDARD_ROLE => "Standard Resonator Convene",
         view_type::STANDARD_WEAPON => "Standard Weapon Convene",
         view_type::BEGINNER_CHOICE => "Beginner's Choice Convene",
@@ -227,11 +227,11 @@ fn pool_description(vt: i32) -> &'static str {
         | view_type::RERUN_ROLE => {
             "Every 10 Convenes guarantees a\n4-Star or above item.\nA 5-Star Character is guaranteed\nwithin 80 Convenes."
         }
-        view_type::FEATURED_WEAPON
-        | view_type::ANNIVERSARY_WEAPON
-        | view_type::NEW_VOYAGE_WEAPON
-        | view_type::COLLAB_WEAPON
-        | view_type::RERUN_WEAPON => "Featured Weapon Convene Event",
+        view_type::FEATURED_WEAPON => "Featured Weapon Convene Event",
+        view_type::ANNIVERSARY_WEAPON => "Anniversary Weapon Convene Event",
+        view_type::NEW_VOYAGE_WEAPON => "New Voyage Weapon Convene Event",
+        view_type::COLLAB_WEAPON => "Collab Weapon Convene Event",
+        view_type::RERUN_WEAPON => "Rerun Weapon Convene Event",
         view_type::STANDARD_ROLE => "Standard Resonator Convene",
         view_type::STANDARD_WEAPON => "Standard Weapon Convene",
         view_type::BEGINNER_CHOICE => "Beginner's Choice Convene",
@@ -334,8 +334,10 @@ fn resources_id(vt: i32) -> &'static str {
         | view_type::ANNIVERSARY_WEAPON
         | view_type::NEW_VOYAGE_WEAPON
         | view_type::COLLAB_WEAPON
-        | view_type::RERUN_WEAPON => "UiItem_WeaponGachaPool",
+        | view_type::RERUN_WEAPON
+        | view_type::STANDARD_WEAPON => "UiItem_WeaponGachaPool",
         view_type::NOVICE => "UiItem_NewPlayerGachaPool",
+        view_type::BEGINNER_CHOICE => "UiItem_LuckdrawPixF",
         _ => "UiItem_BaseGachaPool",
     }
 }
@@ -808,7 +810,16 @@ pub fn handle_gacha_pool_detail_request(
     };
 
     let five_roles = if is_featured_resonator_view(view.Type) {
-        build_up_detail_list(&state.assets, &view, 5)
+        let mut list = build_up_detail_list(&state.assets, &view, 5);
+        for item_id in build_standard_five_star_resonators(&state.assets) {
+            if !list.iter().any(|item| item.ItemId == item_id) {
+                list.push(GachaItem {
+                    ItemId: item_id,
+                    IsUp: false,
+                });
+            }
+        }
+        list
     } else if matches!(
         view.Type,
         view_type::STANDARD_ROLE | view_type::NOVICE | view_type::BEGINNER_CHOICE
@@ -820,14 +831,6 @@ pub fn handle_gacha_pool_detail_request(
 
     let five_weapons = if is_featured_weapon_view(view.Type) {
         build_up_detail_list(&state.assets, &view, 5)
-    } else if is_featured_resonator_view(view.Type) {
-        build_standard_five_star_resonators(&state.assets)
-            .into_iter()
-            .map(|item_id| GachaItem {
-                ItemId: item_id,
-                IsUp: false,
-            })
-            .collect()
     } else if view.Type == view_type::STANDARD_WEAPON {
         build_configured_detail_list(&state.assets, &view, 5, false)
     } else {

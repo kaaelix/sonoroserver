@@ -271,6 +271,8 @@ pub struct Scene {
     pub action_node_next_idx: HashMap<u64, usize>,
     pub last_server_rollback_quest_id: i32,
     pub last_server_rollback_ms: i64,
+    pub summoned_entities: HashMap<String, Vec<i64>>,
+    pub prefab_entities: HashMap<String, Vec<i64>>,
 }
 
 impl Scene {
@@ -357,6 +359,8 @@ impl Scene {
             action_node_next_idx: HashMap::new(),
             last_server_rollback_quest_id: 0,
             last_server_rollback_ms: 0,
+            summoned_entities: HashMap::new(),
+            prefab_entities: HashMap::new(),
         }
     }
 
@@ -365,6 +369,9 @@ impl Scene {
             fs,
             &format!("player/{player_id}/scene/{instance_id}/instance"),
         )?;
+        if instance.owner_id == 0 {
+            instance.owner_id = player_id;
+        }
         instance.buff_handle = 0;
 
         let formation_info =

@@ -1,4 +1,5 @@
 use sonoro_gamesv_data::tables::entity_components::extra::ExtraEntry;
+use sonoro_gamesv_logic::coop_service::CoopService;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::level_play::LevelPlayEventKind;
 use sonoro_gamesv_logic::helpers::reward::RewardItem;
@@ -96,7 +97,7 @@ use sonoro_proto::pb::{
     PinballWeaponDegradeResponse, PinballWeaponWearRequest, PinballWeaponWearResponse,
     RacingBetMatchActionRequest, RacingBetMatchActionResponse, RacingBetMatchInfoRequest,
     RacingBetMatchInfoResponse, RacingBetMatchRoundActionRequest,
-    RacingBetMatchRoundActionResponse, RacingBetRankSelfData, RacingBetsBulletScreenRequest,
+    RacingBetMatchRoundActionResponse, RacingBetRankPlayerInfo, RacingBetRankSelfData, RacingBetsBulletScreenRequest,
     RacingBetsBulletScreenResponse, RacingBetsCloseSettleMenuRequest,
     RacingBetsCloseSettleMenuResponse, RacingBetsDangoInfo, RacingBetsGearRefundRequest,
     RacingBetsGearRefundResponse, RacingBetsGearRequest, RacingBetsGearResponse,
@@ -2055,8 +2056,23 @@ pub fn handle_pinball_friend_rank_request(
     state: &mut State,
     _req: PinballFriendRankRequest,
 ) -> Result<PinballFriendRankResponse, String> {
+    let mut rank_data: Vec<PinballRankData> = CoopService::collect_server_player_snapshots(
+        &state.fs,
+        state.coop_service.as_deref(),
+        state.player_id,
+    )
+    .into_iter()
+    .filter(|p| p.progress.get_key_int("pinball:kicks") > 0)
+    .map(|p| PinballRankData {
+        Name: p.name.into_bytes(),
+        TowerLevel: p.progress.get_key_int("pinball:tower").max(1) as i32,
+        ..Default::default()
+    })
+    .collect();
+    rank_data.sort_by_key(|a| std::cmp::Reverse(a.TowerLevel));
     Ok(PinballFriendRankResponse {
         ErrorCode: Some(ErrorCode::Success),
+        RankData: rank_data,
         PlayerSelf: Some(PinballRankData {
             Name: state
                 .player_components
@@ -2066,10 +2082,14 @@ pub fn handle_pinball_friend_rank_request(
                 .name
                 .as_bytes()
                 .to_vec(),
-            TowerLevel: 1,
+            TowerLevel: state
+                .player_components
+                .progress
+                .info
+                .get_key_int("pinball:tower")
+                .max(1) as i32,
             ..Default::default()
         }),
-        ..Default::default()
     })
 }
 
@@ -2421,9 +2441,33 @@ pub fn handle_racing_bets_rank_request(
         .info
         .get_key_int("rb:cash")
         .max(1000) as i32;
+    let mut players: Vec<RacingBetRankPlayerInfo> = CoopService::collect_server_player_snapshots(
+        &state.fs,
+        state.coop_service.as_deref(),
+        state.player_id,
+    )
+    .into_iter()
+    .map(|p| {
+        let p_cash = p.progress.get_key_int("rb:cash").max(1000) as i32;
+        RacingBetRankPlayerInfo {
+            PlayerId: p.player_id,
+            HeadIcon: p.head_id,
+            Name: p.name.into_bytes(),
+            Cash: p_cash,
+            HitNum: p.progress.get_key_int("rb:hits").max(0) as i32,
+            Rank: 0,
+            RankNameless: false,
+        }
+    })
+    .collect();
+    players.sort_by_key(|a| std::cmp::Reverse(a.Cash));
+    for (idx, p) in players.iter_mut().enumerate() {
+        p.Rank = (idx + 1) as i32;
+    }
     Ok(RacingBetsRankResponse {
         ErrorCode: Some(ErrorCode::Success),
         Status: Some(RacingBetsRankStatus::Rank),
+        PlayerInfo: players,
         SelfData: Some(RacingBetRankSelfData {
             HeadIcon: state.player_components.basic.info.attributes.head_photo,
             Name: state
@@ -2435,7 +2479,12 @@ pub fn handle_racing_bets_rank_request(
                 .as_bytes()
                 .to_vec(),
             Cash: cash,
-            ..Default::default()
+            HitNum: state
+                .player_components
+                .progress
+                .info
+                .get_key_int("rb:hits")
+                .max(0) as i32,
         }),
         ..Default::default()
     })
@@ -2651,6 +2700,18 @@ pub fn handle_rhythm_rank_list_request(
     state: &mut State,
     _req: RhythmRankListRequest,
 ) -> Result<RhythmRankListResponse, String> {
+    let friends = CoopService::collect_server_player_snapshots(
+        &state.fs,
+        state.coop_service.as_deref(),
+        state.player_id,
+    )
+    .into_iter()
+    .map(|p| RhythmPlayerRankingInfo {
+        PlayerId: p.player_id,
+        Name: p.name.into_bytes(),
+        SubLevelInfo: Vec::new(),
+    })
+    .collect();
     Ok(RhythmRankListResponse {
         SelfData: Some(RhythmPlayerRankingInfo {
             PlayerId: state.player_id,
@@ -2665,7 +2726,7 @@ pub fn handle_rhythm_rank_list_request(
             ..Default::default()
         }),
         ErrorCode: Some(ErrorCode::Success),
-        ..Default::default()
+        FriendData: friends,
     })
 }
 

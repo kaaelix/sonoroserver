@@ -3,17 +3,22 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::{Deserialize, Serialize};
 use sonoro_common::fs::FileSystem;
-use sonoro_gamesv_fs::file_util::{load_or_create_zon, serialize_zon};
+use sonoro_gamesv_fs::basic_info::BasicInfo;
+use sonoro_gamesv_fs::file_util::{load_or_create_zon, parse_zon, serialize_zon};
+use sonoro_gamesv_fs::progress_info::ProgressInfo;
 use sonoro_proto::enums::{EMatchPlayerUiState, ErrorCode, MatchFailReason, MatchTeamState, WorldEnterPermission, WorldTeamLeaveReason};
 use sonoro_proto::pb::{
-    AgreeJoinResultNotify, ApplyJoinWorldNotify, CancelMatchNotify, FriendAddedNotify,
-    FriendApply, FriendApplyDeletedNotify, FriendApplyReceivedNotify, FriendDeletedNotify,
-    FriendInfo, JoinWorldTeamNotify, MatchConfirmNotify, MatchFailNotify, MatchPlayerInfo,
-    MatchTeamInfo, MatchTeamNotify, MatchTeamStateNotify, MovePackageNotify, MovingEntityData,
-    PlayerDetails, PlayerEnterWorldTeamNotify, PlayerLeaveWorldTeamNotify, StartMatchNotify,
-    WorldTeamPlayerFightInfo, WorldTeamPlayerInfo, WorldTeamRoleInfo,
+    AgreeJoinResultNotify, ApplyJoinWorldNotify, CancelMatchNotify, ChatContentProto, ChatNotify,
+    FriendAddedNotify, FriendApply, FriendApplyDeletedNotify, FriendApplyReceivedNotify,
+    FriendDeletedNotify, FriendInfo, JoinWorldTeamNotify, MatchConfirmNotify, MatchFailNotify,
+    MatchPlayerInfo, MatchTeamInfo, MatchTeamNotify, MatchTeamStateNotify, MovePackageNotify,
+    MovingEntityData, PlayerDetails, PlayerEnterWorldTeamNotify, PlayerLeaveWorldTeamNotify,
+    PrivateChatHistoryContentProto, StartMatchNotify, WorldTeamPlayerFightInfo,
+    WorldTeamPlayerInfo, WorldTeamRoleInfo,
 };
 use sonoro_proto::wire::PbMessage;
 
@@ -848,6 +853,169 @@ impl CoopService {
             me.match_ui_state = EMatchPlayerUiState::Wait;
         }
     }
+
+    pub fn broadcast_all<M: PbMessage>(&self, exclude_id: i32, msg_id: u16, msg: &M) -> usize {
+        let senders: Vec<Arc<dyn CoopSender>> = {
+            let online = self.online.lock().unwrap_or_else(|p| p.into_inner());
+            online
+                .values()
+                .filter(|p| p.player_id != exclude_id)
+                .map(|p| Arc::clone(&p.sender))
+                .collect()
+        };
+        if senders.is_empty() {
+            return 0;
+        }
+        let payload = msg.encode_to_vec();
+        let mut delivered = 0usize;
+        for s in senders {
+            if s.send_raw(msg_id, payload.clone()) {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
+    pub fn deliver_private_chat(
+        &self,
+        fs: &FileSystem,
+        sender_id: i32,
+        target_id: i32,
+        content: &ChatContentProto,
+    ) -> bool {
+        let delivered_live = if target_id > 0 && target_id != sender_id {
+            self.push_to_player(
+                target_id,
+                ChatNotify::MSG_ID,
+                &ChatNotify {
+                    Content: content.encode_to_vec(),
+                },
+            )
+        } else {
+            false
+        };
+
+        if target_id > 0 && target_id != sender_id {
+            let _guard = SOCIAL_FILE_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+            let rel_path = format!("player/{target_id}/progress_info");
+            if let Ok(Some(bytes)) = fs.read_file(&rel_path)
+                && let Ok(mut target_pc) = parse_zon::<ProgressInfo>(&bytes)
+            {
+                let priv_key = format!("chat:priv:{sender_id}");
+                let b64 = target_pc.get_key_str(&priv_key);
+                let mut hist = if b64.is_empty() {
+                    None
+                } else {
+                    BASE64_STANDARD
+                        .decode(b64)
+                        .ok()
+                        .and_then(|raw| PrivateChatHistoryContentProto::decode(&raw).ok())
+                }
+                .unwrap_or_else(|| PrivateChatHistoryContentProto {
+                    TargetUid: sender_id,
+                    Chats: Vec::new(),
+                    HistoryIsEnd: true,
+                    TotalNums: 0,
+                });
+                hist.TargetUid = sender_id;
+                hist.Chats.push(content.clone());
+                if hist.Chats.len() > 50 {
+                    let drain = hist.Chats.len() - 50;
+                    hist.Chats.drain(..drain);
+                }
+                hist.HistoryIsEnd = true;
+                hist.TotalNums = hist.Chats.len() as i32;
+                let encoded = BASE64_STANDARD.encode(hist.encode_to_vec());
+                target_pc.set_key_str(&priv_key, &encoded);
+                if let Ok(out) = serialize_zon(&target_pc) {
+                    let _ = fs.write_file(&rel_path, &out);
+                }
+            }
+        }
+        delivered_live
+    }
+
+    pub fn collect_server_player_snapshots(
+        fs: &FileSystem,
+        coop: Option<&CoopService>,
+        exclude_id: i32,
+    ) -> Vec<ServerPlayerSnapshot> {
+        let mut ids = Vec::new();
+        if let Ok(Some(entries)) = fs.read_dir("player") {
+            for ent in entries {
+                if !ent.is_dir {
+                    continue;
+                }
+                if let Some(pid_str) = ent.path.strip_prefix("player/")
+                    && !pid_str.contains('/')
+                    && let Ok(pid) = pid_str.parse::<i32>()
+                    && pid > 0
+                    && pid != exclude_id
+                {
+                    append_unique_i32(&mut ids, pid);
+                }
+            }
+        }
+        if let Some(svc) = coop {
+            let online = svc.online.lock().unwrap_or_else(|p| p.into_inner());
+            for &pid in online.keys() {
+                if pid > 0 && pid != exclude_id {
+                    append_unique_i32(&mut ids, pid);
+                }
+            }
+        }
+        ids.sort_unstable();
+
+        let mut snapshots = Vec::new();
+        for pid in ids.into_iter().take(50) {
+            let online_entry = coop.and_then(|svc| svc.with_online_player(pid, Clone::clone));
+            let basic_opt = fs
+                .read_file(&format!("player/{pid}/basic_info"))
+                .ok()
+                .flatten()
+                .and_then(|b| parse_zon::<BasicInfo>(&b).ok());
+            let progress = fs
+                .read_file(&format!("player/{pid}/progress_info"))
+                .ok()
+                .flatten()
+                .and_then(|b| parse_zon::<ProgressInfo>(&b).ok())
+                .unwrap_or_default();
+
+            let (name, head_id, is_online) = if let Some(ref onl) = online_entry {
+                (onl.name.clone(), onl.head_id, true)
+            } else if let Some(ref b) = basic_opt {
+                (
+                    b.attributes.name.clone(),
+                    b.attributes.head_photo.max(82_001_209),
+                    false,
+                )
+            } else {
+                continue;
+            };
+
+            snapshots.push(ServerPlayerSnapshot {
+                player_id: pid,
+                name: if name.is_empty() {
+                    format!("Rover {pid}")
+                } else {
+                    name
+                },
+                head_id,
+                progress,
+                is_online,
+            });
+        }
+        snapshots
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ServerPlayerSnapshot {
+    pub player_id: i32,
+    pub name: String,
+    pub head_id: i32,
+    pub progress: ProgressInfo,
+    pub is_online: bool,
 }
 
 pub fn append_unique_i32(list: &mut Vec<i32>, val: i32) -> bool {

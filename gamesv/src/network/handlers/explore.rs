@@ -124,6 +124,7 @@ pub fn handle_vision_explore_skill_set_request(
         if let Err(err) = quest_engine::on_vision_system_event(&mut qctx, "VisionSetActivated") {
             tracing::warn!("on_vision_system_event(VisionSetActivated) error: {err}");
         }
+        let _ = quest_engine::on_skill_unlock(&mut qctx, req.SkillId);
     }
 
     Ok(VisionExploreSkillSetResponse {

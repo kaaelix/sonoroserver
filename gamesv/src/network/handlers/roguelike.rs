@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
+use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::reward::RewardItem;
-use sonoro_gamesv_logic::helpers::{energy, pb_kv, reward};
+use sonoro_gamesv_logic::helpers::{energy, pb_kv, quest_engine, reward};
 use sonoro_proto::enums::{ErrorCode, RoverRogueGrade};
 use sonoro_proto::pb::{
     MulRogueWeeklyRewardRequest, MulRogueWeeklyRewardResponse, MulRoguelikeWriteCatRewardRequest,
@@ -1385,15 +1386,21 @@ pub fn handle_rover_rogue_ins_list_request(
 
 pub fn handle_rover_rogue_bless_group_select_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: RoverRogueBlessGroupSelectRequest,
 ) -> Result<RoverRogueBlessGroupSelectResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        "rover_rogue:bless_group",
-        i64::from(req.BlessGroupId),
-    )
-    .map_err(|e| e.to_string())?;
+    let info = &mut state.player_components.progress.info;
+    info.set_key_int("rover_rogue:bless_group", i64::from(req.BlessGroupId));
+    info.mark_claim("rover_rogue:select:BlessGroup");
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    if state.scene.is_some() {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_condition_state_changed(&mut qctx);
+    }
     Ok(RoverRogueBlessGroupSelectResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1401,15 +1408,21 @@ pub fn handle_rover_rogue_bless_group_select_request(
 
 pub fn handle_rover_rogue_choose_data_result_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: RoverRogueChooseDataResultRequest,
 ) -> Result<RoverRogueChooseDataResultResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("rover_rogue:gain:{}", req.BindId),
-        i64::from(req.IncId),
-    )
-    .map_err(|e| e.to_string())?;
+    let info = &mut state.player_components.progress.info;
+    info.set_key_int(&format!("rover_rogue:gain:{}", req.BindId), i64::from(req.IncId));
+    info.mark_claim("rover_rogue:select:Gain");
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    if state.scene.is_some() {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_condition_state_changed(&mut qctx);
+    }
     Ok(RoverRogueChooseDataResultResponse {
         IsSelect: true,
         ErrorCode: Some(ErrorCode::Success),
@@ -1418,15 +1431,24 @@ pub fn handle_rover_rogue_choose_data_result_request(
 
 pub fn handle_rover_rogue_event_select_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: RoverRogueEventSelectRequest,
 ) -> Result<RoverRogueEventSelectResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
+    let info = &mut state.player_components.progress.info;
+    info.set_key_int(
         &format!("rover_rogue:evt:{}", req.EventIncId),
         i64::from(req.ChoiceId),
-    )
-    .map_err(|e| e.to_string())?;
+    );
+    info.mark_claim("rover_rogue:select:Event");
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    if state.scene.is_some() {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_condition_state_changed(&mut qctx);
+    }
     Ok(RoverRogueEventSelectResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1570,14 +1592,21 @@ pub fn handle_rover_rogue_shop_refresh_request(
 
 pub fn handle_rover_rogue_shop_buy_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: RoverRogueShopBuyRequest,
 ) -> Result<RoverRogueShopBuyResponse, String> {
-    pb_kv::persist_claim(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("rover_rogue:buy:{}", req.GoodIncId),
-    )
-    .map_err(|e| e.to_string())?;
+    let info = &mut state.player_components.progress.info;
+    info.mark_claim(&format!("rover_rogue:buy:{}", req.GoodIncId));
+    info.mark_claim("rover_rogue:select:Shop");
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    if state.scene.is_some() {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_condition_state_changed(&mut qctx);
+    }
     Ok(RoverRogueShopBuyResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

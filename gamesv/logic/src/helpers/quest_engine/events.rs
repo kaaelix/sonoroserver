@@ -2,13 +2,14 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
+use sonoro_gamesv_data::asset_indexes::MapEntityKey;
 use sonoro_gamesv_fs::quest_info::append_unique_int;
 use sonoro_proto::enums::{BtType, ChildQuestNodeStatus, ErrorCode, FailReason, TimerSetType};
 use sonoro_proto::pb::{
-    FlowEndNotify, FlowOptionInfoList, LordGymLevelPlayResultNotify, QuestGiveUpNotify,
-    TimerInfoPb, TowerEndNotify, TowerFloorPb, TowerFloorUpdateNotify, TowerRolePb,
-    UpdateChildQuestNodeStatusNotify, UpdateTimerInfoNotify,
+    BtRollbackStartNotify, FlowEndNotify, FlowOptionInfoList, LordGymLevelPlayResultNotify,
+    QuestGiveUpNotify, TimerInfoPb, TowerEndNotify, TowerFloorPb, TowerFloorUpdateNotify,
+    TowerRolePb, UpdateChildQuestNodeStatusNotify, UpdateTimerInfoNotify,
 };
 
 use crate::helpers::condition;
@@ -44,6 +45,27 @@ use super::{
 
 thread_local! {
     static TIME_CHANGE_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static ENTITY_GROUP_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+struct EntityGroupDepthGuard;
+impl EntityGroupDepthGuard {
+    fn try_enter() -> Option<Self> {
+        ENTITY_GROUP_DEPTH.with(|d| {
+            let cur = d.get();
+            if cur >= 4 {
+                None
+            } else {
+                d.set(cur + 1);
+                Some(Self)
+            }
+        })
+    }
+}
+impl Drop for EntityGroupDepthGuard {
+    fn drop(&mut self) {
+        ENTITY_GROUP_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
 }
 
 struct TimeChangeGuard;
@@ -524,33 +546,21 @@ fn is_entity_kill_relevant_to_quest(
         };
         let ctype = json_str(cond.get("Type")).unwrap_or("");
         if ctype == "MonsterCreator" {
-            match cond.get("MonsterCreatorEntityIds") {
-                None => return true,
-                Some(Value::Array(arr)) if arr.is_empty() => return true,
-                Some(Value::Array(arr))
-                    if arr.iter().any(|v| json_int(Some(v)) == Some(cfg_id)) =>
-                {
-                    return true;
-                }
-                _ => {}
+            if let Some(Value::Array(arr)) = cond.get("MonsterCreatorEntityIds")
+                && arr.iter().any(|v| json_int(Some(v)) == Some(cfg_id))
+            {
+                return true;
             }
         } else if ctype == "Kill" {
             if json_int(cond.get("EntityId")) == Some(cfg_id) {
                 return true;
             }
-            let mut has_any_list = json_int(cond.get("EntityId")).is_some_and(|id| id > 0);
             for field in ["TargetsToAwake", "ExistTargets"] {
                 if let Some(Value::Array(arr)) = cond.get(field)
-                    && !arr.is_empty()
+                    && arr.iter().any(|v| json_int(Some(v)) == Some(cfg_id))
                 {
-                    has_any_list = true;
-                    if arr.iter().any(|v| json_int(Some(v)) == Some(cfg_id)) {
-                        return true;
-                    }
+                    return true;
                 }
-            }
-            if !has_any_list {
-                return true;
             }
         } else if ctype == "DetectCombatState" || ctype == "DetectCombatState2" {
             if json_int(cond.get("EntityId")) == Some(cfg_id) {
@@ -613,6 +623,45 @@ fn combat_state_threshold(state_name: &str, hp_ratio: f32) -> f32 {
     }
 }
 
+fn is_client_judged_condition(ctype: &str) -> bool {
+    ctype == "DetectCombatState"
+}
+
+fn combat_state2_holds<F>(cond: &Map<String, Value>, fallback_entity: i32, has_state: F) -> bool
+where
+    F: Fn(i32, &str) -> bool,
+{
+    let Some(Value::Array(listed)) = cond.get("Conditions") else {
+        return false;
+    };
+    if listed.is_empty() {
+        return false;
+    }
+    let asked = json_int(cond.get("Count")).unwrap_or(0);
+    let needed = if asked <= 0 {
+        listed.len()
+    } else {
+        asked as usize
+    };
+    let mut held = 0usize;
+    for entry in listed {
+        let Value::Object(obj) = entry else {
+            continue;
+        };
+        let own_entity = json_int(obj.get("EntityId")).unwrap_or(0);
+        let state = json_str(obj.get("State")).unwrap_or("");
+        let check_entity = if own_entity != 0 {
+            own_entity
+        } else {
+            fallback_entity
+        };
+        if has_state(check_entity, state) {
+            held += 1;
+        }
+    }
+    held >= needed
+}
+
 fn check_combat_state_for_quest<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     quest_id: i32,
@@ -639,7 +688,10 @@ fn check_combat_state_for_quest<S: PushSink + ?Sized>(
             continue;
         };
         let ctype = json_str(cond.get("Type")).unwrap_or("");
-        if ctype == "DetectCombatState" || ctype == "DetectCombatState2" {
+        if is_client_judged_condition(ctype) {
+            continue;
+        }
+        if ctype == "DetectCombatState2" {
             let mut matched = false;
             if let Some(Value::Array(cs)) = cond.get("Conditions")
                 && !cs.is_empty()
@@ -668,20 +720,6 @@ fn check_combat_state_for_quest<S: PushSink + ?Sized>(
                     }
                 }
                 matched = hit_cnt >= needed;
-            } else {
-                let target_entity = json_int(cond.get("EntityId")).unwrap_or(0);
-                if target_entity == cfg_id || target_entity == 0 {
-                    let state_name = json_str(cond.get("State")).unwrap_or("");
-                    let entity_to_check = if target_entity != 0 {
-                        target_entity
-                    } else {
-                        cfg_id
-                    };
-                    matched = entity_has_state_tag(ctx, entity_to_check, state_name)
-                        || hp_ratio <= 0.0
-                        || (combat_state_allows_hp_fallback(state_name)
-                            && hp_ratio <= combat_state_threshold(state_name, hp_ratio));
-                }
             }
             if matched {
                 complete_child_quest(ctx, quest_id, &nodes, &node)?;
@@ -850,23 +888,18 @@ pub fn on_entity_state_changed<S: PushSink + ?Sized>(
                     complete_child_quest(ctx, qid, &nodes, &node)?;
                     progressed = true;
                 }
-            } else if ctype == "DetectCombatState"
-                || ctype == "DetectCombatState2"
-                || ctype == "WaitBattleCondition"
-            {
-                if is_battle_attr_or_wait_satisfied(ctx, cond, ctype, entity_config_id, 1.0) {
+            } else if ctype == "DetectCombatState2" {
+                if combat_state2_holds(cond, entity_config_id, |eid, st| {
+                    entity_has_state_tag(ctx, eid, st)
+                }) {
                     complete_child_quest(ctx, qid, &nodes, &node)?;
                     progressed = true;
-                } else {
-                    let target_st = json_str(cond.get("State")).unwrap_or("");
-                    if !target_st.is_empty() && target_st == state_name {
-                        let target_id = json_int(cond.get("EntityId")).unwrap_or(0);
-                        if target_id == 0 || target_id == entity_config_id {
-                            complete_child_quest(ctx, qid, &nodes, &node)?;
-                            progressed = true;
-                        }
-                    }
                 }
+            } else if ctype == "WaitBattleCondition"
+                && is_battle_attr_or_wait_satisfied(ctx, cond, ctype, entity_config_id, 1.0)
+            {
+                complete_child_quest(ctx, qid, &nodes, &node)?;
+                progressed = true;
             }
         }
     }
@@ -888,7 +921,196 @@ pub fn on_entity_state_changed<S: PushSink + ?Sized>(
     if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(ctx) {
         level_play::on_entity_state_changed(&mut lp_ctx, entity_config_id, state_name)?;
     }
+    if evaluate_entity_group_triggers_for_member(ctx, entity_config_id)? {
+        finalize_progression(ctx)?;
+    }
     Ok(())
+}
+
+fn eval_entity_group_condition<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    gc: &Map<String, Value>,
+) -> bool {
+    let Some(Value::Array(conds)) = gc.get("Conditions") else {
+        return false;
+    };
+    if conds.is_empty() {
+        return false;
+    }
+    let mut matched = 0i32;
+    for entry in conds {
+        let Some(eobj) = entry.as_object() else {
+            continue;
+        };
+        let Some(eid) = json_int(eobj.get("EntityId")) else {
+            continue;
+        };
+        let Some(want) = json_str(eobj.get("State")) else {
+            continue;
+        };
+        let cur = ctx
+            .quest_comp
+            .info
+            .get_entity_state(i64::from(eid))
+            .unwrap_or("关卡.Common.状态.常态");
+        if cur == want {
+            matched += 1;
+        }
+    }
+    let need = json_int(gc.get("Count")).unwrap_or(conds.len() as i32);
+    matched >= need
+}
+
+fn evaluate_entity_group_triggers_for_member<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    member_cfg_id: i32,
+) -> io::Result<bool> {
+    if member_cfg_id <= 0 {
+        return Ok(false);
+    }
+    let Some(_guard) = EntityGroupDepthGuard::try_enter() else {
+        return Ok(false);
+    };
+    let Some(map_id) = ctx
+        .scene
+        .as_deref()
+        .map(|s| ctx.assets.resolve_map_config_id(s.instance_id))
+    else {
+        return Ok(false);
+    };
+    let specs = ctx
+        .assets
+        .indexes
+        .entity_groups_by_member
+        .get(&MapEntityKey {
+            map_id,
+            entity_id: i64::from(member_cfg_id),
+        })
+        .cloned()
+        .unwrap_or_default();
+    if specs.is_empty() {
+        return Ok(false);
+    }
+
+    let mut changed = false;
+    let mut cbs = super::action_callbacks::<S>();
+    for spec in specs {
+        let gid = spec.group_entity_id;
+        if let Some(Value::Array(triggers)) = spec.component.StateTriggers.as_ref().map(|v| Value::Array(v.clone())).as_ref() {
+            for (idx, trig) in triggers.iter().enumerate() {
+                let Some(tobj) = trig.as_object() else {
+                    continue;
+                };
+                let is_match = tobj
+                    .get("GroupCondition")
+                    .and_then(Value::as_object)
+                    .is_some_and(|gc| eval_entity_group_condition(ctx, gc));
+                if is_match {
+                    let already = ctx
+                        .progress_comp
+                        .as_deref()
+                        .is_some_and(|pc| pc.info.has_claim(&format!("eg_trig:{gid}:{idx}")));
+                    if !already {
+                        if let Some(pc) = ctx.progress_comp.as_deref_mut() {
+                            pc.info.mark_claim(&format!("eg_trig:{gid}:{idx}"));
+                            pc.save(ctx.fs)?;
+                        }
+                        if let Some(Value::Array(acts)) = tobj.get("SuccessActions") {
+                            quest_actions::execute_action_list(ctx, &mut cbs, 0, idx as i32, acts)?;
+                            changed = true;
+                        }
+                    }
+                } else if let Some(Value::Array(fail_acts)) = tobj.get("FailActions")
+                    && !fail_acts.is_empty()
+                {
+                    let was_triggered = ctx
+                        .progress_comp
+                        .as_deref()
+                        .is_some_and(|pc| pc.info.has_claim(&format!("eg_trig:{gid}:{idx}")));
+                    if was_triggered {
+                        quest_actions::execute_action_list(ctx, &mut cbs, 0, idx as i32, fail_acts)?;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if let Some(fs_obj) = spec.component.FinishState.as_ref().and_then(Value::as_object)
+            && let Some(gc) = fs_obj.get("GroupCondition").and_then(Value::as_object)
+            && eval_entity_group_condition(ctx, gc)
+            && ctx.quest_comp.info.get_entity_state(gid) != Some("关卡.Common.状态.完成")
+        {
+            ctx.quest_comp
+                .info
+                .set_entity_state(gid, "关卡.Common.状态.完成");
+            ctx.quest_comp.save(ctx.fs)?;
+            if let Ok(gid32) = i32::try_from(gid) {
+                on_entity_state_changed(ctx, gid32, "关卡.Common.状态.完成")?;
+            }
+            changed = true;
+        }
+
+        if let Some(fl_obj) = spec.component.FailureState.as_ref().and_then(Value::as_object)
+            && let Some(Value::Array(fconds)) = fl_obj.get("FailureConditions")
+        {
+            let mut failed = false;
+            for fc in fconds {
+                let Some(fobj) = fc.as_object() else {
+                    continue;
+                };
+                if json_str(fobj.get("Type")) == Some("SequentialState")
+                    && let Some(Value::Array(order)) = fobj.get("Order")
+                {
+                    let mut seen_mismatch = false;
+                    for step in order {
+                        let Some(sobj) = step.as_object() else {
+                            continue;
+                        };
+                        let Some(eid) = json_int(sobj.get("EntityId")) else {
+                            continue;
+                        };
+                        let Some(want) = json_str(sobj.get("State")) else {
+                            continue;
+                        };
+                        let cur = ctx
+                            .quest_comp
+                            .info
+                            .get_entity_state(i64::from(eid))
+                            .unwrap_or("关卡.Common.状态.常态");
+                        if cur == want {
+                            if seen_mismatch {
+                                failed = true;
+                                break;
+                            }
+                        } else if cur != "关卡.Common.状态.常态" {
+                            failed = true;
+                            break;
+                        } else {
+                            seen_mismatch = true;
+                        }
+                    }
+                }
+            }
+            if failed && let Some(ops) = fl_obj.get("FailureOperations").and_then(Value::as_object) {
+                if let Some(Value::Array(acts)) = ops.get("Actions") {
+                    quest_actions::execute_action_list(ctx, &mut cbs, 0, 0, acts)?;
+                    changed = true;
+                }
+                if json_bool(ops.get("IsResetState")).unwrap_or(false)
+                    && let Some(ids) = spec.component.EntityIds.as_ref()
+                {
+                    for &eid in ids {
+                        ctx.quest_comp
+                            .info
+                            .set_entity_state(eid, "关卡.Common.状态.常态");
+                    }
+                    ctx.quest_comp.save(ctx.fs)?;
+                    changed = true;
+                }
+            }
+        }
+    }
+    Ok(changed)
 }
 
 pub fn on_var_changed<S: PushSink + ?Sized>(
@@ -1289,6 +1511,7 @@ fn record_challenge_dungeon_finish<S: PushSink + ?Sized>(
                 CurrentFloorData: Some(floor_pb),
             },
         );
+        on_condition_event(ctx, QuestEventKind::FinishRoleTower, tc.Id, 1)?;
     }
 
     if changed && let Some(pc) = ctx.progress_comp.as_deref_mut() {
@@ -1549,11 +1772,42 @@ pub fn on_gameplay_state_changed<S: PushSink + ?Sized>(
     }
 
     let progressed = advance_matching_child_nodes(ctx, &key, |c, &k, qid, _aq, nodes, node, cond, ctype| {
-        if ctype == "AtomicProcess" || ctype == "CheckSpringFestivalGameplayCompleted" {
+        if ctype == "AtomicProcess" {
+            let match_key = json_str(cond.get("Key"))
+                .or_else(|| json_str(cond.get("GameplayId")))
+                .or_else(|| {
+                    cond.get("AtomicProcessType")
+                        .and_then(Value::as_object)
+                        .and_then(|o| json_str(o.get("Type")))
+                })
+                .unwrap_or("");
+            if k.is_empty()
+                || k == "AtomicProcess"
+                || match_key.is_empty()
+                || match_key == k
+            {
+                if let Some(pc) = c.progress_comp.as_deref_mut() {
+                    pc.info.mark_claim(&format!("quest_sub:{qid}:{}", node.id));
+                    pc.save(c.fs)?;
+                }
+                complete_child_quest(c, qid, nodes, node)?;
+                return Ok(true);
+            }
+        } else if ctype == "CheckSpringFestivalGameplayCompleted" {
             let match_key = json_str(cond.get("Key"))
                 .or_else(|| json_str(cond.get("GameplayId")))
                 .unwrap_or("");
-            if k.is_empty() || match_key.is_empty() || match_key == k {
+            let gp_id_match = cond
+                .get("GameplayType")
+                .and_then(Value::as_object)
+                .and_then(|o| json_int(o.get("Id")))
+                .is_some_and(|id| k == id.to_string() || k == format!("sf:{id}"));
+            if k.is_empty()
+                || k == "SpringFestival"
+                || match_key.is_empty()
+                || match_key == k
+                || gp_id_match
+            {
                 if let Some(pc) = c.progress_comp.as_deref_mut() {
                     pc.info.mark_claim(&format!("quest_sub:{qid}:{}", node.id));
                     pc.save(c.fs)?;
@@ -1711,7 +1965,60 @@ pub fn on_skill_unlock<S: PushSink + ?Sized>(
     if skill_id <= 0 {
         return Ok(());
     }
-    if complete_matching_child_quests(ctx, "GetSkill", "SkillId", skill_id)? {
+    if let Some(pc) = ctx.progress_comp.as_deref_mut()
+        && pc.info.mark_claim(&format!("skill_unlocked:{skill_id}"))
+    {
+        pc.save(ctx.fs)?;
+    }
+    let mut progressed = complete_matching_child_quests(ctx, "GetSkill", "SkillId", skill_id)?;
+    if recheck_pending_conditions(ctx)? {
+        progressed = true;
+    }
+    if progressed {
+        finalize_progression(ctx)?;
+    }
+    Ok(())
+}
+
+pub fn on_information_view_read<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    display_id: i32,
+) -> io::Result<()> {
+    if display_id <= 0 {
+        return Ok(());
+    }
+    if let Some(pc) = ctx.progress_comp.as_deref_mut()
+        && pc.info.mark_claim(&format!("display_read:{display_id}"))
+    {
+        pc.save(ctx.fs)?;
+    }
+    let mut progressed =
+        complete_matching_child_quests(ctx, "InformationViewCheck", "InformationViewId", display_id)?;
+    if recheck_pending_conditions(ctx)? {
+        progressed = true;
+    }
+    if progressed {
+        finalize_progression(ctx)?;
+    }
+    Ok(())
+}
+
+pub fn on_program_special_process_finish<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+) -> io::Result<()> {
+    let progressed = advance_matching_child_nodes(ctx, &(), |c, _, qid, _aq, nodes, node, _cond, ctype| {
+        if ctype != "ProgramSpecialProcess" {
+            return Ok(false);
+        }
+        if let Some(pc) = c.progress_comp.as_deref_mut()
+            && pc.info.mark_claim(&format!("quest_psp:{qid}:{}", node.id))
+        {
+            pc.save(c.fs)?;
+        }
+        complete_child_quest(c, qid, nodes, node)?;
+        Ok(true)
+    })?;
+    if progressed {
         finalize_progression(ctx)?;
     }
     Ok(())
@@ -2641,7 +2948,7 @@ pub fn on_client_bt_rollback<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     owner_id: i32,
     tree_inc_id: i64,
-    _fail_node_id: i32,
+    select: i32,
 ) -> io::Result<()> {
     if let Some(scene) = ctx.scene.as_deref_mut() {
         let _ = scene.remove_bt_timer(owner_id, tree_inc_id, "");
@@ -2662,6 +2969,17 @@ pub fn on_client_bt_rollback<S: PushSink + ?Sized>(
             scene.last_server_rollback_quest_id = 0;
             return Ok(());
         }
+        if select == 1 {
+            ctx.sink.push(
+                BtRollbackStartNotify::MSG_ID,
+                &BtRollbackStartNotify {
+                    TreeOwnerId: target_qid,
+                    TreeIncId: i64::from(target_qid),
+                    IsRollbackSubLevel: false,
+                    IsRollbackPos: true,
+                },
+            );
+        }
         rollback_quest_to_node(ctx, target_qid, 0, FailReason::DefaultFail, true)?;
         finalize_progression(ctx)?;
     } else if target_qid > 0
@@ -2673,7 +2991,13 @@ pub fn on_client_bt_rollback<S: PushSink + ?Sized>(
             .contains(&target_qid)
         && let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(ctx)
     {
-        level_play::on_bt_rollback(&mut lp_ctx, target_qid, 0, FailReason::DefaultFail)?;
+        level_play::on_bt_rollback_with_select(
+            &mut lp_ctx,
+            target_qid,
+            0,
+            FailReason::DefaultFail,
+            select,
+        )?;
     }
     Ok(())
 }
@@ -3426,4 +3750,119 @@ pub fn on_forced_occupation<S: PushSink + ?Sized>(
         level_play::step_entered_tree_by_id(&mut lp_ctx, target_owner)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn detect_combat_state_is_client_judged_unlike_detect_combat_state2() {
+        assert!(is_client_judged_condition("DetectCombatState"));
+        assert!(!is_client_judged_condition("DetectCombatState2"));
+        assert!(!is_client_judged_condition("WaitBattleCondition"));
+        assert!(!is_client_judged_condition("Kill"));
+    }
+
+    #[test]
+    fn combat_state2_holds_requires_listed_states_and_respects_count_and_fallback() {
+        let one_of_two = json!({
+            "Type": "DetectCombatState2",
+            "Count": 1,
+            "Conditions": [
+                { "EntityId": 122000452, "State": "hacked" },
+                { "EntityId": 122000453, "State": "hacked" }
+            ]
+        });
+        let all_of_two = json!({
+            "Type": "DetectCombatState2",
+            "Count": 0,
+            "Conditions": [
+                { "EntityId": 122000452, "State": "hacked" },
+                { "EntityId": 122000453, "State": "hacked" }
+            ]
+        });
+        let empty_list = json!({
+            "Type": "DetectCombatState2",
+            "Count": 1,
+            "Conditions": []
+        });
+        let no_list = json!({
+            "Type": "DetectCombatState2",
+            "EntityId": 310000014,
+            "State": "phase two"
+        });
+        let fallback_cond = json!({
+            "Type": "DetectCombatState2",
+            "Count": 0,
+            "Conditions": [{ "State": "hacked" }]
+        });
+
+        let has_122000453 = |eid: i32, st: &str| eid == 122000453 && st == "hacked";
+        let nobody = |_: i32, _: &str| false;
+        let has_122000452 = |eid: i32, st: &str| eid == 122000452 && st == "hacked";
+        let boss_p2 = |eid: i32, st: &str| eid == 310000014 && st == "phase two";
+
+        assert!(combat_state2_holds(one_of_two.as_object().unwrap(), 0, has_122000453));
+        assert!(!combat_state2_holds(one_of_two.as_object().unwrap(), 0, nobody));
+        assert!(!combat_state2_holds(all_of_two.as_object().unwrap(), 0, has_122000453));
+        assert!(!combat_state2_holds(empty_list.as_object().unwrap(), 310000014, boss_p2));
+        assert!(!combat_state2_holds(no_list.as_object().unwrap(), 310000014, boss_p2));
+        assert!(combat_state2_holds(fallback_cond.as_object().unwrap(), 122000452, has_122000452));
+        assert!(!combat_state2_holds(fallback_cond.as_object().unwrap(), 7, has_122000452));
+    }
+
+    #[test]
+    fn entity_kill_relevance_does_not_match_unrelated_active_quests() {
+        let mut aq = sonoro_gamesv_fs::quest_info::ActiveQuest {
+            quest_id: 140_000_001,
+            ..Default::default()
+        };
+        aq.mark_node_active(2);
+
+        let unrelated_talk = sonoro_gamesv_data::lazy_node_store::NodeEntry {
+            id: 2,
+            parent_id: 1,
+            node_type: "ChildQuest".to_string(),
+            count: 0,
+            reward_id: 0,
+            data: json!({
+                "Condition": {
+                    "Type": "Talk",
+                    "FlowListName": "TestFlow"
+                }
+            }),
+        };
+        let empty_mc = sonoro_gamesv_data::lazy_node_store::NodeEntry {
+            id: 2,
+            parent_id: 1,
+            node_type: "ChildQuest".to_string(),
+            count: 0,
+            reward_id: 0,
+            data: json!({
+                "Condition": {
+                    "Type": "MonsterCreator",
+                    "MonsterCreatorEntityIds": []
+                }
+            }),
+        };
+        let matched_kill = sonoro_gamesv_data::lazy_node_store::NodeEntry {
+            id: 2,
+            parent_id: 1,
+            node_type: "ChildQuest".to_string(),
+            count: 0,
+            reward_id: 0,
+            data: json!({
+                "Condition": {
+                    "Type": "Kill",
+                    "EntityId": 109_750_023
+                }
+            }),
+        };
+
+        assert!(!is_entity_kill_relevant_to_quest(&aq, &[unrelated_talk], 109_750_023));
+        assert!(!is_entity_kill_relevant_to_quest(&aq, &[empty_mc], 109_750_023));
+        assert!(is_entity_kill_relevant_to_quest(&aq, &[matched_kill], 109_750_023));
+    }
 }

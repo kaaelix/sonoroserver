@@ -148,16 +148,11 @@ pub fn grant_drop_and_collect_items<S: PushSink + ?Sized>(
         echo_comp: ctx.echo_comp,
         progress_comp: None,
     };
-    if drop_id > 0
-        && let Some(pkg) = ctx.assets.tables.drop_package.get_data_by_id(&drop_id)
-    {
+    let preview = reward::preview_drop_items(ctx.assets, drop_id);
+    if !preview.is_empty() {
         let _ = reward::grant_drop_package(&mut rctx, drop_id, reason)?;
-        for (&item_id, &raw_count) in pkg.DropPreview.iter() {
-            if item_id <= 0 {
-                continue;
-            }
-            let cnt = if raw_count > 0 { raw_count } else { 1 };
-            *out_map.entry(item_id).or_insert(0) += cnt;
+        for item in preview {
+            *out_map.entry(item.item_id).or_insert(0) += item.count;
         }
         return Ok(());
     }

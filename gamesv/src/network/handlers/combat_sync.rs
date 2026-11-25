@@ -7,6 +7,7 @@ use sonoro_gamesv_logic::fsm::types::wake_reason;
 use sonoro_gamesv_logic::helpers::{
     attributes::{self, AttributeChangeType, AttributeValueType},
     consume::{self, CostItem},
+    destructible,
     energy, level_play::{self, LevelPlayContext},
     quest_actions, quest_engine, role as role_helper,
 };
@@ -363,8 +364,17 @@ pub fn handle_use_skill_request(
     events: &mut EventQueue,
     req: UseSkillRequest,
 ) -> Result<UseSkillResponse, String> {
+    let mut skill_ids = Vec::new();
+    if req.SkillSingleId > 0 {
+        skill_ids.push(i64::from(req.SkillSingleId));
+    }
+    if let Some(info) = req.UseSkillInfo.as_ref()
+        && info.SkillId > 0
+    {
+        skill_ids.push(info.SkillId);
+    }
     let common = req.CombatCommon.clone();
-    Ok(forward_combat_req(
+    let resp = forward_combat_req(
         state,
         events,
         common,
@@ -373,7 +383,28 @@ pub fn handle_use_skill_request(
             CombatResponseDataMessageOneof::UseSkillResponse(v) => Some(v),
             _ => None,
         },
-    ))
+    );
+    if !skill_ids.is_empty() {
+        let mut dirty = false;
+        for sid in skill_ids {
+            if state
+                .player_components
+                .progress
+                .info
+                .mark_claim(&format!("skill:used:{sid}"))
+            {
+                dirty = true;
+            }
+        }
+        if dirty {
+            let _ = state.player_components.progress.save(&state.fs);
+        }
+        if state.scene.is_some() {
+            let mut qctx = state.quest_context(events);
+            let _ = quest_engine::events::on_condition_state_changed(&mut qctx);
+        }
+    }
+    Ok(resp)
 }
 
 pub fn handle_change_state_request(
@@ -1016,6 +1047,7 @@ pub fn handle_buff_item_request(
 
 pub fn handle_atomic_process_add_buff_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: AtomicProcessAddBuffRequest,
 ) -> Result<AtomicProcessAddBuffResponse, String> {
     for buff_id in req.BuffIds {
@@ -1027,6 +1059,8 @@ pub fn handle_atomic_process_add_buff_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    let mut qctx = state.quest_context(events);
+    let _ = quest_engine::events::on_gameplay_state_changed(&mut qctx, "AtomicProcess");
     Ok(AtomicProcessAddBuffResponse {
         ErrorId: Some(ErrorCode::Success),
     })
@@ -1034,6 +1068,7 @@ pub fn handle_atomic_process_add_buff_request(
 
 pub fn handle_atomic_process_remove_buff_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: AtomicProcessRemoveBuffRequest,
 ) -> Result<AtomicProcessRemoveBuffResponse, String> {
     for buff_id in req.BuffIds {
@@ -1045,6 +1080,8 @@ pub fn handle_atomic_process_remove_buff_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    let mut qctx = state.quest_context(events);
+    let _ = quest_engine::events::on_gameplay_state_changed(&mut qctx, "AtomicProcess");
     Ok(AtomicProcessRemoveBuffResponse {
         ErrorId: Some(ErrorCode::Success),
     })
@@ -1052,6 +1089,7 @@ pub fn handle_atomic_process_remove_buff_request(
 
 pub fn handle_atomic_process_teleport_request(
     state: &mut State,
+    events: &mut EventQueue,
     _req: AtomicProcessTeleportRequest,
 ) -> Result<AtomicProcessTeleportResponse, String> {
     let _ = state
@@ -1064,6 +1102,8 @@ pub fn handle_atomic_process_teleport_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    let mut qctx = state.quest_context(events);
+    let _ = quest_engine::events::on_gameplay_state_changed(&mut qctx, "AtomicProcess");
     Ok(AtomicProcessTeleportResponse {
         ErrorId: Some(ErrorCode::Success),
     })
@@ -1155,21 +1195,82 @@ pub fn handle_deadeye_shoot_hit_request(
 
 pub fn handle_target_gear_hit_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: TargetGearHitRequest,
 ) -> Result<TargetGearHitResponse, String> {
+    let mut cfg_id = req.EntityId;
+    let mut net_id_opt = None;
+    if let Some(scene) = state.scene.as_ref() {
+        if let Some(cid) = scene.find_config_id_by_net_id(req.EntityId) {
+            cfg_id = i64::from(cid);
+            net_id_opt = Some(req.EntityId);
+        } else if let Ok(cid32) = i32::try_from(req.EntityId)
+            && let Some(nid) = scene.find_entity_net_id_by_config_id(cid32)
+        {
+            net_id_opt = Some(nid);
+        }
+    }
     let _ = state
         .player_components
         .progress
         .info
-        .add_key_int(&format!("gear_hit:{}", req.EntityId), 1);
+        .add_key_int(&format!("gear_hit:{cfg_id}"), 1);
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    if let (Some(scene), Some(net_id)) = (state.scene.as_mut(), net_id_opt) {
+        if let Some(upd) = scene.update_entity_state_tag(
+            &state.assets.tables.gameplay_tag_remap,
+            net_id,
+            "关卡.Common.状态.激活",
+        ) {
+            quest_actions::emit_entity_state_tag_update_checked(
+                scene,
+                Some(&state.assets),
+                &mut state.conn,
+                net_id,
+                upd,
+            );
+        }
+        scene.mark_fsm_dirty(net_id, wake_reason::TAG | wake_reason::STATE);
+    }
+    if cfg_id > 0 {
+        state
+            .player_components
+            .quest
+            .info
+            .set_entity_state(cfg_id, "关卡.Common.状态.激活");
+        let _ = state.player_components.quest.save(&state.fs);
+        if let Ok(cid32) = i32::try_from(cfg_id) {
+            let mut qctx = state.quest_context(events);
+            let _ = quest_engine::on_entity_state_changed(
+                &mut qctx,
+                cid32,
+                "关卡.Common.状态.激活",
+            );
+        }
+    }
     Ok(TargetGearHitResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
+}
+
+fn current_role_weapon_kind(
+    scene: &sonoro_gamesv_logic::scene::Scene,
+    assets: &sonoro_gamesv_data::Assets,
+) -> destructible::WeaponKind {
+    let Ok(formation_idx) = usize::try_from(scene.formation_info.cur_formation) else {
+        return destructible::WeaponKind::Unknown;
+    };
+    let Some(formation) = scene.formation_info.formations.get(formation_idx) else {
+        return destructible::WeaponKind::Unknown;
+    };
+    let Some(role) = assets.tables.role_info.get_data_by_id(&formation.cur_role) else {
+        return destructible::WeaponKind::Unknown;
+    };
+    destructible::weapon_kind_from_role_weapon_type(role.WeaponType)
 }
 
 pub fn handle_throw_damage_request(
@@ -1181,7 +1282,7 @@ pub fn handle_throw_damage_request(
     let mut net_id = eid;
     let mut cfg_id = eid;
     let mut max_dur = 1i32;
-    let mut dmg_step = 1i32;
+    let mut hit_damage = 1i32;
     let mut found_in_scene = false;
 
     if let Some(scene) = state.scene.as_ref() {
@@ -1199,15 +1300,13 @@ pub fn handle_throw_damage_request(
         if cfg_id > 0
             && let Some(res) = level_play::resolve_entity_config(&state.assets, scene.instance_id, cfg_id)
             && let Some(di) = res.components.DestructibleItem
-            && let Some(d) = di.Durability
-            && d > 0
         {
-            max_dur = d;
+            max_dur = destructible::initial_durability(di.Durability, 0);
+            hit_damage = destructible::hit_damage(
+                di.WeaponDamage.as_ref(),
+                current_role_weapon_kind(scene, &state.assets),
+            );
         }
-    }
-
-    if req.CalculateId > 0 && state.assets.tables.damage.get_data_by_id(&req.CalculateId).is_some() {
-        dmg_step = 1;
     }
 
     let dur_key = format!("durability:{cfg_id}");
@@ -1217,12 +1316,17 @@ pub fn handle_throw_damage_request(
     } else {
         max_dur
     };
-    let next_dur = (cur_dur - dmg_step).max(0);
+    let next_dur = destructible::after_hit(cur_dur, hit_damage);
     state
         .player_components
         .progress
         .info
         .set_key_int(&dur_key, i64::from(next_dur));
+    if let Some(scene) = state.scene.as_mut()
+        && let Some(storage) = scene.entity_mut(net_id)
+    {
+        storage.world_item.durability = next_dur;
+    }
     let _ = state
         .player_components
         .progress
@@ -1439,18 +1543,63 @@ pub fn handle_entity_buff_producer_operate_request(
 
 pub fn handle_quick_hack_skill_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: QuickHackSkillRequest,
 ) -> Result<QuickHackSkillResponse, String> {
+    let mut cfg_id = req.EntityId;
+    let mut net_id_opt = None;
+    if let Some(scene) = state.scene.as_ref() {
+        if let Some(cid) = scene.find_config_id_by_net_id(req.EntityId) {
+            cfg_id = i64::from(cid);
+            net_id_opt = Some(req.EntityId);
+        } else if let Ok(cid32) = i32::try_from(req.EntityId)
+            && let Some(nid) = scene.find_entity_net_id_by_config_id(cid32)
+        {
+            net_id_opt = Some(nid);
+        }
+    }
     state
         .player_components
         .progress
         .info
-        .set_key_int(&format!("quickhack:{}", req.EntityId), i64::from(req.SkillId));
+        .set_key_int(&format!("quickhack:{cfg_id}"), i64::from(req.SkillId));
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    if let (Some(scene), Some(net_id)) = (state.scene.as_mut(), net_id_opt) {
+        if let Some(upd) = scene.update_entity_state_tag(
+            &state.assets.tables.gameplay_tag_remap,
+            net_id,
+            "关卡.Common.状态.激活",
+        ) {
+            quest_actions::emit_entity_state_tag_update_checked(
+                scene,
+                Some(&state.assets),
+                &mut state.conn,
+                net_id,
+                upd,
+            );
+        }
+        scene.mark_fsm_dirty(net_id, wake_reason::TAG | wake_reason::STATE);
+    }
+    if cfg_id > 0 {
+        state
+            .player_components
+            .quest
+            .info
+            .set_entity_state(cfg_id, "关卡.Common.状态.激活");
+        let _ = state.player_components.quest.save(&state.fs);
+        if let Ok(cid32) = i32::try_from(cfg_id) {
+            let mut qctx = state.quest_context(events);
+            let _ = quest_engine::on_entity_state_changed(
+                &mut qctx,
+                cid32,
+                "关卡.Common.状态.激活",
+            );
+        }
+    }
     Ok(QuickHackSkillResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

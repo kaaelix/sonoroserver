@@ -587,6 +587,125 @@ pub fn spawn_with_location_and_progress<S: PushSink + ?Sized>(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn spawn_synthetic_template_entity<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    fs: &FileSystem,
+    assets: &Assets,
+    sink: &mut S,
+    basic_comp: &PlayerBasicComponent,
+    blueprint_type: &str,
+    config_id: i64,
+    location: [f32; 3],
+    rotation: [f32; 3],
+) -> Option<i64> {
+    let blueprint_config = assets.find_blueprint_config(blueprint_type)?;
+    let template_config = assets.find_template_config(blueprint_type)?;
+    let spawn_base = spawn_base_from_logic(blueprint_config.EntityLogic)?;
+    let components_data = &template_config.ComponentsData;
+    let base_info = components_data
+        .BaseInfoComponent
+        .as_ref()
+        .map(Cow::Borrowed)
+        .unwrap_or_else(|| Cow::Owned(BaseInfoComponent::default()));
+    let final_camp = spawn_camp(&base_info, &template_config, spawn_base);
+    let model_id = components_data
+        .ModelComponent
+        .as_ref()
+        .map_or(0, |m| m.ModelType.ModelId);
+    let ai_runtime = use_ai_runtime(spawn_base.entity_type);
+    let mut storage = EntityComponentStorage::new(
+        0,
+        ConfigComponent {
+            camp: final_camp,
+            config_id: i32::try_from(config_id).unwrap_or(0),
+            config_type: spawn_base.config_type,
+            entity_type: spawn_base.entity_type,
+            state: spawn_base.entity_state,
+        },
+    );
+    storage.position = Some(PositionComponent { location, rotation });
+    storage.buffs = Some(FightBuffComponent::default());
+    if ai_runtime {
+        let ai_id = components_data.AiComponent.as_ref().and_then(|c| c.AiId);
+        storage.fsm =
+            ai_id.and_then(|aid| FsmComponent::from_ai_base_id(assets, aid, now_millis()).ok().flatten());
+        storage.attribute = Some(
+            entity_attributes::create_combat_attributes(
+                assets,
+                components_data,
+                blueprint_config.EntityLogic,
+                1,
+                basic_comp.info.attributes.cur_world_level,
+            )
+            .unwrap_or_default(),
+        );
+        storage.tag = Some(initial_tag_component(
+            components_data,
+            &assets.tables.gameplay_tag_remap,
+            false,
+        ));
+        storage.logic_state = Some(LogicStateComponent::default());
+        storage.character_attach = Some(CharacterAttachComponent::default());
+        if let Some(aid) = ai_id
+            && let Some(ab) = assets.tables.ai_base.get_data_by_id(&aid)
+        {
+            let mut hatred_id = 0i64;
+            if let Some(sbc) = &ab.SubBehaviorConfigs
+                && let Some(hate_str) = &sbc.AiHate
+            {
+                hatred_id = hate_str.parse::<i64>().unwrap_or(0);
+            }
+            storage.monster_ai = Some(MonsterAiComponent {
+                weapon_id: 0,
+                hatred_group_id: 0,
+                ai_team_init_id: 100,
+                combat_message_id: 1,
+                hatred_id,
+                perception_ids: [0i32; 8],
+                perception_len: 0,
+            });
+        }
+        if spawn_base.entity_type == EntityType::Monster {
+            storage.passive_ga_skill = build_monster_passive_ga_skill(assets, model_id);
+        }
+    }
+    if spawn_base.entity_type == EntityType::Vehicle
+        || components_data.has_extra(ExtraKind::VehicleComponent)
+    {
+        storage.vehicle = Some(VehicleComponent {
+            source: Some(VehicleSource::VehicleSourceNone),
+            occupied: false,
+        });
+    }
+    if spawn_base.entity_type == EntityType::SceneItem {
+        let state_tag_id = gameplay_tags::id_from_name(
+            &assets.tables.gameplay_tag_remap,
+            "关卡.Common.状态.常态",
+        )
+        .unwrap_or(0);
+        storage.state_tag = Some(StateTagComponent { state_tag_id });
+        storage.world_item.scene_item = Some(SceneItemComponent::from_progress(
+            &ProgressInfo::default(),
+            scene.player_id,
+            storage.config.config_id,
+        ));
+    }
+
+    let handle = scene.spawn(storage);
+    let _ = scene.save_entity(fs, handle);
+    let now_ms = now_millis();
+    let entity_pb = scene.entity(handle.net_id)?.to_proto(assets, now_ms);
+    sink.push(
+        EntityAddNotify::MSG_ID,
+        &EntityAddNotify {
+            EntityPbs: vec![entity_pb],
+            RemoveTagIds: false,
+        },
+    );
+    Some(handle.net_id)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn publish_world_spawn<S: PushSink + ?Sized>(
     scene: &mut Scene,
     fs: &FileSystem,
@@ -944,6 +1063,15 @@ fn spawn_with_location_internal<S: PushSink + ?Sized>(
     }
     if components_data.TriggerComponent.is_some() {
         storage.world_item.trigger_present = true;
+    }
+    if let Some(dc) = &components_data.DestructibleItem
+        && !dc.Disabled.unwrap_or(false)
+    {
+        let saved_durability = progress_info
+            .map(|info| info.get_key_int(&format!("durability:{entity_id}")))
+            .unwrap_or(0);
+        storage.world_item.durability =
+            crate::helpers::destructible::initial_durability(dc.Durability, saved_durability);
     }
     if let Some(lc) = &components_data.LiftComponent
         && !lc.Disabled.unwrap_or(false)

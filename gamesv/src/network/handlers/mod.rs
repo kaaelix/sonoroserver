@@ -1920,6 +1920,15 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::WeeklyFrameworkInfoResponse,
             adventure::handle_weekly_framework_info_request
         ),
+        pb::GetAdventureRewardRequest::MSG_ID => req_noev!(
+            state,
+            rpc_id,
+            msg_id,
+            payload,
+            pb::GetAdventureRewardRequest,
+            pb::GetAdventureRewardResponse,
+            adventure::handle_get_adventure_reward_request
+        ),
         pb::MulGetAdventureRewardRequest::MSG_ID => req_noev!(
             state,
             rpc_id,
@@ -2302,7 +2311,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::PhantomMusicSaveResponse,
             skin::handle_phantom_music_save_request
         ),
-        pb::PhantomMusicSwitchRequest::MSG_ID => req_noev!(
+        pb::PhantomMusicSwitchRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -2375,7 +2384,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::ShortMessageInfoResponse,
             qol::handle_short_message_info_request
         ),
-        pb::ShortMessageReadRequest::MSG_ID => req_noev!(
+        pb::ShortMessageReadRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -2384,7 +2393,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::ShortMessageReadResponse,
             qol::handle_short_message_read_request
         ),
-        pb::ShortMessageReceivedRequest::MSG_ID => req_noev!(
+        pb::ShortMessageReceivedRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -2393,7 +2402,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::ShortMessageReceivedResponse,
             qol::handle_short_message_received_request
         ),
-        pb::ShortMessageReplyRequest::MSG_ID => req_noev!(
+        pb::ShortMessageReplyRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -2402,7 +2411,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::ShortMessageReplyResponse,
             qol::handle_short_message_reply_request
         ),
-        pb::ShortMessageUpdateRequest::MSG_ID => req_noev!(
+        pb::ShortMessageUpdateRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -2516,6 +2525,15 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::BattlePassTaskTakeResponse,
             qol::handle_battle_pass_task_take_request
         ),
+        pb::BattlePassRecurringTakeRequest::MSG_ID => req_noev!(
+            state,
+            rpc_id,
+            msg_id,
+            payload,
+            pb::BattlePassRecurringTakeRequest,
+            pb::BattlePassRecurringTakeResponse,
+            qol::handle_battle_pass_recurring_take_request
+        ),
         pb::MonthCardRequest::MSG_ID => req_noev!(
             state,
             rpc_id,
@@ -2569,6 +2587,15 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::PayItemRequest,
             pb::PayItemResponse,
             qol::handle_pay_item_request
+        ),
+        pb::PayShopDirectBuyRequest::MSG_ID => req_noev!(
+            state,
+            rpc_id,
+            msg_id,
+            payload,
+            pb::PayShopDirectBuyRequest,
+            pb::PayShopDirectBuyResponse,
+            qol::handle_pay_shop_direct_buy_request
         ),
         pb::GachaAccumulateInfoRequest::MSG_ID => req_noev!(
             state,
@@ -3710,7 +3737,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::BuffItemResponse,
             combat_sync::handle_buff_item_request
         ),
-        pb::AtomicProcessAddBuffRequest::MSG_ID => req_noev!(
+        pb::AtomicProcessAddBuffRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -3719,7 +3746,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::AtomicProcessAddBuffResponse,
             combat_sync::handle_atomic_process_add_buff_request
         ),
-        pb::AtomicProcessRemoveBuffRequest::MSG_ID => req_noev!(
+        pb::AtomicProcessRemoveBuffRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -3728,7 +3755,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::AtomicProcessRemoveBuffResponse,
             combat_sync::handle_atomic_process_remove_buff_request
         ),
-        pb::AtomicProcessTeleportRequest::MSG_ID => req_noev!(
+        pb::AtomicProcessTeleportRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -3773,7 +3800,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::DeadeyeShootHitResponse,
             combat_sync::handle_deadeye_shoot_hit_request
         ),
-        pb::TargetGearHitRequest::MSG_ID => req_noev!(
+        pb::TargetGearHitRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -3818,7 +3845,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::EntityBuffProducerOperateResponse,
             combat_sync::handle_entity_buff_producer_operate_request
         ),
-        pb::QuickHackSkillRequest::MSG_ID => req_noev!(
+        pb::QuickHackSkillRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -5925,7 +5952,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::PhantomBattleCheckCardSkillUnlockResponse,
             phantom_battle::handle_phantom_battle_check_card_skill_unlock_request
         ),
-        pb::PhantomBattleStartRequest::MSG_ID => req_noev!(
+        pb::PhantomBattleStartRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -5934,7 +5961,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::PhantomBattleStartResponse,
             phantom_battle::handle_phantom_battle_start_request
         ),
-        pb::PhantomBattleBvBLoadingFinishRequest::MSG_ID => req_noev!(
+        pb::PhantomBattleBvBLoadingFinishRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -5961,7 +5988,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::PhantomBattleReChallengeResponse,
             phantom_battle::handle_phantom_battle_re_challenge_request
         ),
-        pb::PhantomBattleRoundOverRequest::MSG_ID => req_noev!(
+        pb::PhantomBattleRoundOverRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -6024,7 +6051,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::PhantomBattleBackSlotCardLibraryResponse,
             phantom_battle::handle_phantom_battle_back_slot_card_library_request
         ),
-        pb::PhantomBattleCallCardRequest::MSG_ID => req_noev!(
+        pb::PhantomBattleCallCardRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -6682,7 +6709,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::RoverRogueInsListResponse,
             roguelike::handle_rover_rogue_ins_list_request
         ),
-        pb::RoverRogueBlessGroupSelectRequest::MSG_ID => req_noev!(
+        pb::RoverRogueBlessGroupSelectRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -6691,7 +6718,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::RoverRogueBlessGroupSelectResponse,
             roguelike::handle_rover_rogue_bless_group_select_request
         ),
-        pb::RoverRogueChooseDataResultRequest::MSG_ID => req_noev!(
+        pb::RoverRogueChooseDataResultRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -6700,7 +6727,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::RoverRogueChooseDataResultResponse,
             roguelike::handle_rover_rogue_choose_data_result_request
         ),
-        pb::RoverRogueEventSelectRequest::MSG_ID => req_noev!(
+        pb::RoverRogueEventSelectRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -6763,7 +6790,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::RoverRogueShopRefreshResponse,
             roguelike::handle_rover_rogue_shop_refresh_request
         ),
-        pb::RoverRogueShopBuyRequest::MSG_ID => req_noev!(
+        pb::RoverRogueShopBuyRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -11212,7 +11239,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::WellStreamingFinisResponse,
             world_puzzle::handle_well_streaming_finis_request
         ),
-        pb::ReadDisplayInfoRequest::MSG_ID => req_noev!(
+        pb::ReadDisplayInfoRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -11392,7 +11419,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::ReviveResponse,
             world_puzzle::handle_revive_request
         ),
-        pb::LowMemoryChangeSceneFinishRequest::MSG_ID => req_noev!(
+        pb::LowMemoryChangeSceneFinishRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,

@@ -13,7 +13,7 @@ use sonoro_gamesv_logic::component::player::PlayerRoleComponent;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::events::{BuffAdditionEntry, EntityHandle, Event};
 use sonoro_gamesv_logic::handlers::buff;
-use sonoro_gamesv_logic::helpers::{cosmetics, reward, role as role_helper};
+use sonoro_gamesv_logic::helpers::{cosmetics, quest_engine, reward, role as role_helper};
 use sonoro_proto::enums::{EquipPos, ErrorCode};
 use sonoro_proto::pb::{
     CalabashSkinComponentPb,
@@ -964,6 +964,7 @@ pub fn handle_phantom_music_save_request(
 
 pub fn handle_phantom_music_switch_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: PhantomMusicSwitchRequest,
 ) -> Result<PhantomMusicSwitchResponse, String> {
     state
@@ -976,6 +977,10 @@ pub fn handle_phantom_music_switch_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    if state.scene.is_some() {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_condition_state_changed(&mut qctx);
+    }
     Ok(PhantomMusicSwitchResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

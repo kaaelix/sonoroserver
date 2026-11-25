@@ -992,6 +992,14 @@ pub fn revive_and_heal_formation<S: PushSink + ?Sized>(
             },
         );
     }
+    scene.force_battle_state(false);
+    let mut battle_data = Vec::new();
+    if scene.append_battle_state_notify(&mut battle_data) {
+        sink.push(
+            CombatReceivePackNotify::MSG_ID,
+            &CombatReceivePackNotify { Data: battle_data },
+        );
+    }
     if any_revived {
         events.enqueue(Event::UpdateFormations {
             player_id: scene.player_id,

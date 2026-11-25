@@ -79,7 +79,17 @@ pub fn handle_achievement_info_request(player_id: i32, _payload: &[u8]) -> AkiRe
                         FinishTime: now,
                         IsReceive: is_taken,
                         Progress: Some(AchievementProgress {
-                            CurProgress: progress,
+                            CurProgress: progress.max(1),
+                            TotalProgress: 1,
+                        }),
+                    });
+                } else {
+                    entry_list.push(AchievementEntry {
+                        Id: cfg.id,
+                        FinishTime: 0,
+                        IsReceive: false,
+                        Progress: Some(AchievementProgress {
+                            CurProgress: 0,
                             TotalProgress: 1,
                         }),
                     });

@@ -1,1 +1,10 @@
 target/
+logs/
+*.pid
+proxy/server.key
+proxy/server.crt
+proxy/server_bundle.crt
+proxy/__pycache__/
+assets/*.tmp
+assets/*.part
+assets/assets.version.json

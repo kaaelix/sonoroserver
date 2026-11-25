@@ -328,6 +328,15 @@ pub struct DataTables {
     pub morale_play: Table<crate::inline_tables::MoralePlay, i32>,
     pub battle_score_conf: Table<crate::inline_tables::BattleScoreConf, i32>,
     pub battle_score_level_conf: Table<crate::inline_tables::BattleScoreLevelConf, i32>,
+    pub drop_show_plan: Table<crate::inline_tables::DropShowPlan, i32>,
+    pub prefab_config: Table<crate::inline_tables::PrefabConfig, i32>,
+    pub pay_item: Table<crate::inline_tables::PayItemCfg, i32>,
+    pub pay: Table<crate::inline_tables::PayCfg, i32>,
+    pub pay_gift: Table<crate::inline_tables::PayGiftCfg, i32>,
+    pub battle_pass: Table<crate::inline_tables::BattlePassCfg, i32>,
+    pub phantom_recommend: Table<crate::inline_tables::PhantomRecommendCfg, i32>,
+    pub boss_rush_score: Table<crate::inline_tables::BossRushScoreCfg, i32>,
+    pub gacha_accumulate_reward: Table<crate::inline_tables::GachaAccumulateRewardCfg, i32>,
 }
 
 impl DataTables {
@@ -624,6 +633,15 @@ impl DataTables {
         let morale_play = load_table(db.as_deref(), base_path, "MoralePlay.json", "MoralePlay", |item: &crate::inline_tables::MoralePlay| item.Id)?;
         let battle_score_conf = load_table(db.as_deref(), base_path, "BattleScoreConf.json", "BattleScoreConf", |item: &crate::inline_tables::BattleScoreConf| item.Id)?;
         let battle_score_level_conf = load_table(db.as_deref(), base_path, "BattleScoreLevelConf.json", "BattleScoreLevelConf", |item: &crate::inline_tables::BattleScoreLevelConf| item.Id)?;
+        let drop_show_plan = load_table(db.as_deref(), base_path, "DropShowPlan.json", "DropShowPlan", |item: &crate::inline_tables::DropShowPlan| item.Id)?;
+        let prefab_config = load_table(db.as_deref(), base_path, "PrefabConfig.json", "PrefabConfig", |item: &crate::inline_tables::PrefabConfig| item.Id)?;
+        let pay_item = load_table(db.as_deref(), base_path, "PayItem.json", "PayItem", |item: &crate::inline_tables::PayItemCfg| item.Id)?;
+        let pay = load_table(db.as_deref(), base_path, "Pay.json", "Pay", |item: &crate::inline_tables::PayCfg| item.Id)?;
+        let pay_gift = load_table(db.as_deref(), base_path, "PayGift.json", "PayGift", |item: &crate::inline_tables::PayGiftCfg| item.Id)?;
+        let battle_pass = load_table(db.as_deref(), base_path, "BattlePass.json", "BattlePass", |item: &crate::inline_tables::BattlePassCfg| item.Id)?;
+        let phantom_recommend = load_table(db.as_deref(), base_path, "PhantomRecommend.json", "PhantomRecommend", |item: &crate::inline_tables::PhantomRecommendCfg| item.RoleId)?;
+        let boss_rush_score = load_table(db.as_deref(), base_path, "BossRushScore.json", "BossRushScore", |item: &crate::inline_tables::BossRushScoreCfg| item.Id)?;
+        let gacha_accumulate_reward = load_table(db.as_deref(), base_path, "GachaAccumulateReward.json", "GachaAccumulateReward", |item: &crate::inline_tables::GachaAccumulateRewardCfg| item.Id)?;
 
         Ok(Self {
             db,
@@ -815,6 +833,15 @@ impl DataTables {
             morale_play,
             battle_score_conf,
             battle_score_level_conf,
+            drop_show_plan,
+            prefab_config,
+            pay_item,
+            pay,
+            pay_gift,
+            battle_pass,
+            phantom_recommend,
+            boss_rush_score,
+            gacha_accumulate_reward,
         })
     }
 

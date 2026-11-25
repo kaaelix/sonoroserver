@@ -67,6 +67,16 @@ pub fn handle_achievement_info_request(
                 if rec.finish_time > 0 {
                     all_finished = true;
                 }
+            } else {
+                entries.push(AchievementEntry {
+                    Id: ach.Id,
+                    FinishTime: 0,
+                    IsReceive: false,
+                    Progress: Some(AchievementProgress {
+                        CurProgress: 0,
+                        TotalProgress: 1,
+                    }),
+                });
             }
         }
         let group_received = progress.achievement.claimed_groups.contains(&grp.Id);

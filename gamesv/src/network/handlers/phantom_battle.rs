@@ -1,6 +1,6 @@
-use sonoro_gamesv_logic::helpers::pb_kv;
+use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::reward::RewardItem;
-use sonoro_gamesv_logic::helpers::reward;
+use sonoro_gamesv_logic::helpers::{pb_kv, quest_engine, reward};
 use sonoro_proto::enums::ErrorCode;
 use sonoro_proto::pb::{
     MulPhantomBattleMasterLevelRewardRequest, MulPhantomBattleMasterLevelRewardResponse,
@@ -8,7 +8,7 @@ use sonoro_proto::pb::{
     PhantomBattleBackSlotCardLibraryRequest, PhantomBattleBackSlotCardLibraryResponse,
     PhantomBattleBadgeRewardRequest, PhantomBattleBadgeRewardResponse,
     PhantomBattleBvBLoadingFinishRequest, PhantomBattleBvBLoadingFinishResponse,
-    PhantomBattleCallCardRequest, PhantomBattleCallCardResponse, PhantomBattleCardGroupAddRequest,
+    PhantomBattleBvBSettleNotify, PhantomBattleCallCardRequest, PhantomBattleCallCardResponse, PhantomBattleCardGroupAddRequest,
     PhantomBattleCardGroupAddResponse, PhantomBattleCardGroupDeleteRequest,
     PhantomBattleCardGroupDeleteResponse, PhantomBattleCardGroupInfo,
     PhantomBattleCardGroupNameRequest, PhantomBattleCardGroupNameResponse,
@@ -228,12 +228,15 @@ pub fn handle_phantom_battle_check_card_skill_unlock_request(
 
 pub fn handle_phantom_battle_start_request(
     state: &mut State,
+    events: &mut EventQueue,
     _req: PhantomBattleStartRequest,
 ) -> Result<PhantomBattleStartResponse, String> {
     let info = &mut state.player_components.progress.info;
     info.set_key_int("pb:round", 1);
     info.set_key_int("pb:lib_num", 20);
     info.set_key_int("pb:hand_num", 5);
+    info.mark_claim("bvb:event:WaitForGameBegin");
+    info.set_key_str("bvb:last_event", "WaitForGameBegin");
     let active_ch = info.get_key_int("pb:challenge");
     if active_ch > 0 {
         info.mark_claim(&format!("pb:challenge:{active_ch}"));
@@ -243,6 +246,10 @@ pub fn handle_phantom_battle_start_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    if state.scene.is_some() {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_condition_state_changed(&mut qctx);
+    }
     Ok(PhantomBattleStartResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -250,15 +257,23 @@ pub fn handle_phantom_battle_start_request(
 
 pub fn handle_phantom_battle_bvb_loading_finish_request(
     state: &mut State,
+    events: &mut EventQueue,
     _req: PhantomBattleBvBLoadingFinishRequest,
 ) -> Result<PhantomBattleBvBLoadingFinishResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        "pb:bvb_loaded",
-        1,
-    )
-    .map_err(|e| e.to_string())?;
+    let info = &mut state.player_components.progress.info;
+    info.set_key_int("pb:bvb_loaded", 1);
+    info.mark_claim("bvb:event:WaitForGameBegin");
+    info.mark_claim("bvb:event:PlayerTurnStart");
+    info.set_key_str("bvb:last_event", "PlayerTurnStart");
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    if state.scene.is_some() {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_condition_state_changed(&mut qctx);
+    }
     Ok(PhantomBattleBvBLoadingFinishResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -302,18 +317,42 @@ pub fn handle_phantom_battle_re_challenge_request(
 
 pub fn handle_phantom_battle_round_over_request(
     state: &mut State,
+    events: &mut EventQueue,
     _req: PhantomBattleRoundOverRequest,
 ) -> Result<PhantomBattleRoundOverResponse, String> {
-    state
+    let round = state
         .player_components
         .progress
         .info
         .add_key_int("pb:round", 1);
+    let active_ch = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("pb:challenge") as i32;
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    let is_final = round >= 3 || active_ch > 0;
+    let _ = state.conn.push_msg(
+        PhantomBattleBvBSettleNotify::MSG_ID,
+        &PhantomBattleBvBSettleNotify {
+            NpcOriginalDamage: 10,
+            NpcCurLife: if is_final { 0 } else { 10 },
+            IsFinalSettle: is_final,
+            IsWin: is_final,
+            PlayerDeductLife: 0,
+            PlayerOriginalDamage: 0,
+            NpcDeductLife: 10,
+            PlayerCurLife: 30,
+        },
+    );
+    if is_final && active_ch > 0 {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_bvb_finish(&mut qctx, active_ch);
+    }
     Ok(PhantomBattleRoundOverResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -445,8 +484,26 @@ pub fn handle_phantom_battle_back_slot_card_library_request(
 
 pub fn handle_phantom_battle_call_card_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: PhantomBattleCallCardRequest,
 ) -> Result<PhantomBattleCallCardResponse, String> {
+    let info = &mut state.player_components.progress.info;
+    info.mark_claim("bvb:event:SelectCardsEnd");
+    info.set_key_str("bvb:last_event", "SelectCardsEnd");
+    if !req.SelectedCardUid.is_empty() {
+        let count = req.SelectedCardUid.len() as i64;
+        info.set_key_int("bvb:last_cost", count.min(8));
+        info.set_key_int("bvb:can_evolve", 1);
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    if state.scene.is_some() {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_condition_state_changed(&mut qctx);
+    }
     let fighters = req
         .SelectedCardUid
         .into_iter()

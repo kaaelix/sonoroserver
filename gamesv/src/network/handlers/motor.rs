@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_fs::motor_info::{MotorInfo, Preset};
 use sonoro_gamesv_logic::component::player::PlayerMotorComponent;
+use sonoro_gamesv_logic::coop_service::CoopService;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::events::EntityHandle;
 use sonoro_gamesv_logic::helpers::consume::CostItem;
@@ -1897,10 +1898,41 @@ pub fn handle_motor_fight_rank_list_request(
     state: &mut State,
     _req: MotorFightRankListRequest,
 ) -> Result<MotorFightRankListResponse, String> {
+    let mut friend_data: Vec<MotorFightPlayerRankingInfo> =
+        CoopService::collect_server_player_snapshots(
+            &state.fs,
+            state.coop_service.as_deref(),
+            state.player_id,
+        )
+        .into_iter()
+        .filter_map(|p| {
+            let score = p.progress.get_key_int("motor_fight:best_score").max(0) as i32;
+            let kills = p.progress.get_key_int("motor_fight:kills").max(0) as i32;
+            if score <= 0 && kills <= 0 {
+                return None;
+            }
+            let sub_lv = p.progress.get_key_int("motor:fight_sub_lv").max(1) as i32;
+            Some(MotorFightPlayerRankingInfo {
+                PlayerId: p.player_id,
+                Name: p.name.into_bytes(),
+                ResultCommon: Some(MotorFightResultBase {
+                    LevelId: sub_lv,
+                    TotalScore: score,
+                    KillMonsterCount: kills,
+                    ..Default::default()
+                }),
+            })
+        })
+        .collect();
+    friend_data.sort_by(|a, b| {
+        let sa = a.ResultCommon.as_ref().map_or(0, |r| r.TotalScore);
+        let sb = b.ResultCommon.as_ref().map_or(0, |r| r.TotalScore);
+        sb.cmp(&sa)
+    });
     Ok(MotorFightRankListResponse {
         ErrorCode: Some(ErrorCode::Success),
         SelfData: Some(build_motor_fight_self_rank(state)),
-        FriendData: Vec::new(),
+        FriendData: friend_data,
     })
 }
 

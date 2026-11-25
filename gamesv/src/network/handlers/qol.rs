@@ -1,21 +1,24 @@
 use sonoro_gamesv_data::reward_index::composite_key;
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_logic::component::player::PlayerProgressComponent;
-use sonoro_gamesv_logic::helpers::{consume, energy, pb_kv, reward};
+use sonoro_gamesv_logic::event_queue::EventQueue;
+use sonoro_gamesv_logic::helpers::{consume, energy, pb_kv, quest_engine, reward};
 use sonoro_proto::enums::{BattlePassPayStatus, BattlePassType, ErrorCode};
 use sonoro_proto::pb::{
     BattlePassEnterPush, BattlePassExpUpdateNotify, BattlePassLevelUpRequest,
-    BattlePassLevelUpResponse, BattlePassRequest, BattlePassResponse, BattlePassTakeAllRewardRequest,
+    BattlePassLevelUpResponse, BattlePassRecurringTakeRequest, BattlePassRecurringTakeResponse,
+    BattlePassRequest, BattlePassResponse, BattlePassTakeAllRewardRequest,
     BattlePassTakeAllRewardResponse, BattlePassTakeRewardRequest, BattlePassTakeRewardResponse,
     BattlePassTaskRequest, BattlePassTaskResponse, BattlePassTaskTakeRequest,
     BattlePassTaskTakeResponse, BirthDayCardRoleRequest, BirthDayCardRoleResponse,
     BirthDayRewardRequest, BirthDayRewardResponse, ClientStorageInfoDataOneof,
     GachaAccumulateGroupInfo, GachaAccumulateInfo, GachaAccumulateInfoRequest,
-    GachaAccumulateInfoResponse, GachaAccumulateRewardRequest, GachaAccumulateRewardResponse,
-    InfluenceInfo, InfluenceInfoRequest, InfluenceInfoResponse, InfluenceRewardRequest,
-    InfluenceRewardResponse, MonthCardRequest, MonthCardResponse, PayGiftInfo,
-    PayGiftInfoRequest, PayGiftInfoResponse, PayGiftRequest, PayGiftResponse, PayItemRequest,
-    PayItemResponse, PbBattlePass, PbBattlePassReward, PbBattlePassTask,
+    GachaAccumulateInfoResponse, GachaAccumulateRewardInfo, GachaAccumulateRewardRequest,
+    GachaAccumulateRewardResponse, InfluenceInfo, InfluenceInfoRequest, InfluenceInfoResponse,
+    InfluenceRewardRequest, InfluenceRewardResponse, MonthCardRequest, MonthCardResponse,
+    PayGiftInfo, PayGiftInfoRequest, PayGiftInfoResponse, PayGiftRequest, PayGiftResponse,
+    PayItemRequest, PayItemResponse, PayShopDirectBuyNotify, PayShopDirectBuyRequest,
+    PayShopDirectBuyResponse, PbBattlePass, PbBattlePassReward, PbBattlePassTask,
     RoleFavorUnLockRequest, RoleFavorUnLockResponse, RoleGiftRewardRequest,
     RoleGiftRewardResponse, RoleMotionUnLockRequest, RoleMotionUnLockResponse, RoleTrainRequest,
     RoleTrainResponse, RoleUpdateDevelopTargetRequest, RoleUpdateDevelopTargetResponse,
@@ -198,6 +201,7 @@ pub fn handle_short_message_info_request(
 
 pub fn handle_short_message_read_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: ShortMessageReadRequest,
 ) -> Result<ShortMessageReadResponse, String> {
     let k = format!("sm:read:{}", req.ConfigId);
@@ -207,6 +211,10 @@ pub fn handle_short_message_read_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    if req.ConfigId > 0 {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_phone_message_read(&mut qctx, req.ConfigId);
+    }
     Ok(ShortMessageReadResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -214,6 +222,7 @@ pub fn handle_short_message_read_request(
 
 pub fn handle_short_message_received_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: ShortMessageReceivedRequest,
 ) -> Result<ShortMessageReceivedResponse, String> {
     let k = format!("sm:recv:{}", req.ConfigId);
@@ -239,6 +248,10 @@ pub fn handle_short_message_received_request(
         )
         .map_err(|e| e.to_string())?;
     }
+    if req.ConfigId > 0 {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_phone_message_event(&mut qctx, req.ConfigId, req.ConfigId);
+    }
     Ok(ShortMessageReceivedResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -246,6 +259,7 @@ pub fn handle_short_message_received_request(
 
 pub fn handle_short_message_reply_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: ShortMessageReplyRequest,
 ) -> Result<ShortMessageReplyResponse, String> {
     let k = format!("sm:opt:{}:{}", req.ConfigId, req.CurOptionId);
@@ -259,6 +273,10 @@ pub fn handle_short_message_reply_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    if req.ConfigId > 0 {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_phone_message_event(&mut qctx, req.ConfigId, req.ConfigId);
+    }
     Ok(ShortMessageReplyResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -266,6 +284,7 @@ pub fn handle_short_message_reply_request(
 
 pub fn handle_short_message_update_request(
     state: &mut State,
+    events: &mut EventQueue,
     req: ShortMessageUpdateRequest,
 ) -> Result<ShortMessageUpdateResponse, String> {
     if req.IsFinish {
@@ -285,6 +304,10 @@ pub fn handle_short_message_update_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    if req.IsFinish && req.ConfigId > 0 {
+        let mut qctx = state.quest_context(events);
+        let _ = quest_engine::events::on_phone_message_event(&mut qctx, req.ConfigId, req.ConfigId);
+    }
     Ok(ShortMessageUpdateResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -694,6 +717,90 @@ pub fn handle_battle_pass_take_all_reward_request(
     })
 }
 
+pub fn handle_battle_pass_recurring_take_request(
+    state: &mut State,
+    req: BattlePassRecurringTakeRequest,
+) -> Result<BattlePassRecurringTakeResponse, String> {
+    let bp_id = current_battle_pass_id(&state.assets);
+    let cur_lvl = state.player_components.progress.info.get_key_int("bp:level").max(1) as i32;
+    let cur_exp = state.player_components.progress.info.get_key_int("bp:exp").max(0) as i32;
+    let bp_cfg_opt = state.assets.tables.battle_pass.get_data_by_id(&bp_id);
+    let bp_cfg = bp_cfg_opt
+        .as_deref()
+        .or_else(|| state.assets.tables.battle_pass.items.last());
+    let level_limit = bp_cfg.map_or(70, |c| c.LevelLimit.max(1));
+    if cur_lvl < level_limit {
+        return Ok(BattlePassRecurringTakeResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
+
+    let is_pay = req.Type.map_or(0, |t| t as i32) == 1;
+    let paid = state.player_components.progress.info.get_key_int("bp:paid") != 0;
+    if is_pay && !paid {
+        return Ok(BattlePassRecurringTakeResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
+
+    let step_exp = bp_cfg
+        .as_ref()
+        .map_or(1000, |c| c.RecurringLevelExp.max(1));
+    let earned_steps = ((cur_lvl - level_limit).max(0) + (cur_exp / step_exp)).max(1);
+    let t_val = if is_pay { 1 } else { 0 };
+    let mut granted = Vec::new();
+    if let Some(cfg) = bp_cfg {
+        let map = if is_pay {
+            &cfg.PayRecurringReward
+        } else {
+            &cfg.FreeRecurringReward
+        };
+        if req.ItemId > 0
+            && let Some(&cnt) = map.iter().find(|(k, _)| **k == req.ItemId).map(|(_, v)| v)
+            && cnt > 0
+        {
+            granted.push(reward::RewardItem {
+                item_id: req.ItemId,
+                count: cnt,
+            });
+        } else {
+            for (&item_id, &cnt) in map.iter() {
+                if item_id > 0 && cnt > 0 {
+                    granted.push(reward::RewardItem { item_id, count: cnt });
+                }
+            }
+        }
+    }
+    if granted.is_empty() {
+        granted.push(reward::RewardItem {
+            item_id: if req.ItemId > 0 { req.ItemId } else { 2 },
+            count: 5000,
+        });
+    }
+
+    let mut dirty = false;
+    for step in 1..=earned_steps {
+        let k = format!("bp:rec:{t_val}:{step}");
+        if state.player_components.progress.info.mark_claim(&k) {
+            dirty = true;
+            let mut rctx = state.reward_context();
+            reward::grant_items(&mut rctx, 0, true, &granted, 18500)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    if dirty {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(BattlePassRecurringTakeResponse {
+        ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
 pub fn handle_battle_pass_task_request(
     state: &mut State,
     _req: BattlePassTaskRequest,
@@ -998,12 +1105,15 @@ pub fn handle_pay_gift_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
-    let mut rctx = state.reward_context();
-    reward::grant_items(
-        &mut rctx,
-        0,
-        true,
-        &[
+    let grant_items = if let Some(cfg) = state.assets.tables.pay_gift.get_data_by_id(&req.Id)
+        && cfg.ItemId > 0
+    {
+        vec![reward::RewardItem {
+            item_id: cfg.ItemId,
+            count: 1,
+        }]
+    } else {
+        vec![
             reward::RewardItem {
                 item_id: 4,
                 count: 300,
@@ -1012,10 +1122,10 @@ pub fn handle_pay_gift_request(
                 item_id: 2,
                 count: 50000,
             },
-        ],
-        8001,
-    )
-    .map_err(|e| e.to_string())?;
+        ]
+    };
+    let mut rctx = state.reward_context();
+    reward::grant_items(&mut rctx, 0, true, &grant_items, 8001).map_err(|e| e.to_string())?;
     Ok(PayGiftResponse {
         ErrorCode: Some(ErrorCode::Success),
         ReceiptId: b"local_receipt".to_vec(),
@@ -1028,12 +1138,27 @@ pub fn handle_pay_item_request(
     req: PayItemRequest,
 ) -> Result<PayItemResponse, String> {
     let k = format!("payitem:{}", req.Id);
+    let prev_count = state.player_components.progress.info.get_key_int(&k);
     let _ = state.player_components.progress.info.add_key_int(&k, 1);
+    let (item_id, total_count) = if let Some(cfg) = state.assets.tables.pay_item.get_data_by_id(&req.Id)
+    {
+        let bonus = if prev_count == 0 && cfg.SpecialBonusItemCount > 0 {
+            cfg.SpecialBonusItemCount
+        } else {
+            cfg.BonusItemCount
+        };
+        (
+            if cfg.ItemId > 0 { cfg.ItemId } else { 4 },
+            (cfg.ItemCount + bonus).max(1),
+        )
+    } else {
+        (4, 648)
+    };
     let _ = state
         .player_components
         .progress
         .info
-        .add_key_int("topup:score", 648);
+        .add_key_int("topup:score", i64::from(total_count));
     state
         .player_components
         .progress
@@ -1045,8 +1170,8 @@ pub fn handle_pay_item_request(
         0,
         true,
         &[reward::RewardItem {
-            item_id: 4,
-            count: 648,
+            item_id,
+            count: total_count,
         }],
         8001,
     )
@@ -1058,18 +1183,121 @@ pub fn handle_pay_item_request(
     })
 }
 
+pub fn handle_pay_shop_direct_buy_request(
+    state: &mut State,
+    req: PayShopDirectBuyRequest,
+) -> Result<PayShopDirectBuyResponse, String> {
+    let shop_item_id = req.Id;
+    let (item_id, item_count) = if let Some(cfg) = state.assets.tables.pay_gift.get_data_by_id(&shop_item_id)
+        && cfg.ItemId > 0
+    {
+        (cfg.ItemId, 1)
+    } else {
+        (3, 60)
+    };
+    let receipt_id = format!(
+        "direct_{}_{}_{}",
+        state.player_id,
+        shop_item_id,
+        energy::now_seconds()
+    );
+    if shop_item_id > 0 {
+        let _ = state
+            .player_components
+            .progress
+            .info
+            .add_key_int(&format!("paygift:{shop_item_id}"), 1);
+        let _ = state
+            .player_components
+            .progress
+            .info
+            .add_key_int("topup:score", i64::from(item_count));
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        let mut rctx = state.reward_context();
+        reward::grant_items(
+            &mut rctx,
+            0,
+            true,
+            &[reward::RewardItem {
+                item_id,
+                count: item_count,
+            }],
+            8001,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    state.conn.push(
+        PayShopDirectBuyNotify::MSG_ID,
+        &PayShopDirectBuyNotify {
+            ReceiptId: receipt_id.as_bytes().to_vec(),
+            ShopItemId: shop_item_id,
+            ItemId: item_id,
+            ItemCount: item_count,
+        },
+    );
+    Ok(PayShopDirectBuyResponse {
+        ErrorCode: Some(ErrorCode::Success),
+        ReceiptId: receipt_id.into_bytes(),
+        ..Default::default()
+    })
+}
+
 pub fn handle_gacha_accumulate_info_request(
-    _state: &mut State,
+    state: &mut State,
     req: GachaAccumulateInfoRequest,
 ) -> Result<GachaAccumulateInfoResponse, String> {
+    let cur_gacha_num: i32 = state
+        .player_components
+        .gacha
+        .info
+        .banners
+        .iter()
+        .map(|b| b.total_pulls.max(0))
+        .sum();
+    let group_id = if req.GachaAccumulateId >= 200 {
+        2
+    } else {
+        1
+    };
+    let reward_infos = state
+        .assets
+        .tables
+        .gacha_accumulate_reward
+        .items
+        .iter()
+        .enumerate()
+        .map(|(idx, r)| {
+            let need = ((idx as i32) + 1) * 10;
+            let k = format!("gacha_acc:{}:{}", req.GachaAccumulateId, r.Id);
+            let claimed = state.player_components.progress.info.has_claim(&k);
+            let status = if claimed {
+                2
+            } else if cur_gacha_num >= need {
+                1
+            } else {
+                0
+            };
+            GachaAccumulateRewardInfo {
+                Id: r.Id,
+                GroupId: group_id,
+                GachaNum: need,
+                Status: status,
+                ..Default::default()
+            }
+        })
+        .collect();
     Ok(GachaAccumulateInfoResponse {
         ErrorCode: Some(ErrorCode::Success),
         GachaAccumulateInfo: Some(GachaAccumulateInfo {
             GachaAccumulateId: req.GachaAccumulateId,
             GachaAccumulateGroupInfo: Some(GachaAccumulateGroupInfo {
-                GroupId: 1,
-                CurGachaNum: 0,
-                GachaAccumulateRewardInfos: Vec::new(),
+                GroupId: group_id,
+                CurGachaNum: cur_gacha_num,
+                GachaAccumulateRewardInfos: reward_infos,
             }),
         }),
     })
