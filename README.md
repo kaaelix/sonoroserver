@@ -7,10 +7,14 @@ Wuthering Waves 3.8 server emulator in Rust.
 Run `launch.bat`, choose `1. Connect Server`, and enter the server IP.
 No Rust, compiler, or `assets.db` required.
 
+## Client (Android)
+
+Coming soon.
+
 ## Host (Windows)
 
 Put `launch.bat` in an empty folder or the repo folder, run it, and choose `2. Local Server` (`Solo` or `Co-op`).
-Downloads server files (without `assets/BinData/`), `assets.db`, MSVC Build Tools, Rust, and Python if missing.
+Downloads server files, `assets.db`, MSVC Build Tools, Rust, and Python if missing.
 
 ## Host (Linux)
 

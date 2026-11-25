@@ -7,7 +7,7 @@
   "sha256": "a0dcf3b1e31f3b3c98c556a013e080dc53b66de14d13ce6ca24cc54f337df11e",
   "url": "https://github.com/kaaelix/sonoroserver/releases/download/assets-db/assets.db",
   "server": {
-    "version": "3.8.0-20261125-4",
+    "version": "3.8.0-20261125-5",
     "exclude": [
       "assets/BinData/",
       "assets/assets.db"
@@ -21,7 +21,7 @@
       "CONTRIBUTING.md": "6a51984f8d10b64da3b56e4d39a09937d9f9fe9565eb7bc089fea7a82f03cc7e",
       "Cargo.lock": "063de454ca0a55943f4a8a4ca5d688dd49242cc4809157068bf1c82af440d3cd",
       "Cargo.toml": "b38179048701b694c7a6df501682b627c9d97d842104043b1d957f105ecb07f2",
-      "README.md": "1241e6d38fac33d6016736fd380c657ef5ac92ee20976cad3e0e6a5d60735912",
+      "README.md": "b7f22119e5c442975e48ca6b0e64e8db7dd0427abd47e5541c780cc41ea4aa2a",
       "assets/scripts/join_scene_patches/disable_watermask.js": "50b55878480f24aed24e4f6080ce4dea4ab55d9bb99252eda57c4a84cee3d5c0",
       "assets/scripts/join_scene_patches/dismount_vehicle_on_teleport.js": "4d9f1a49c4fdd4ec10252b54690b8b8796a5c3da6c155d090844528a84abb954",
       "assets/scripts/join_scene_patches/entity_source_map_sync.js": "30caf8473af96b2f61e8adae667fd57689098999fe4fc4a08e31992203df47cd",
