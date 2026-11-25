@@ -66,7 +66,26 @@ const PassiveSkillQuery = Scene.Query(&.{
 const max_duration_seconds: f64 =
     @as(f64, @floatFromInt(std.math.maxInt(i64))) / 1000.0;
 
+/// How a buff application reached the server.
+const BuffOrigin = enum {
+    /// The client asks the server to apply the buff (`OrderApplyBuffRequest`, `ApplyGameplayEffectRequest`).
+    client_order,
+    /// The client already applied the buff locally and only reports it (`ApplyGameplayEffectPush`).
+    client_report,
+};
+
+/// Whether the client still has to be told that the buff was applied. A reported buff already
+/// exists on the client: announcing it makes the client apply it a second time, and for a buff
+/// shared by the formation every extra application is shared and reported again without end.
+fn announcesApplication(origin: BuffOrigin) bool {
+    return switch (origin) {
+        .client_order => true,
+        .client_report => false,
+    };
+}
+
 fn applyBuffRequestImpl(
+    origin: BuffOrigin,
     entity_id: i64,
     buff_id: i64,
     instigator_id: i64,
@@ -86,20 +105,22 @@ fn applyBuffRequestImpl(
 
     switch (buff_data.DurationPolicy) {
         .Instant => {
-            try receive_data_pack.append(alloc.arena, .{ .Message = .{
-                .CombatNotifyData = .{
-                    .CombatCommon = .{ .EntityId = entity_id, .MessageId = -1, .PreMessageId = -1 },
-                    .Message = .{
-                        .ApplyGameplayEffectNotify = .{
-                            .Handle = -2,
-                            .Id = buff_data.Id,
-                            .EntityId = entity_id,
-                            .InstigatorId = instigator_id,
-                            .IsActive = true,
+            if (announcesApplication(origin)) {
+                try receive_data_pack.append(alloc.arena, .{ .Message = .{
+                    .CombatNotifyData = .{
+                        .CombatCommon = .{ .EntityId = entity_id, .MessageId = -1, .PreMessageId = -1 },
+                        .Message = .{
+                            .ApplyGameplayEffectNotify = .{
+                                .Handle = -2,
+                                .Id = buff_data.Id,
+                                .EntityId = entity_id,
+                                .InstigatorId = instigator_id,
+                                .IsActive = true,
+                            },
                         },
                     },
-                },
-            } });
+                } });
+            }
             try buff_helper.execute_buff_effects(
                 receive_data_pack,
                 entity_id,
@@ -159,6 +180,7 @@ pub fn OrderApplyBuffRequest(
 
     var combat_receive_pack: std.ArrayList(pb.CombatReceiveData) = .empty;
     const ok = try applyBuffRequestImpl(
+        .client_order,
         entity_id,
         request.Id,
         request.InstigatorId,
@@ -209,6 +231,7 @@ pub fn ApplyGameplayEffectRequest(
 
     var combat_receive_pack: std.ArrayList(pb.CombatReceiveData) = .empty;
     const ok = try applyBuffRequestImpl(
+        .client_order,
         entity_id,
         request.Id,
         request.InstigatorId,
@@ -266,6 +289,7 @@ pub fn ApplyGameplayEffectPush(
     } else null;
     const stack_count = if (push.StackCount > 0) push.StackCount else 1;
     _ = try applyBuffRequestImpl(
+        .client_report,
         entity_id,
         push.Id,
         push.InstigatorId,
@@ -882,6 +906,14 @@ fn appendStackCountNotifyInPack(
             },
         },
     } });
+}
+
+test "a buff the client orders is announced to it" {
+    try std.testing.expect(announcesApplication(.client_order));
+}
+
+test "a buff the client reports is not announced back to it" {
+    try std.testing.expect(!announcesApplication(.client_report));
 }
 
 test "requested buff duration validates explicit client values" {

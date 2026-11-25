@@ -193,6 +193,24 @@ pub fn recordChildQuestFinished(info: *QuestInfo, gpa: Allocator, quest_id: i32,
     info.finished_child_quests = grown;
 }
 
+/// Drops the completion record of a child quest whose progress is being discarded.
+pub fn forgetChildQuestFinished(info: *QuestInfo, gpa: Allocator, quest_id: i32, node_id: i32) !void {
+    for (info.finished_child_quests, 0..) |rec, idx| {
+        if (rec.quest_id != quest_id or rec.node_id != node_id) continue;
+        if (info.finished_child_quests.len == 1) {
+            gpa.free(info.finished_child_quests);
+            info.finished_child_quests = &.{};
+            return;
+        }
+        const shrunk = try gpa.alloc(ChildQuestRecord, info.finished_child_quests.len - 1);
+        @memcpy(shrunk[0..idx], info.finished_child_quests[0..idx]);
+        @memcpy(shrunk[idx..], info.finished_child_quests[idx + 1 ..]);
+        gpa.free(info.finished_child_quests);
+        info.finished_child_quests = shrunk;
+        return;
+    }
+}
+
 pub fn removeActiveQuest(info: *QuestInfo, gpa: Allocator, quest_id: i32) !void {
     for (info.active_quests, 0..) |aq, idx| {
         if (aq.quest_id != quest_id) continue;

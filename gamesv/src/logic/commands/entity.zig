@@ -13,6 +13,7 @@ const PlayerWeaponComponent = @import("../../logic/component/player/PlayerWeapon
 const PlayerEchoComponent = @import("../../logic/component/player/PlayerEchoComponent.zig");
 const PlayerBasicComponent = @import("../../logic/component/player/PlayerBasicComponent.zig");
 const ProgressInfo = @import("../../fs/ProgressInfo.zig");
+const destructible = @import("../helpers/destructible.zig");
 const RoleHelper = @import("../../logic/helpers/role.zig");
 const RoleEntityTemplates = @import("../../logic/templates/RoleEntityTemplates.zig");
 const entity_attributes = @import("../../logic/helpers/entity_attributes.zig");
@@ -743,6 +744,17 @@ pub const spawn = struct {
         }
         if (components_data.TriggerComponent != null) {
             scene.entities.items(.world_item)[entity.index].trigger_present = true;
+        }
+        if (components_data.DestructibleItem) |destructible_config| {
+            if (!(destructible_config.Disabled orelse false)) {
+                var key_buf: [48]u8 = undefined;
+                const saved_durability: i64 = if (progress_info) |info| blk: {
+                    const key = std.fmt.bufPrint(&key_buf, "durability:{d}", .{entity_id}) catch break :blk 0;
+                    break :blk info.getKeyInt(key);
+                } else 0;
+                scene.entities.items(.world_item)[entity.index].durability =
+                    destructible.initialDurability(destructible_config.Durability, saved_durability);
+            }
         }
         if (components_data.LiftComponent) |lc| {
             if (!(lc.Disabled orelse false)) {

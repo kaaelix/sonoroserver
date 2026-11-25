@@ -784,7 +784,10 @@ pub fn onEntityInteractRequest(
     io: std.Io,
     config_entities: Scene.Query(&.{ Scene.Entity, *Scene.Entity.ConfigComponent }),
 ) !void {
+    const log = std.log.scoped(.entity_interact);
+    log.debug("request: entity {d}, option index {d}", .{ txn.message.EntityId, txn.message.OptionIndex });
     if (normalInteractRequestError(assets, scene, txn.message.EntityId, txn.message.OptionIndex)) |error_code| {
+        log.debug("rejected: {t}", .{error_code});
         txn.respond(.{ .ErrorCode = error_code, .Interacting = false });
         return;
     }
@@ -960,7 +963,10 @@ pub fn onEntityDynamicInteractRequest(
     io: std.Io,
     config_entities: Scene.Query(&.{ Scene.Entity, *Scene.Entity.ConfigComponent }),
 ) !void {
+    const log = std.log.scoped(.entity_interact);
+    log.debug("dynamic request: entity {d}, option guid {s}", .{ txn.message.EntityId, txn.message.OptionGuid });
     const dynamic_option = scene.findDynamicInteractOption(txn.message.OptionGuid) orelse {
+        log.debug("dynamic option guid is not registered", .{});
         txn.respond(.{ .ErrorCode = .ErrInteractOptionGuidInvalid, .Interacting = false });
         return;
     };

@@ -42,6 +42,8 @@ pub const WorldItemState = struct {
     spirit_gear_present: bool = false,
     foundation_source_entity_id: i32 = 0,
     sub_entity_type: i32 = 0,
+    /// Remaining durability of a destructible item; 0 for entities that are not destructible.
+    durability: i32 = 0,
     drop_item_id: i32 = 0,
     drop_item_count: i32 = 1,
     in_range_entity_ids: [8]i64 = @splat(0),
@@ -302,6 +304,7 @@ pub fn entityToProto(
         .ConfigType = @enumFromInt(@intFromEnum(storage.config.config_type)),
         .EntityType = @enumFromInt(@intFromEnum(storage.config.entity_type)),
         .SubEntityType = resolved_sub_type,
+        .DurabilityValue = storage.world_item.durability,
         .EntityState = @enumFromInt(@intFromEnum(storage.config.state)),
         .d3s = .{ .Camp = storage.config.camp },
         .LivingStatus = living_status,

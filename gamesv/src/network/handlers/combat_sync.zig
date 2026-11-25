@@ -22,6 +22,7 @@ const ConsumeHelper = @import("../../logic/helpers/consume.zig");
 const EnergyHelper = @import("../../logic/helpers/energy.zig");
 const QuestEngine = @import("../../logic/helpers/quest_engine.zig");
 const LevelPlayHelper = @import("../../logic/helpers/level_play.zig");
+const destructible = @import("../../logic/helpers/destructible.zig");
 const attributes_helper = @import("../../logic/helpers/attributes.zig");
 const RoleHelper = @import("../../logic/helpers/role.zig");
 
@@ -604,6 +605,15 @@ pub fn onTargetGearHitRequest(
     txn.respond(.{ .ErrorCode = .Success });
 }
 
+/// Weapon family of the role the player currently controls, for destructible item damage.
+fn currentRoleWeaponKind(scene: *const Scene, assets: *const Assets) destructible.WeaponKind {
+    const formation_idx = std.math.cast(usize, scene.formation_info.cur_formation) orelse return .unknown;
+    if (formation_idx >= scene.formation_info.formations.len) return .unknown;
+    const role_id = scene.formation_info.formations[formation_idx].cur_role;
+    const role = assets.tables.role_info.getDataById(role_id) orelse return .unknown;
+    return destructible.weaponKindFromRoleWeaponType(role.WeaponType);
+}
+
 pub fn onThrowDamageRequest(
     txn: *Transaction(pb.ThrowDamageRequest),
     alloc: mem.Alloc,
@@ -618,7 +628,7 @@ pub fn onThrowDamageRequest(
     var net_id: i64 = eid;
     var cfg_id: i64 = eid;
     var max_dur: i32 = 1;
-    var dmg_step: i32 = 1;
+    var hit_damage: i32 = 1;
     var found_in_scene = false;
 
     if (scene_opt.*) |*scene| {
@@ -636,17 +646,10 @@ pub fn onThrowDamageRequest(
         if (cfg_id > 0) {
             if (LevelPlayHelper.resolveEntityConfig(assets, scene.instance_id, cfg_id)) |res| {
                 if (res.components.DestructibleItem) |di| {
-                    if (di.Durability) |d| {
-                        if (d > 0) max_dur = d;
-                    }
+                    max_dur = destructible.initialDurability(di.Durability, 0);
+                    hit_damage = destructible.hitDamage(di.WeaponDamage, currentRoleWeaponKind(scene, assets));
                 }
             }
-        }
-    }
-
-    if (txn.message.CalculateId > 0) {
-        if (assets.tables.damage.getDataById(txn.message.CalculateId) != null) {
-            dmg_step = 1;
         }
     }
 
@@ -656,8 +659,20 @@ pub fn onThrowDamageRequest(
         if (saved > 0 and saved <= std.math.maxInt(i32)) break :blk @intCast(saved);
         break :blk max_dur;
     };
-    const next_dur: i32 = @max(@as(i32, 0), cur_dur - dmg_step);
+    const next_dur: i32 = destructible.afterHit(cur_dur, hit_damage);
+    std.log.scoped(.throw_damage).debug("entity {d} (config {d}): durability {d} -> {d}, hit {d}", .{
+        net_id,
+        cfg_id,
+        cur_dur,
+        next_dur,
+        hit_damage,
+    });
     try progress_comp.info.setKeyInt(alloc.gpa, dur_key, next_dur);
+    if (scene_opt.*) |*scene| {
+        if (scene.net_id_map.get(net_id)) |idx| {
+            scene.entities.items(.world_item)[idx].durability = next_dur;
+        }
+    }
     _ = try progress_comp.info.addKeyInt(alloc.gpa, "combat:throw_dmg", 1);
 
     txn.conn.pushBestEffort(alloc.gpa, io, pb.ThrowDamageNotify{

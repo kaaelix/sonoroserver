@@ -875,6 +875,8 @@ pub fn runGameplay(
     }
 }
 
+const large_outbound_warn_len = 128 * 1024;
+
 pub fn nextSeqNo(conn: *Connection) u32 {
     conn.seq += 1;
     return conn.seq;
@@ -883,6 +885,10 @@ pub fn nextSeqNo(conn: *Connection) u32 {
 fn enqueue(conn: *Connection, gpa: Allocator, io: Io, header: Message.Header, message: anytype) !void {
     const bytes = try Message.encodeAlloc(header, message, gpa, conn.session_key);
     errdefer gpa.free(bytes);
+    // KCP rejects a single message above ~350 KB (256 fragments), which drops the whole session.
+    if (bytes.len > large_outbound_warn_len) {
+        std.log.scoped(.conn).warn("large outbound message {s}: {d} bytes", .{ @typeName(@TypeOf(message)), bytes.len });
+    }
     try conn.outbound.putOne(io, .{ .bytes = bytes });
     conn.transport_work.set(io);
 }

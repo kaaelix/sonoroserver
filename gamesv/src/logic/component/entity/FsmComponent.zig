@@ -505,3 +505,78 @@ fn taskSkillMatches(comp: *const Component, path: []const i32, observed_id: ?i32
     if (skill.ConfigReplaceTagId != 0 or skill.ConfigReplaceTagName.len != 0) return false;
     return skill.SkillId == skill_id;
 }
+
+/// Builds a component over a one-root machine: root 100 with children `source` 101 and target 102,
+/// and a single transition 101 -> 102 whose only condition is a tag the client judges.
+fn testClientJudgedMachine(
+    arena: mem.Allocator,
+    source_is_conduit: bool,
+    prediction_type: i32,
+) !Component {
+    const conditions = try arena.dupe(AiStateMachineConfig.StateMachineCondition, &.{.{
+        .Index = 0,
+        .Name = "CondTag",
+        .Type = 14,
+        .IsClient = true,
+        .CondTag = .{ .TagId = 7 },
+    }});
+    const transitions = try arena.dupe(AiStateMachineConfig.StateMachineTransition, &.{.{
+        .From = 101,
+        .To = 102,
+        .TransitionPredictionType = prediction_type,
+        .Conditions = conditions,
+    }});
+    const nodes = try arena.dupe(AiStateMachineConfig.StateMachineNode, &.{
+        .{ .Uuid = 100, .Children = try arena.dupe(i32, &.{ 101, 102 }), .Transitions = transitions },
+        .{ .Uuid = 101, .IsConduitNode = source_is_conduit },
+        .{ .Uuid = 102 },
+    });
+    const machine: AiStateMachineConfig.StateMachineJsonData = .{
+        .Version = 1,
+        .StateMachines = try arena.dupe(i32, &.{100}),
+        .Nodes = nodes,
+    };
+    const common: AiStateMachineConfig.StateMachineJsonData = .{ .Version = 1, .StateMachines = &.{}, .Nodes = &.{} };
+
+    const graph = try arena.create(FsmGraph);
+    graph.* = (try Assets.FsmGraphRegistry.buildGraph(arena, machine, common)) orelse return error.TestGraphNotBuilt;
+    var comp: Component = .{ .graph = graph };
+    try comp.initRuntime(arena, 0);
+    return comp;
+}
+
+test "a switch out of a conduit node is the client's and is accepted without the server judging its conditions" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var comp = try testClientJudgedMachine(arena, true, 1);
+
+    const result = try comp.confirmStateRequest(100, 101, 102, arena, .{ .now_ms = 0 });
+
+    try std.testing.expectEqual(std.meta.Tag(ConfirmResult).accepted, std.meta.activeTag(result));
+    try std.testing.expectEqual(@as(?i32, 102), comp.currentState(100));
+}
+
+test "an autonomous switch is the client's and is accepted without the server judging its conditions" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var comp = try testClientJudgedMachine(arena, false, 1);
+
+    const result = try comp.confirmStateRequest(100, 101, 102, arena, .{ .now_ms = 0 });
+
+    try std.testing.expectEqual(std.meta.Tag(ConfirmResult).accepted, std.meta.activeTag(result));
+    try std.testing.expectEqual(@as(?i32, 102), comp.currentState(100));
+}
+
+test "a switch that belongs to the server is not accepted from the client" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var comp = try testClientJudgedMachine(arena, false, 0);
+
+    const result = try comp.confirmStateRequest(100, 101, 102, arena, .{ .now_ms = 0 });
+
+    try std.testing.expectEqual(std.meta.Tag(ConfirmResult).no_pending, std.meta.activeTag(result));
+    try std.testing.expectEqual(@as(?i32, 101), comp.currentState(100));
+}

@@ -139,7 +139,7 @@ pub fn dispatch(
                 try @call(.auto, target_fn, args);
             }
 
-            // log.debug("handled combat message of type: {s}", .{@tagName(tag)});
+            log.debug("handled combat {s}: {s}", .{ if (comptime is_request) "request" else "push", @tagName(tag) });
 
             return null;
         },

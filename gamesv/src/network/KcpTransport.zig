@@ -456,7 +456,8 @@ pub const Registry = struct {
             registry.markClosing(io, session, .send_failed);
             return false;
         }
-        registry.scheduleSession(session, now_ms) catch {
+        registry.scheduleSession(session, now_ms) catch |err| {
+            logTransportError(session, "schedule after input", err);
             registry.markClosing(io, session, .transport_error);
             return false;
         };
@@ -563,7 +564,8 @@ pub const Registry = struct {
 
             if (session.phase == .pre_auth and session.handle.isAuthenticated()) {
                 session.phase = .authenticated;
-                registry.scheduleIdle(session) catch {
+                registry.scheduleIdle(session) catch |err| {
+                    logTransportError(session, "schedule idle", err);
                     registry.markClosing(io, session, .transport_error);
                 };
             }
@@ -610,7 +612,8 @@ pub const Registry = struct {
                 &session.kcp,
                 &session.assembler,
                 &session.application,
-            ) catch {
+            ) catch |err| {
+                logTransportError(session, "inbound reassembly", err);
                 registry.markClosing(io, session, .transport_error);
                 return false;
             };
@@ -636,6 +639,7 @@ pub const Registry = struct {
         const count = session.handle.outbound.get(io, frames[0..max_batch], 0) catch |err| switch (err) {
             error.Closed => return false,
             else => {
+                logTransportError(session, "outbound queue read", err);
                 registry.markClosing(io, session, .transport_error);
                 return false;
             },
@@ -646,7 +650,11 @@ pub const Registry = struct {
         for (frames[0..count]) |frame| {
             defer registry.gpa.free(frame.bytes);
             if (!send_err) {
-                _ = session.kcp.send(frame.bytes) catch {
+                _ = session.kcp.send(frame.bytes) catch |err| {
+                    std.log.scoped(.kcp_transport).warn(
+                        "kcp send failed, conv: {d}, frame_len: {d}, mss: {d}, error: {t}",
+                        .{ session.handle.conv_id, frame.bytes.len, session.kcp.mss, err },
+                    );
                     send_err = true;
                 };
             }
@@ -663,7 +671,8 @@ pub const Registry = struct {
             registry.markClosing(io, session, .send_failed);
             return true;
         }
-        registry.scheduleKcp(session, now_ms) catch {
+        registry.scheduleKcp(session, now_ms) catch |err| {
+            logTransportError(session, "schedule after send", err);
             registry.markClosing(io, session, .transport_error);
         };
         return true;
@@ -678,7 +687,8 @@ pub const Registry = struct {
     ) void {
         switch (kind) {
             .kcp_update => {
-                session.kcp.update(session.elapsedMs(now_ms)) catch {
+                session.kcp.update(session.elapsedMs(now_ms)) catch |err| {
+                    logTransportError(session, "kcp update", err);
                     registry.markClosing(io, session, .transport_error);
                     return;
                 };
@@ -690,7 +700,8 @@ pub const Registry = struct {
                     registry.markClosing(io, session, .send_failed);
                     return;
                 }
-                registry.scheduleKcp(session, now_ms) catch {
+                registry.scheduleKcp(session, now_ms) catch |err| {
+                    logTransportError(session, "schedule after update", err);
                     registry.markClosing(io, session, .transport_error);
                 };
             },
@@ -707,7 +718,8 @@ pub const Registry = struct {
                         .conv_id = session.handle.conv_id,
                         .kind = .idle,
                         .due_ms = due_ms,
-                    }) catch {
+                    }) catch |err| {
+                        logTransportError(session, "reschedule idle", err);
                         registry.markClosing(io, session, .transport_error);
                     };
                 }
@@ -750,6 +762,13 @@ pub const Registry = struct {
         session.handle.close(io, reason);
     }
 };
+
+fn logTransportError(session: *const Session, comptime site: []const u8, err: anyerror) void {
+    std.log.scoped(.kcp_transport).warn(
+        "transport error ({s}), conv: {d}, error: {t}",
+        .{ site, session.handle.conv_id, err },
+    );
+}
 
 fn pumpApplicationData(
     kcp: *Kcp,

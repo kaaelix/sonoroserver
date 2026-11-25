@@ -452,7 +452,15 @@ fn acceptPredictedTransition(
             to,
             true,
             ctx,
-        )) orelse return false;
+        )) orelse {
+            // The server could not confirm the conditions itself. A transition out of a conduit
+            // node, or one predicted by the client (Autonomous / Simulated), is the client's to
+            // take: its conditions are judged there, so the switch is applied as reported.
+            if (!canClientTransition(comp, runtime.fsm_id, from, to) and
+                !canClientAnyStateTransition(comp, runtime.fsm_id, active_path, from, to)) return false;
+            try changeCurrentState(comp, fsm_id, to, gpa, ctx.now_ms);
+            return true;
+        };
         try commitPending(comp, runtime, gpa);
         return true;
     }

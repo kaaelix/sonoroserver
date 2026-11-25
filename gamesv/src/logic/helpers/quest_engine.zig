@@ -28,6 +28,7 @@ const TriggerConfig = @import("../../data/tables/entity_components/Trigger.zig")
 const ClientTriggerConfig = @import("../../data/tables/entity_components/Extra.zig").ClientTriggerComponent;
 const InteractConfig = @import("../../data/tables/entity_components/Interact.zig");
 
+const save_block = @import("save_block.zig");
 const log = std.log.scoped(.quest_engine);
 
 pub const prologue_quest_id: i32 = 139000025;
@@ -135,7 +136,103 @@ const jsonFloat = quest_types.jsonFloat;
 const jsonBool = quest_types.jsonBool;
 const resolveVarInt = quest_types.resolveVarInt;
 
+/// Applies the save-block rule to every active quest tree on a fresh login (see `save_block.zig`).
+/// Progress made inside a block is dropped here, before the tree snapshot is sent; the block itself
+/// is entered again by `reenterSaveBlocksAfterLogin` once the scene exists.
+fn discardSaveBlockProgressOnLogin(ctx: QuestContext) !void {
+    const gpa = ctx.alloc.gpa;
+    const restore = &ctx.quest_comp.login_restore;
+    restore.reenter_quests.clearRetainingCapacity();
+    restore.pos_rollback = null;
+
+    const quest_ids = try snapshotActiveQuestIds(ctx);
+    for (quest_ids) |quest_id| {
+        const aq = ctx.quest_comp.info.findActiveQuestPtr(quest_id) orelse continue;
+        const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, quest_id) catch continue;
+        const discard = try save_block.planLoginDiscard(ctx.alloc.arena, nodes, aq.active_nodes, aq.finished_nodes);
+        if (discard.isEmpty()) continue;
+
+        for (discard.reenter) |node_id| {
+            _ = try QuestInfo.markNodeInactive(aq, gpa, node_id);
+        }
+        for (discard.unfinish) |node_id| {
+            _ = try QuestInfo.removeIntValue(&aq.finished_nodes, gpa, node_id);
+            try ctx.quest_comp.info.forgetChildQuestFinished(gpa, quest_id, node_id);
+        }
+        try forgetSaveBlockNodeProgress(ctx, aq, nodes, discard.blocks);
+
+        try restore.reenter_quests.append(gpa, quest_id);
+        if (restore.pos_rollback == null) {
+            for (discard.blocks) |block_id| {
+                if (save_block.posRollbackOf(nodes, block_id)) |rollback| {
+                    restore.pos_rollback = rollback;
+                    break;
+                }
+            }
+        }
+        log.info("login restore: quest {d} resumes at save block(s) {any}; re-entering {d} node(s), forgetting {d} finished", .{
+            quest_id,
+            discard.blocks,
+            discard.reenter.len,
+            discard.unfinish.len,
+        });
+    }
+}
+
+/// Forgets per-node progress that lives outside the node status lists for the nodes of `blocks`:
+/// kills counted towards their conditions and interactions already done.
+fn forgetSaveBlockNodeProgress(
+    ctx: QuestContext,
+    aq: *QuestInfo.ActiveQuest,
+    nodes: []const LazyNodeStore.NodeEntry,
+    blocks: []const i32,
+) !void {
+    const gpa = ctx.alloc.gpa;
+    var claims_changed = false;
+    var target_buf: [32]i32 = undefined;
+    for (nodes) |node| {
+        const in_block = for (blocks) |block_id| {
+            if (save_block.isInBlock(nodes, node.id, block_id)) break true;
+        } else false;
+        if (!in_block) continue;
+
+        for (extractNodeTargetEntityIds(&target_buf, node)) |target_id| {
+            _ = try QuestInfo.removeIntValue(&aq.killed_entities, gpa, target_id);
+            if (ctx.progress_comp) |progress| {
+                var key_buf: [64]u8 = undefined;
+                const key = std.fmt.bufPrint(&key_buf, "interact_done:{d}:{d}:{d}", .{ aq.quest_id, node.id, target_id }) catch continue;
+                if (progress.info.removeClaim(gpa, key)) claims_changed = true;
+            }
+        }
+    }
+    if (claims_changed) {
+        if (ctx.progress_comp) |progress| try progress.save(ctx.fs, ctx.alloc.arena);
+    }
+}
+
+fn isLoginReentryPending(ctx: QuestContext, quest_id: i32) bool {
+    return std.mem.indexOfScalar(i32, ctx.quest_comp.login_restore.reenter_quests.items, quest_id) != null;
+}
+
+/// Enters again the save blocks reset by `discardSaveBlockProgressOnLogin`, through the normal
+/// activation path, so `SaveConfig` actions and child enter actions run as on first entry.
+fn reenterSaveBlocksAfterLogin(ctx: QuestContext) !void {
+    const restore = &ctx.quest_comp.login_restore;
+    restore.pos_rollback = null;
+    if (restore.reenter_quests.items.len == 0) return;
+
+    const pending = try ctx.alloc.arena.dupe(i32, restore.reenter_quests.items);
+    restore.reenter_quests.clearRetainingCapacity();
+    for (pending) |quest_id| {
+        if (!ctx.quest_comp.info.hasActiveQuest(quest_id)) continue;
+        log.info("login restore: entering save block of quest {d} again", .{quest_id});
+        try advanceQuestTree(ctx, quest_id, true);
+    }
+    try finalizeProgression(ctx);
+}
+
 pub fn syncOnLogin(ctx: QuestContext) !void {
+    try discardSaveBlockProgressOnLogin(ctx);
     // Ensure Synthesis (10035) is marked unlocked so synthesis menu RPCs are not gated.
     _ = try ctx.quest_comp.info.unlockSystem(ctx.alloc.gpa, 10035);
     _ = reconcileAccountState(ctx, false) catch |err| logHookErr("reconcileAccountState", err);
@@ -209,6 +306,7 @@ pub fn onSceneTrace(ctx: QuestContext, trace_id: i64) !void {
 
 pub fn onSceneLoadingFinish(ctx: QuestContext) !void {
     const scene = ctx.scene orelse return;
+    try reenterSaveBlocksAfterLogin(ctx);
     ensureActiveQuestTargetsSpawned(ctx);
     try ensureActiveQuestTimersScheduled(ctx);
 
@@ -1596,6 +1694,41 @@ fn combatStateThreshold(state_name: []const u8, hp_ratio: f32) f32 {
     return 0.75;
 }
 
+/// Conditions the client settles by itself. The client builds a `CheckCombatStateBehaviorNode` for
+/// `DetectCombatState`: it polls the entity's gameplay tag every tick and sends `SubmitNodeRequest`
+/// when the tag shows up (or goes away, with `Compare: Ne`). The server only answers that request;
+/// it has no say in when the state is reached. `DetectCombatState2` is the server-judged variant.
+fn isClientJudgedCondition(ctype: []const u8) bool {
+    return std.mem.eql(u8, ctype, "DetectCombatState");
+}
+
+/// `DetectCombatState2` holds when `Count` of its listed entity states hold; a `Count` of 0 asks for
+/// all of them. `probe.hasState(entity_id, state)` answers for one entry; an entry without its own
+/// `EntityId` is asked about `fallback_entity`.
+fn combatState2Holds(cond: std.json.ObjectMap, fallback_entity: i32, probe: anytype) bool {
+    const listed = cond.get("Conditions") orelse return false;
+    if (listed != .array or listed.array.items.len == 0) return false;
+    const asked = jsonInt(cond.get("Count")) orelse 0;
+    const needed: usize = if (asked <= 0) listed.array.items.len else @intCast(asked);
+
+    var held: usize = 0;
+    for (listed.array.items) |entry| {
+        if (entry != .object) continue;
+        const own_entity = jsonInt(entry.object.get("EntityId")) orelse 0;
+        const state = jsonStr(entry.object.get("State")) orelse "";
+        if (probe.hasState(if (own_entity != 0) own_entity else fallback_entity, state)) held += 1;
+    }
+    return held >= needed;
+}
+
+const SceneStateProbe = struct {
+    ctx: QuestContext,
+
+    fn hasState(probe: SceneStateProbe, entity_id: i32, state: []const u8) bool {
+        return entityHasStateTag(probe.ctx, entity_id, state);
+    }
+};
+
 fn checkCombatStateForQuest(ctx: QuestContext, quest_id: i32, cfg_id: i32, hp_ratio: f32) !bool {
     const aq = ctx.quest_comp.info.findActiveQuest(quest_id) orelse return false;
     if (aq.active_nodes.len == 0) return false;
@@ -1608,8 +1741,9 @@ fn checkCombatStateForQuest(ctx: QuestContext, quest_id: i32, cfg_id: i32, hp_ra
         if (!std.mem.eql(u8, node.node_type, "ChildQuest")) continue;
         const cond = getChildCondition(node.data) orelse continue;
         const ctype = jsonStr(cond.get("Type")) orelse continue;
+        if (isClientJudgedCondition(ctype)) continue;
 
-        if (std.mem.eql(u8, ctype, "DetectCombatState") or std.mem.eql(u8, ctype, "DetectCombatState2")) {
+        if (std.mem.eql(u8, ctype, "DetectCombatState2")) {
             var matched = false;
             if (cond.get("Conditions")) |cs| {
                 if (cs == .array and cs.array.items.len > 0) {
@@ -1628,15 +1762,6 @@ fn checkCombatStateForQuest(ctx: QuestContext, quest_id: i32, cfg_id: i32, hp_ra
                         }
                     }
                     matched = hit_cnt >= needed;
-                }
-            } else {
-                const target_entity = jsonInt(cond.get("EntityId")) orelse 0;
-                if (target_entity == cfg_id or target_entity == 0) {
-                    const state_name = jsonStr(cond.get("State")) orelse "";
-                    const entity_to_check = if (target_entity != 0) target_entity else cfg_id;
-                    matched = entityHasStateTag(ctx, entity_to_check, state_name) or
-                        hp_ratio <= 0.0 or
-                        (combatStateAllowsHpFallback(state_name) and hp_ratio <= combatStateThreshold(state_name, hp_ratio));
                 }
             }
             if (matched) {
@@ -1986,23 +2111,18 @@ pub fn onEntityStateChanged(ctx: QuestContext, entity_config_id: i32, state_name
                         }
                     }
                 }
-            } else if (std.mem.eql(u8, ctype, "DetectCombatState") or
-                std.mem.eql(u8, ctype, "DetectCombatState2") or
-                std.mem.eql(u8, ctype, "WaitBattleCondition"))
-            {
+            } else if (std.mem.eql(u8, ctype, "DetectCombatState2")) {
+                if (combatState2Holds(cond, ev.eid, SceneStateProbe{ .ctx = c })) {
+                    try completeChildQuest(c, qid, nodes, node);
+                    return true;
+                }
+            } else if (std.mem.eql(u8, ctype, "WaitBattleCondition")) {
                 if (isBattleAttrOrWaitSatisfied(c, cond, ctype, ev.eid, 1.0)) {
                     try completeChildQuest(c, qid, nodes, node);
                     return true;
                 }
-                const target_st = jsonStr(cond.get("State")) orelse "";
-                if (target_st.len > 0 and std.mem.eql(u8, target_st, ev.state)) {
-                    const target_id = jsonInt(cond.get("EntityId")) orelse 0;
-                    if (target_id == 0 or target_id == ev.eid) {
-                        try completeChildQuest(c, qid, nodes, node);
-                        return true;
-                    }
-                }
             }
+            // DetectCombatState is not here: the client settles it (isClientJudgedCondition).
             return false;
         }
     };
@@ -2251,7 +2371,9 @@ pub fn executeDynamicInteractOptionHandled(ctx: QuestContext, entity_id: i64, op
                 }
                 return true;
             } else if (opt.quest_id > 0 and opt.node_id > 0) {
-                _ = try onSubmitNode(ctx, opt.quest_id, opt.quest_id, opt.node_id);
+                if (!try completeDoInteractFromDynamicOption(ctx, opt.quest_id, opt.node_id, target_entity_id, option_guid)) {
+                    _ = try onSubmitNode(ctx, opt.quest_id, opt.quest_id, opt.node_id);
+                }
                 return true;
             }
             return try onInteractHandled(ctx, target_entity_id, 0);
@@ -2263,12 +2385,60 @@ pub fn executeDynamicInteractOptionHandled(ctx: QuestContext, entity_id: i64, op
                 }
                 return true;
             } else if (opt.quest_id > 0 and opt.node_id > 0) {
-                _ = try onSubmitNode(ctx, opt.quest_id, opt.quest_id, opt.node_id);
+                if (!try completeDoInteractFromDynamicOption(ctx, opt.quest_id, opt.node_id, target_entity_id, option_guid)) {
+                    _ = try onSubmitNode(ctx, opt.quest_id, opt.quest_id, opt.node_id);
+                }
                 return true;
             }
             return try onInteractHandled(ctx, target_entity_id, 0);
         },
     }
+}
+
+fn findDoInteractOptionByGuid(cond: std.json.ObjectMap, guid: []const u8) ?std.json.ObjectMap {
+    if (guid.len == 0) return null;
+    const opts = cond.get("AddOptions") orelse return null;
+    if (opts != .array) return null;
+    for (opts.array.items) |entry| {
+        if (entry != .object) continue;
+        const inner = entry.object.get("Option") orelse continue;
+        if (inner != .object) continue;
+        const entry_guid = jsonStr(inner.object.get("Guid")) orelse continue;
+        if (std.mem.eql(u8, entry_guid, guid)) return entry.object;
+    }
+    return null;
+}
+
+/// Advances the active DoInteract ChildQuest that owns a quest dynamic interact option.
+/// `onSubmitNode` refuses DoInteract nodes on purpose (clients must not self-submit them), so a
+/// server-validated dynamic interact has to complete them here instead. The option's own actions
+/// were already run by the caller. Returns false when the node is not an active DoInteract node.
+fn completeDoInteractFromDynamicOption(
+    ctx: QuestContext,
+    quest_id: i32,
+    node_id: i32,
+    entity_id: i64,
+    option_guid: []const u8,
+) !bool {
+    const aq = ctx.quest_comp.info.findActiveQuest(quest_id) orelse return false;
+    if (!QuestInfo.containsInt(aq.active_nodes, node_id)) return false;
+
+    const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, quest_id) catch return false;
+    const node = findNodeById(nodes, node_id) orelse return false;
+    if (!std.mem.eql(u8, node.node_type, "ChildQuest")) return false;
+    const cond = getChildCondition(node.data) orelse return false;
+    const ctype = jsonStr(cond.get("Type")) orelse return false;
+    if (!std.mem.eql(u8, ctype, "DoInteract")) return false;
+
+    const opt_obj = findDoInteractOptionByGuid(cond, option_guid) orelse
+        matchDoInteract(cond, entity_id, resolveConfigId(ctx.scene, entity_id), 0) orelse
+        return false;
+
+    if (try markAndCheckDoInteractComplete(ctx, quest_id, node.*, cond, entity_id, opt_obj)) {
+        try completeChildQuest(ctx, quest_id, nodes, node.*);
+    }
+    try finalizeProgression(ctx);
+    return true;
 }
 
 pub fn onUiAction(ctx: QuestContext, ui_type: []const u8) !void {
@@ -4196,6 +4366,8 @@ fn activateQuest(ctx: QuestContext, quest_id: i32, push_updates: bool) anyerror!
 }
 
 fn advanceQuestTree(ctx: QuestContext, quest_id: i32, push_updates: bool) anyerror!void {
+    // A tree waiting to re-enter its save block must not be stepped before the scene is loaded.
+    if (isLoginReentryPending(ctx, quest_id)) return;
     const nodes = ctx.assets.quest_nodes.getOwnerNodes(ctx.io, quest_id) catch return;
     if (nodes.len == 0) return;
 
@@ -7280,6 +7452,19 @@ fn pushDynamicInteractEntry(
         actions_json = "[]";
     }
 
+    // Quest state resyncs and entity spawns both re-announce active options. The client keeps one
+    // option per add notify, while completion sends a single remove, so withdraw the previous
+    // announcement first to avoid leaving a stale prompt behind.
+    if (scene.findDynamicInteractOption(guid)) |existing| {
+        if (existing.entity_net_id == net_id) {
+            conn.push(alloc.gpa, io, pb.EntityRemoveDynamicInteractNotify{
+                .OptionGuid = guid,
+                .EntityId = net_id,
+            }) catch {};
+        }
+    }
+    log.debug("dynamic interact add: entity {d} (config {d}), node {d}:{d}, guid {s}", .{ net_id, cfg_id, quest_id, node_id, guid });
+
     try scene.upsertDynamicInteractOptionWithBt(
         alloc.gpa,
         guid,
@@ -7321,6 +7506,7 @@ pub fn removeDoInteractOptionsForBtNode(ctx: QuestContext, bt_type: pb.BtType, o
     const removed = scene.takeDynamicInteractOptionsForBtNode(ctx.alloc.arena, bt_type, owner_id, node_id) catch return;
     for (removed) |*opt| {
         defer opt.deinit(ctx.alloc.gpa);
+        log.debug("dynamic interact remove: entity {d}, node {d}:{d}, guid {s}", .{ opt.entity_net_id, owner_id, node_id, opt.option_guid });
         ctx.conn.push(ctx.alloc.gpa, ctx.io, pb.EntityRemoveDynamicInteractNotify{
             .OptionGuid = opt.option_guid,
             .EntityId = opt.entity_net_id,
@@ -8335,6 +8521,91 @@ test "reentrant refreshAvailableQuests and shouldHideWorldEntity prevent recursi
     try std.testing.expect(shouldHideWorldEntity(info, &targets, 310000014));
     // Explicitly shown entity is not hidden
     try std.testing.expect(!shouldHideWorldEntity(info, &targets, 880700164));
+}
+
+test "findDoInteractOptionByGuid matches the AddOptions entry that owns the guid" {
+    const gpa = std.testing.allocator;
+
+    const cond = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"Type":"DoInteract","AddOptions":[
+        \\{"EntityId":1,"Option":{"Type":{"Type":"Actions","Actions":[]},"Guid":"aaa"}},
+        \\{"EntityId":122000891,"Option":{"Type":{"Type":"Actions","Actions":[]},"Guid":"30e12028d6dd44c4ad30c72d7afcc113"}}
+        \\]}
+    , .{});
+    defer cond.deinit();
+
+    const matched = findDoInteractOptionByGuid(cond.value.object, "30e12028d6dd44c4ad30c72d7afcc113") orelse
+        return error.TestExpectedMatch;
+    try std.testing.expectEqual(@as(?i32, 122000891), jsonInt(matched.get("EntityId")));
+    try std.testing.expect(findDoInteractOptionByGuid(cond.value.object, "missing") == null);
+    try std.testing.expect(findDoInteractOptionByGuid(cond.value.object, "") == null);
+}
+
+test "DetectCombatState is settled by the client, its server-judged variants are not" {
+    try std.testing.expect(isClientJudgedCondition("DetectCombatState"));
+    try std.testing.expect(!isClientJudgedCondition("DetectCombatState2"));
+    try std.testing.expect(!isClientJudgedCondition("WaitBattleCondition"));
+    try std.testing.expect(!isClientJudgedCondition("Kill"));
+}
+
+const TestStateProbe = struct {
+    entity_id: i32,
+    state: []const u8,
+
+    fn hasState(probe: TestStateProbe, entity_id: i32, state: []const u8) bool {
+        return entity_id == probe.entity_id and std.mem.eql(u8, state, probe.state);
+    }
+};
+
+test "combatState2Holds asks for Count of the listed entity states" {
+    const gpa = std.testing.allocator;
+    const one_of_two = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"Type":"DetectCombatState2","Count":1,"Conditions":[
+        \\{"EntityId":122000452,"State":"hacked"},{"EntityId":122000453,"State":"hacked"}]}
+    , .{});
+    defer one_of_two.deinit();
+    const all_of_two = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"Type":"DetectCombatState2","Count":0,"Conditions":[
+        \\{"EntityId":122000452,"State":"hacked"},{"EntityId":122000453,"State":"hacked"}]}
+    , .{});
+    defer all_of_two.deinit();
+
+    const second_is_hacked: TestStateProbe = .{ .entity_id = 122000453, .state = "hacked" };
+    const nobody_is_hacked: TestStateProbe = .{ .entity_id = 0, .state = "" };
+
+    try std.testing.expect(combatState2Holds(one_of_two.value.object, 0, second_is_hacked));
+    try std.testing.expect(!combatState2Holds(one_of_two.value.object, 0, nobody_is_hacked));
+    try std.testing.expect(!combatState2Holds(all_of_two.value.object, 0, second_is_hacked));
+}
+
+test "combatState2Holds never holds without listed states" {
+    const gpa = std.testing.allocator;
+    const no_list = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"Type":"DetectCombatState","EntityId":310000014,"State":"phase two"}
+    , .{});
+    defer no_list.deinit();
+    const empty_list = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"Type":"DetectCombatState2","Count":1,"Conditions":[]}
+    , .{});
+    defer empty_list.deinit();
+
+    const boss_in_phase_two: TestStateProbe = .{ .entity_id = 310000014, .state = "phase two" };
+
+    try std.testing.expect(!combatState2Holds(no_list.value.object, 310000014, boss_in_phase_two));
+    try std.testing.expect(!combatState2Holds(empty_list.value.object, 310000014, boss_in_phase_two));
+}
+
+test "combatState2Holds asks the fallback entity for entries without their own" {
+    const gpa = std.testing.allocator;
+    const cond = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"Type":"DetectCombatState2","Count":0,"Conditions":[{"State":"hacked"}]}
+    , .{});
+    defer cond.deinit();
+
+    const probe: TestStateProbe = .{ .entity_id = 122000452, .state = "hacked" };
+
+    try std.testing.expect(combatState2Holds(cond.value.object, 122000452, probe));
+    try std.testing.expect(!combatState2Holds(cond.value.object, 7, probe));
 }
 
 test "allowsClientSubmitNode blocks DoInteract and PlayFlow while allowing ReachArea" {

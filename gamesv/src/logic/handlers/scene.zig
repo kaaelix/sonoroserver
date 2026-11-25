@@ -33,6 +33,7 @@ const TrialRoles = @import("../helpers/trial_roles.zig");
 const RoleHelper = @import("../helpers/role.zig");
 const autopilot = @import("../helpers/autopilot.zig");
 const QuestEngine = @import("../helpers/quest_engine.zig");
+const save_block = @import("../helpers/save_block.zig");
 const ConditionEvaluator = @import("../helpers/condition.zig");
 const LevelEntityConfig = @import("../../data/tables/LevelEntityConfig.zig");
 const LevelPlayHelper = @import("../helpers/level_play.zig");
@@ -526,6 +527,32 @@ fn has_scene_data(fs: *FileSystem, arena: std.mem.Allocator, player_id: i32) boo
     return false;
 }
 
+/// Puts the player at the rollback position of a save block being restored at login, when they
+/// logged out inside the block's range entity (`SaveConfig.PosRollbackCfg` in the node tables).
+fn applySaveBlockPosRollback(scene: *Scene, assets: *const Assets, rollback: save_block.PosRollback) void {
+    if (scene.instance.players.len == 0) return;
+    const player = &scene.instance.players[0];
+
+    const range_cfg = assets.findLevelEntity(scene.instance_id, rollback.range_entity_id) orelse return;
+    const center = Assets.AssetIndexes.entityWorldPos(range_cfg) orelse return;
+    const range = range_cfg.ComponentsData.RangeComponent orelse return;
+    const shape = range.Shape orelse return;
+    const radius = shape.Radius orelse return;
+    const dx = player.location[0] - center[0];
+    const dy = player.location[1] - center[1];
+    const dz = player.location[2] - center[2];
+    if (dx * dx + dy * dy + dz * dz > radius * radius) return;
+
+    const position_cfg = assets.findLevelEntity(scene.instance_id, rollback.position_entity_id) orelse return;
+    const target = Assets.AssetIndexes.entityWorldPos(position_cfg) orelse return;
+    std.log.scoped(.initial_scene_join).info(
+        "login restore: moving player to save block position entity {d}",
+        .{rollback.position_entity_id},
+    );
+    player.location = target;
+    player.rotation = Assets.AssetIndexes.entityWorldRot(position_cfg);
+}
+
 pub fn onInitialSceneJoin(
     event: EventQueue.Dequeue(.initial_scene_join),
     events: *EventQueue,
@@ -635,6 +662,12 @@ pub fn onInitialSceneJoin(
                 @floatFromInt(instance_dungeon.BornRotation[2]),
             },
         };
+    }
+
+    if (event.data.location == null) {
+        if (quest_comp.login_restore.pos_rollback) |rollback| {
+            applySaveBlockPosRollback(&scene, assets, rollback);
+        }
     }
 
     if (no_scene_data) {
@@ -1623,6 +1656,21 @@ pub fn isBlockedWorldEntityConfig(
     return false;
 }
 
+/// State a world entity should spawn in: the state saved by quests, or "activated" for unlocked teleporters.
+fn savedSpawnState(
+    assets: *const Assets,
+    quest_comp: *const PlayerQuestComponent,
+    map_comp: *const PlayerMapComponent,
+    map_id: i32,
+    entity_config_id: i64,
+) ?[]const u8 {
+    if (quest_comp.info.getEntityState(entity_config_id)) |saved| {
+        return if (saved.len != 0) saved else null;
+    }
+    if (isUnlockedTeleporterEntity(assets, map_comp, map_id, entity_config_id)) return "关卡.Common.状态.激活";
+    return null;
+}
+
 fn isUnlockedTeleporterEntity(
     assets: *const Assets,
     map_comp: *const PlayerMapComponent,
@@ -1776,6 +1824,11 @@ fn spawnNearbyWorldEntities(
                         cfg_id,
                         net_id,
                     );
+                    // Apply the saved state before publishing so the client creates the entity
+                    // already in that state instead of relying on a tag notify sent right after the add.
+                    if (savedSpawnState(assets, quest_comp, map_comp, map_id, cfg.EntityId)) |state_name| {
+                        _ = try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, net_id, state_name);
+                    }
                     spawn_cmd.publishWorldSpawn(
                         scene,
                         fs,
@@ -1848,14 +1901,7 @@ fn spawnNearbyWorldEntities(
             }
 
             if (std.math.cast(i32, cfg.EntityId)) |cfg_id32| {
-                const desired_state: ?[]const u8 = if (quest_comp.info.getEntityState(cfg.EntityId)) |saved|
-                    if (saved.len != 0) saved else null
-                else if (isUnlockedTeleporterEntity(assets, map_comp, map_id, cfg.EntityId))
-                    "关卡.Common.状态.激活"
-                else
-                    null;
-
-                if (desired_state) |state_name| {
+                if (savedSpawnState(assets, quest_comp, map_comp, map_id, cfg.EntityId)) |state_name| {
                     if (scene.findEntityNetIdByConfigId(cfg_id32)) |nid| {
                         if (try scene.updateEntityStateTag(alloc.gpa, &assets.tables.gameplay_tag_remap, nid, state_name)) |upd| {
                             if (upd.old_tag_id != upd.new_tag_id) {

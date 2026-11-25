@@ -43,6 +43,7 @@ pub fn DamageExecuteRequest(
 ) !void {
     const request: pb.DamageExecuteRequest = txn.payload;
     const damage = assets.tables.damage.getDataById(request.DamageId) orelse {
+        std.log.scoped(.damage).debug("damage id {d} not found in the Damage table", .{request.DamageId});
         txn.respond(.{ .ErrorCode = .ErrConfDamageNotFound });
         return;
     };
@@ -62,6 +63,13 @@ pub fn DamageExecuteRequest(
         alloc,
     );
     try txn.receive_data_pack.appendSlice(alloc.arena, combat_receive_pack.items);
+    std.log.scoped(.damage).debug("damage id {d}: attacker {d} -> target {d}, damage {d}, killed {}", .{
+        request.DamageId,
+        execute_data.AttackerEntityId,
+        execute_data.TargetEntityId,
+        execute_data.Damage,
+        execute_data.KilledTarget,
+    });
 
     const target_idx = scene.net_id_map.get(execute_data.TargetEntityId);
     var target_is_player = false;
