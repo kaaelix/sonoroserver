@@ -8,20 +8,22 @@ use sonoro_gamesv_fs::formation_info::Formation;
 use sonoro_gamesv_fs::role_info::{RoleInfo, SkillNode};
 use sonoro_gamesv_fs::special_item_incr;
 use sonoro_gamesv_fs::weapon_item::WeaponItem;
-use sonoro_proto::enums::{EAttributeType, FavorItemStatus, LivingStatus};
+use sonoro_proto::enums::{EAttributeType, ExitVehicleType, FavorItemStatus, LivingStatus};
 use sonoro_proto::pb::{
     CombatCommon, CombatNotifyData, CombatNotifyDataMessageOneof, CombatReceiveData,
     CombatReceiveDataMessageOneof, CombatReceivePackNotify, EntityAddNotify,
     EntityLivingStatusNotify, EntityRemoveInfo, EntityRemoveNotify, FightRoleInfo, FightRoleInfos,
     GroupFormation, JSPatchNotify, PlayerDeadNotify, RoleChangeUnlockNotify, RoleFavor,
     RoleFavorListNotify, RoleMotion, RoleMotionListNotify, UpdateGroupFormationNotify,
+    VehicleUpdateNotify,
 };
 use sonoro_proto::wire::PbEnum;
 
 use crate::component::comp_util;
 use crate::component::entity::small::{ConfigType, EntityType};
 use crate::component::player::{
-    PlayerBasicComponent, PlayerEchoComponent, PlayerRoleComponent, PlayerWeaponComponent,
+    PlayerBasicComponent, PlayerEchoComponent, PlayerProgressComponent, PlayerRoleComponent,
+    PlayerWeaponComponent,
 };
 use crate::event_queue::EventQueue;
 use crate::events::Event;
@@ -1363,4 +1365,159 @@ pub fn push_role_metadata_notifies<S: PushSink + ?Sized>(
             RoleConditionInfoMap: BTreeMap::new(),
         },
     );
+}
+
+/// Forces any mounted vehicle or motorcycle to dismount via `VehicleUpdateNotify` before teleporting.
+pub fn dismount_active_vehicle<S: PushSink + ?Sized>(
+    sink: &mut S,
+    scene: Option<&mut Scene>,
+    progress: &mut PlayerProgressComponent,
+    assets: &Assets,
+    fs: &FileSystem,
+    player_id: i32,
+) {
+    let mut active_vehicle_ids: Vec<i64> = Vec::new();
+    let motor_cfg_id = assets.get_motorcycle_config_id();
+    let motor_riding = progress.info.get_key_int("motor:riding") > 0;
+    let vehicle_cur = progress.info.get_key_int("vehicle:cur");
+
+    if let Some(sc) = scene {
+        let mut motor_fallback_id: Option<i64> = None;
+        for storage in &mut sc.entities {
+            if let Some(veh) = storage.vehicle.as_mut()
+                && veh.occupied
+            {
+                veh.occupied = false;
+                active_vehicle_ids.push(storage.net_id);
+            }
+            if motor_fallback_id.is_none()
+                && motor_riding
+                && let Some(mid) = motor_cfg_id
+                && storage.config.config_id == mid
+            {
+                motor_fallback_id = Some(storage.net_id);
+            }
+        }
+        for &eid in &active_vehicle_ids {
+            let _ = sc.save_entity_by_net_id(fs, eid);
+        }
+        if active_vehicle_ids.is_empty()
+            && let Some(mid) = motor_fallback_id
+        {
+            active_vehicle_ids.push(mid);
+        }
+    }
+
+    if active_vehicle_ids.is_empty() && vehicle_cur <= 0 && !motor_riding {
+        return;
+    }
+
+    progress.info.set_key_int("vehicle:cur", 0);
+    progress.info.set_key_int("vehicle:seat", -1);
+    progress.info.set_key_int("motor:riding", 0);
+    let _ = progress.save(fs);
+
+    let vehicle_entity_id = active_vehicle_ids.first().copied().unwrap_or(0);
+    let exit_type = if vehicle_entity_id != 0 {
+        ExitVehicleType::ExitVehicleTypeAllRole
+    } else {
+        ExitVehicleType::ExitVehicleTypeNormal
+    };
+    sink.push(
+        VehicleUpdateNotify::MSG_ID,
+        &VehicleUpdateNotify {
+            EntityId: vehicle_entity_id,
+            PlayerId: player_id,
+            SeatId: -1,
+            ExitType: Some(exit_type),
+            ClientPredicted: false,
+        },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::entity::EntityComponentStorage;
+    use crate::component::entity::small::{ConfigComponent, EntityState, VehicleComponent};
+    use crate::sink::VecPushSink;
+    use sonoro_gamesv_fs::explore_tools_info::ExploreToolsInfo;
+    use sonoro_gamesv_fs::formation_info::FormationInfo;
+    use sonoro_gamesv_fs::progress_info::ProgressInfo;
+    use sonoro_gamesv_fs::scene_instance::SceneInstance;
+    use sonoro_proto::PbMessage;
+
+    #[test]
+    fn dismount_active_vehicle_clears_state_and_emits_notify() {
+        let dir = std::env::temp_dir().join(format!("sonoro_vehicle_tp_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("player/100000001")).unwrap();
+        let fs = FileSystem::open(&dir).unwrap();
+        let assets = Assets::load_default().unwrap();
+
+        let mut scene = Scene::from_parts(
+            100000001,
+            8,
+            SceneInstance::default(),
+            FormationInfo::default(),
+            ExploreToolsInfo::default(),
+        );
+        let mut storage = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 0,
+                config_id: 999999,
+                config_type: ConfigType::Level,
+                entity_type: EntityType::Vehicle,
+                state: EntityState::Default,
+            },
+        );
+        storage.vehicle = Some(VehicleComponent {
+            occupied: true,
+            ..Default::default()
+        });
+        let veh = scene.spawn(storage);
+
+        let mut progress = PlayerProgressComponent {
+            player_id: 100000001,
+            info: ProgressInfo::default(),
+        };
+        progress.info.set_key_int("vehicle:cur", 999999);
+        progress.info.set_key_int("vehicle:seat", 0);
+        progress.info.set_key_int("motor:riding", 1);
+
+        let mut sink = VecPushSink::default();
+        dismount_active_vehicle(
+            &mut sink,
+            Some(&mut scene),
+            &mut progress,
+            &assets,
+            &fs,
+            100000001,
+        );
+
+        assert!(!scene.entities[veh.index].vehicle.as_ref().unwrap().occupied);
+        assert_eq!(progress.info.get_key_int("vehicle:cur"), 0);
+        assert_eq!(progress.info.get_key_int("vehicle:seat"), -1);
+        assert_eq!(progress.info.get_key_int("motor:riding"), 0);
+        assert_eq!(sink.packets.len(), 1);
+        assert_eq!(sink.packets[0].msg_id, VehicleUpdateNotify::MSG_ID);
+        let decoded = VehicleUpdateNotify::decode(&sink.packets[0].payload).unwrap();
+        assert_eq!(decoded.EntityId, veh.net_id);
+        assert_eq!(decoded.SeatId, -1);
+        assert_eq!(decoded.ExitType, Some(ExitVehicleType::ExitVehicleTypeAllRole));
+
+        let mut noop_sink = VecPushSink::default();
+        dismount_active_vehicle(
+            &mut noop_sink,
+            Some(&mut scene),
+            &mut progress,
+            &assets,
+            &fs,
+            100000001,
+        );
+        assert!(noop_sink.packets.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

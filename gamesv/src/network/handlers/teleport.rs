@@ -215,6 +215,14 @@ pub fn handle_teleport_transfer_request(
     }
 
     let target_pos = [spawn.x, spawn.y, spawn.z];
+    role_helper::dismount_active_vehicle(
+        &mut state.conn,
+        state.scene.as_mut(),
+        &mut state.player_components.progress,
+        &state.assets,
+        &state.fs,
+        state.player_id,
+    );
     if cur_inst_id == target_inst_id {
         if spawn.has_gravity_config
             && let Some(scene) = state.scene.as_mut()
@@ -372,6 +380,14 @@ pub fn handle_teleport_to_target_request(
     }
 
     let target_pos = [tp.pos_x, tp.pos_y, tp.pos_z];
+    role_helper::dismount_active_vehicle(
+        &mut state.conn,
+        state.scene.as_mut(),
+        &mut state.player_components.progress,
+        &state.assets,
+        &state.fs,
+        state.player_id,
+    );
     if cur_map_id == tp_map_id {
         let mut qctx = state.quest_context(events);
         quest_actions::update_player_scene_state(&mut qctx, target_pos, Some([0.0, 0.0, yaw]))
