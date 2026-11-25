@@ -7,7 +7,7 @@
   "sha256": "a0dcf3b1e31f3b3c98c556a013e080dc53b66de14d13ce6ca24cc54f337df11e",
   "url": "https://github.com/kaaelix/sonoroserver/releases/download/assets-db/assets.db",
   "server": {
-    "version": "3.8.0-20261125-3",
+    "version": "3.8.0-20261125-4",
     "exclude": [
       "assets/BinData/",
       "assets/assets.db"
@@ -21,6 +21,7 @@
       "CONTRIBUTING.md": "6a51984f8d10b64da3b56e4d39a09937d9f9fe9565eb7bc089fea7a82f03cc7e",
       "Cargo.lock": "063de454ca0a55943f4a8a4ca5d688dd49242cc4809157068bf1c82af440d3cd",
       "Cargo.toml": "b38179048701b694c7a6df501682b627c9d97d842104043b1d957f105ecb07f2",
+      "README.md": "1241e6d38fac33d6016736fd380c657ef5ac92ee20976cad3e0e6a5d60735912",
       "assets/scripts/join_scene_patches/disable_watermask.js": "50b55878480f24aed24e4f6080ce4dea4ab55d9bb99252eda57c4a84cee3d5c0",
       "assets/scripts/join_scene_patches/dismount_vehicle_on_teleport.js": "4d9f1a49c4fdd4ec10252b54690b8b8796a5c3da6c155d090844528a84abb954",
       "assets/scripts/join_scene_patches/entity_source_map_sync.js": "30caf8473af96b2f61e8adae667fd57689098999fe4fc4a08e31992203df47cd",
@@ -471,7 +472,7 @@
       "gamesv/src/network/mod.rs": "137d1d974f6c985d526fbf6a889f4e0e27a471b713646fb026ba4728f0f0978a",
       "gamesv/src/network/session_supervisor.rs": "e1aa5ab0757071413c95c8a33fa3cb5167d3e43a4bd6b53e6954b1dcee89d35e",
       "gamesv/src/network/state.rs": "4a9ac02ac72acb665d31cd70fa7ffe383befd2985391bb7589b3c6d409b6194a",
-      "launch.bat": "25aca44fb3393d0692ff03e8fd60bce90a84e232fa970951dc728d2a62013e71",
+      "launch.bat": "7add88fc5fb942d288511c01e8dfc4695f18b53329d66ca9af1751445ad6826b",
       "loginsv/Cargo.toml": "0b26aa0f9c561558bbda2197da34d1d21409a1d811c02d343f59b229566340a6",
       "loginsv/src/account.rs": "3f012c3a9baadf60db52864ca7d13f1a3535aaa10ca39f41b022c52d169f3e5d",
       "loginsv/src/main.rs": "fa97dadcc6ff8fb07589ea2c1043086306f3879894d57d1a701fd50910fac4e9",
@@ -517,8 +518,8 @@
       "services/aki-logic/src/lib.rs": "9316ce223f4f474969a18815fd3f4b3c4aca33a13464ec28ce1f98dad91aa005",
       "services/aki-logic/src/main.rs": "5df4399658534c7fdf94179fd3214eec1c01377b5293a0391cf3cdc3a302825a",
       "services/aki-logic/src/sqlite_store.rs": "cb4e5b04a13bdb0cb1e2acdf464fac90f2d8b16f8733f5356f2424e5a673638d",
-      "start-private-server.sh": "d0c5b00b06e88b63a5220f6272caf759ca1dbba28e4ad46ee4e2721371b72c55",
-      "stop-private-server.sh": "95881e2a8e5cefe35452a5e79bea86675a63f87af551e7ceabda9ea32e842959"
+      "start-private-server.sh": "02ba939a4cbb4287d08a7772c239e0bc90cb70b8ee37474979c4aa47f70784a9",
+      "stop-private-server.sh": "0df006cdf9048c2845f960d959acc244331b8dc8ea55a212e43ef3e4ddc8832c"
     }
   }
 }

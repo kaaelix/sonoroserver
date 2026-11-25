@@ -22,4 +22,4 @@ for name in sonoro-gamesv sonoro-loginsv sonoro-cfgsv sonoro-aki-logic; do
 done
 pkill -9 -f "^python3 .*server_manager\.py" 2>/dev/null || true
 rm -f /tmp/aki_logic.sock
-echo "Private server stopped."
+echo "Emulator stopped."

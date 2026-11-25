@@ -1,6 +1,6 @@
 <# : batch
 @echo off
-title WuWa Private Server Launcher
+title WuWa Emulator Launcher
 set "LAUNCH_BAT_DIR=%~dp0"
 set "LAUNCH_BAT_FILE=%~f0"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$raw = [System.IO.File]::ReadAllText($env:LAUNCH_BAT_FILE, [System.Text.Encoding]::UTF8); $sep = '#' + '__PS__'; $parts = $raw -split [regex]::Escape($sep), 2; if ($parts.Length -lt 2) { exit 1 }; Invoke-Expression $parts[1]"

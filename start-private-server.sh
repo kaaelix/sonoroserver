@@ -450,7 +450,7 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 
-echo "Private server started:"
+echo "Emulator started:"
 echo "  aki-logic : /tmp/aki_logic.sock + 127.0.0.1:19999 (pid $(cat /tmp/sonoro-aki-logic.pid))"
 echo "  cfgsv     : http://${PUBLIC_HOST}:${CFG_PORT} (pid $(cat /tmp/sonoro-cfgsv.pid))"
 echo "  loginsv   : http://${PUBLIC_HOST}:10001 (pid $(cat /tmp/sonoro-loginsv.pid))"
