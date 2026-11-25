@@ -282,6 +282,7 @@ pub fn handle_scene_loading_finish_request(
             );
         }
     }
+    super::flow::clear_client_black_screen_if_idle(state);
     Ok(SceneLoadingFinishResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

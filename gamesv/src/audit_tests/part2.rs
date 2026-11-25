@@ -3391,3 +3391,83 @@ fn audit_117_private_server_multiplayer_chat_ranks_and_cfgsv() {
     assert_eq!(rb_rank.PlayerInfo[0].Cash, 4200);
     h.drain_count();
 }
+
+#[test]
+fn audit_114_cross_instance_skip_clears_black_screen_on_scene_loading_finish() {
+    use crate::network::handlers::{flow, minimal, scene};
+    use sonoro_gamesv_logic::events::Event;
+    use sonoro_proto::pb::{
+        BlackScreenStatePush, FlowEndRequest, FlowServerSkipNotify, SceneLoadingFinishRequest,
+    };
+
+    let mut h = TestHarness::new("audit114", Some(8));
+    let mut events = EventQueue::new();
+
+    h.state
+        .scene
+        .as_mut()
+        .unwrap()
+        .set_active_flow(9901, 0, 0, "TestCrossInstanceSkip", 1, 1);
+    minimal::handle_black_screen_state_push(
+        &mut h.state,
+        BlackScreenStatePush {
+            IsOpen: true,
+            BlackScreenReason: b"SkipPlot_TestCrossInstanceSkip_1_1".to_vec(),
+            ..Default::default()
+        },
+    )
+    .expect("black screen push");
+    assert!(h.state.scene.as_ref().unwrap().client_black_screen_open);
+
+    // Simulate cross-instance transition while skipping active flow.
+    {
+        let s = h.state.scene.as_mut().unwrap();
+        s.clear_active_flow();
+        s.pending_transition_instance_id = Some(1529);
+    }
+    h.state.player_components.scene.last_scene_info.instance_id = 1529;
+    let _ = flow::handle_flow_end_request(
+        &mut h.state,
+        &mut events,
+        FlowEndRequest {
+            FlowIncId: 9901,
+            IsSkip: true,
+            ..Default::default()
+        },
+    )
+    .expect("flow end");
+    let before_finish = h.drain_push_msg_ids();
+    assert!(!before_finish.contains(&FlowServerSkipNotify::MSG_ID));
+    assert!(h.state.scene.as_ref().unwrap().client_black_screen_open);
+
+    // Entering the new instance must preserve client_black_screen_open across Scene replacement.
+    let mut join_events = EventQueue::new();
+    join_events.enqueue(Event::InitialSceneJoin {
+        player_id: h.state.player_id,
+        map_config_id: 1529,
+        instance_id: 1529,
+        location: None,
+        rotation: None,
+        pending_flow: None,
+    });
+    while let Some(ev) = join_events.dequeue() {
+        let mut rt = h.state.as_runtime(&mut events, None);
+        sonoro_gamesv_logic::handlers::dispatch_event(&mut rt, ev).expect("dispatch join");
+    }
+    assert_eq!(h.state.scene.as_ref().unwrap().instance_id, 1529);
+    assert!(h.state.scene.as_ref().unwrap().client_black_screen_open);
+
+    scene::handle_scene_loading_finish_request(
+        &mut h.state,
+        &mut events,
+        SceneLoadingFinishRequest::default(),
+    )
+    .expect("scene loading finish");
+    assert!(!h.state.scene.as_ref().unwrap().client_black_screen_open);
+
+    let after_finish = h.drain_push_msg_ids();
+    assert!(
+        after_finish.contains(&FlowServerSkipNotify::MSG_ID),
+        "SceneLoadingFinishRequest must clear pre-transition SkipPlot black screen"
+    );
+}

@@ -140,9 +140,10 @@ pub fn handle_teleport_data_request(
 }
 
 pub fn handle_teleport_finish_request(
-    _state: &mut State,
+    state: &mut State,
     _req: TeleportFinishRequest,
 ) -> Result<TeleportFinishResponse, String> {
+    super::flow::clear_client_black_screen_if_idle(state);
     Ok(TeleportFinishResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

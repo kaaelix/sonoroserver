@@ -720,6 +720,9 @@ pub fn on_initial_scene_join(
         now_ms,
     )?;
 
+    let preserve_client_black_screen = cur_scene
+        .as_ref()
+        .is_some_and(|scene| scene.client_black_screen_open);
     if let Some(scene) = cur_scene.take() {
         scene.save_persistent(fs)?;
     }
@@ -749,6 +752,7 @@ pub fn on_initial_scene_join(
     }
 
     let mut scene = Scene::init(fs, player_id, instance_dungeon.Id)?;
+    scene.client_black_screen_open = preserve_client_black_screen;
     if sync_last_scene {
         scene.save_last_scene(scene_comp, fs)?;
     }

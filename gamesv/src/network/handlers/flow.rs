@@ -42,7 +42,16 @@ pub fn handle_flow_end_request(
         .map_err(|e| e.to_string())?;
     }
 
-    let same_instance = state.player_components.scene.last_scene_info.instance_id == prev_instance_id;
+    let transition_pending = state.scene.as_ref().is_some_and(|s| {
+        s.pending_transition_instance_id
+            .is_some_and(|id| id != s.instance_id)
+    });
+    let same_instance = state.player_components.scene.last_scene_info.instance_id == prev_instance_id
+        && !transition_pending
+        && state
+            .scene
+            .as_ref()
+            .is_none_or(|s| s.instance_id == state.player_components.scene.last_scene_info.instance_id);
     let active_flow_inc_id = state
         .scene
         .as_ref()
@@ -62,27 +71,48 @@ pub fn handle_flow_end_request(
         .scene
         .as_ref()
         .is_some_and(|s| s.client_black_screen_open);
-    if active_flow_inc_id == 0
-        && same_instance
-        && (client_black_screen_open || (req.IsSkip && had_active_flow))
-    {
-        if let Some(scene) = state.scene.as_mut() {
-            scene.client_black_screen_open = false;
+    if active_flow_inc_id == 0 && (client_black_screen_open || (req.IsSkip && had_active_flow)) {
+        if same_instance {
+            push_skip_black_screen_clear(state, prev_flow_list, prev_flow_id, prev_state_id);
+        } else if let Some(scene) = state.scene.as_mut() {
+            // Defer clearing until SceneLoadingFinishRequest so CameraFade stays active during load.
+            scene.client_black_screen_open = true;
         }
-        let _ = state.conn.push_msg(
-            FlowServerSkipNotify::MSG_ID,
-            &FlowServerSkipNotify {
-                FlowListName: prev_flow_list.into_bytes(),
-                FlowId: prev_flow_id,
-                StateId: prev_state_id,
-                FadeOutScreen: true,
-            },
-        );
     }
 
     Ok(FlowEndResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
+}
+
+pub(crate) fn push_skip_black_screen_clear(
+    state: &mut State,
+    flow_list_name: String,
+    flow_id: i32,
+    state_id: i32,
+) {
+    if let Some(scene) = state.scene.as_mut() {
+        scene.client_black_screen_open = false;
+    }
+    let _ = state.conn.push_msg(
+        FlowServerSkipNotify::MSG_ID,
+        &FlowServerSkipNotify {
+            FlowListName: flow_list_name.into_bytes(),
+            FlowId: flow_id,
+            StateId: state_id,
+            FadeOutScreen: true,
+        },
+    );
+}
+
+pub(crate) fn clear_client_black_screen_if_idle(state: &mut State) {
+    let should_clear = state
+        .scene
+        .as_ref()
+        .is_some_and(|scene| scene.client_black_screen_open && scene.active_flow_inc_id == 0);
+    if should_clear {
+        push_skip_black_screen_clear(state, String::new(), 0, 0);
+    }
 }
 
 pub fn handle_flow_action_request(
