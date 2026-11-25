@@ -430,17 +430,12 @@ function Get-DetectedIps {
 
 function Get-AssetsManifest {
     param([string]$ServerRoot)
-    foreach ($url in @(
-        "https://raw.githubusercontent.com/kaaelix/sonoroserver/main/assets.json",
-        "https://raw.githubusercontent.com/kaaelix/wuwaserver/main/assets.json"
-    )) {
-        try {
-            $resp = Invoke-WebRequest -Uri $url -TimeoutSec 4 -UseBasicParsing
-            if ($resp.StatusCode -eq 200 -and -not [string]::IsNullOrWhiteSpace($resp.Content)) {
-                return ($resp.Content | ConvertFrom-Json)
-            }
-        } catch {}
-    }
+    try {
+        $resp = Invoke-WebRequest -Uri "https://raw.githubusercontent.com/kaaelix/sonoroserver/main/assets.json" -TimeoutSec 4 -UseBasicParsing
+        if ($resp.StatusCode -eq 200 -and -not [string]::IsNullOrWhiteSpace($resp.Content)) {
+            return ($resp.Content | ConvertFrom-Json)
+        }
+    } catch {}
     if (-not [string]::IsNullOrWhiteSpace($ServerRoot)) {
         $localJson = Join-Path $ServerRoot "assets.json"
         if (Test-Path -LiteralPath $localJson) {
@@ -485,7 +480,7 @@ function Ensure-ServerProject {
     $rawBases = @()
     foreach ($b in $srv.raw_bases) { if (-not [string]::IsNullOrWhiteSpace([string]$b)) { $rawBases += [string]$b } }
     if ($rawBases.Count -eq 0) {
-        $rawBases = @("https://raw.githubusercontent.com/kaaelix/sonoroserver/main", "https://raw.githubusercontent.com/kaaelix/wuwaserver/main")
+        $rawBases = @("https://raw.githubusercontent.com/kaaelix/sonoroserver/main")
     }
 
     $remoteVer = [string]$srv.version

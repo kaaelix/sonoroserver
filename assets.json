@@ -6,18 +6,14 @@
   "size": 724066304,
   "sha256": "a0dcf3b1e31f3b3c98c556a013e080dc53b66de14d13ce6ca24cc54f337df11e",
   "url": "https://github.com/kaaelix/sonoroserver/releases/download/assets-db/assets.db",
-  "mirrors": [
-    "https://github.com/kaaelix/wuwaserver/releases/download/assets-db/assets.db"
-  ],
   "server": {
-    "version": "3.8.0-20261125-2",
+    "version": "3.8.0-20261125-3",
     "exclude": [
       "assets/BinData/",
       "assets/assets.db"
     ],
     "raw_bases": [
-      "https://raw.githubusercontent.com/kaaelix/sonoroserver/main",
-      "https://raw.githubusercontent.com/kaaelix/wuwaserver/main"
+      "https://raw.githubusercontent.com/kaaelix/sonoroserver/main"
     ],
     "files": {
       ".cargo/config.toml": "641596c9b874de076e06ae9142a5befa2c157204597bbc07ff02c3071ac41a86",
@@ -475,7 +471,7 @@
       "gamesv/src/network/mod.rs": "137d1d974f6c985d526fbf6a889f4e0e27a471b713646fb026ba4728f0f0978a",
       "gamesv/src/network/session_supervisor.rs": "e1aa5ab0757071413c95c8a33fa3cb5167d3e43a4bd6b53e6954b1dcee89d35e",
       "gamesv/src/network/state.rs": "4a9ac02ac72acb665d31cd70fa7ffe383befd2985391bb7589b3c6d409b6194a",
-      "launch.bat": "d3d632422550cc4957afc882009fe4bc2a430886a46effe6f98f838c0418fe7c",
+      "launch.bat": "25aca44fb3393d0692ff03e8fd60bce90a84e232fa970951dc728d2a62013e71",
       "loginsv/Cargo.toml": "0b26aa0f9c561558bbda2197da34d1d21409a1d811c02d343f59b229566340a6",
       "loginsv/src/account.rs": "3f012c3a9baadf60db52864ca7d13f1a3535aaa10ca39f41b022c52d169f3e5d",
       "loginsv/src/main.rs": "fa97dadcc6ff8fb07589ea2c1043086306f3879894d57d1a701fd50910fac4e9",
@@ -521,7 +517,7 @@
       "services/aki-logic/src/lib.rs": "9316ce223f4f474969a18815fd3f4b3c4aca33a13464ec28ce1f98dad91aa005",
       "services/aki-logic/src/main.rs": "5df4399658534c7fdf94179fd3214eec1c01377b5293a0391cf3cdc3a302825a",
       "services/aki-logic/src/sqlite_store.rs": "cb4e5b04a13bdb0cb1e2acdf464fac90f2d8b16f8733f5356f2424e5a673638d",
-      "start-private-server.sh": "a0301521272e055688b6bebce43c3ffacc47a76b0a52bb96b225801fb820a181",
+      "start-private-server.sh": "d0c5b00b06e88b63a5220f6272caf759ca1dbba28e4ad46ee4e2721371b72c55",
       "stop-private-server.sh": "95881e2a8e5cefe35452a5e79bea86675a63f87af551e7ceabda9ea32e842959"
     }
   }

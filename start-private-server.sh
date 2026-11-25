@@ -57,14 +57,9 @@ ensure_assets_db() {
   local manifest_tmp="/tmp/sonoro-assets-manifest.json"
   local manifest=""
 
-  for url in \
-    "https://raw.githubusercontent.com/kaaelix/sonoroserver/main/assets.json" \
-    "https://raw.githubusercontent.com/kaaelix/wuwaserver/main/assets.json"; do
-    if curl -fsSL --connect-timeout 3 --max-time 5 "$url" -o "$manifest_tmp" 2>/dev/null; then
-      manifest="$manifest_tmp"
-      break
-    fi
-  done
+  if curl -fsSL --connect-timeout 3 --max-time 5 "https://raw.githubusercontent.com/kaaelix/sonoroserver/main/assets.json" -o "$manifest_tmp" 2>/dev/null; then
+    manifest="$manifest_tmp"
+  fi
 
   if [[ -z "$manifest" && -f "$ROOT_DIR/assets.json" ]]; then
     manifest="$ROOT_DIR/assets.json"
@@ -193,14 +188,9 @@ ensure_server_update() {
   local manifest_tmp="/tmp/sonoro-server-manifest.json"
   local manifest=""
 
-  for url in \
-    "https://raw.githubusercontent.com/kaaelix/sonoroserver/main/assets.json" \
-    "https://raw.githubusercontent.com/kaaelix/wuwaserver/main/assets.json"; do
-    if curl -fsSL --connect-timeout 3 --max-time 5 "$url" -o "$manifest_tmp" 2>/dev/null; then
-      manifest="$manifest_tmp"
-      break
-    fi
-  done
+  if curl -fsSL --connect-timeout 3 --max-time 5 "https://raw.githubusercontent.com/kaaelix/sonoroserver/main/assets.json" -o "$manifest_tmp" 2>/dev/null; then
+    manifest="$manifest_tmp"
+  fi
 
   if [[ -z "$manifest" ]] || ! command -v python3 >/dev/null 2>&1; then
     rm -f "$manifest_tmp"
@@ -285,7 +275,6 @@ root, vf = sys.argv[2], sys.argv[3]
 srv = m['server']
 bases = srv.get('raw_bases') or [
     "https://raw.githubusercontent.com/kaaelix/sonoroserver/main",
-    "https://raw.githubusercontent.com/kaaelix/wuwaserver/main",
 ]
 need_rebuild = False
 for rel, exp in srv['files'].items():
