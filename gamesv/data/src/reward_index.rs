@@ -157,8 +157,13 @@ impl RewardIndex {
             .as_ref()
             .and_then(|db| db.read_raw_file(resolved))
             .or_else(|| {
-                let path = format!("assets/BinData/{resolved}.json");
-                std::fs::read_to_string(path).ok()
+                for dir in ["assets/BinData", "../../assets/BinData"] {
+                    let path = format!("{dir}/{resolved}.json");
+                    if let Ok(raw) = std::fs::read_to_string(path) {
+                        return Some(raw);
+                    }
+                }
+                None
             });
         let Some(json_str) = json_str else {
             return Vec::new();

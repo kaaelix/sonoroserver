@@ -813,18 +813,12 @@ pub fn handle_remove_ride_sharing_passenger_request(
     })
 }
 
-fn load_motor_level_reward_id(target_level: i32) -> i32 {
+fn load_motor_level_reward_id(assets: &Assets, target_level: i32) -> i32 {
     static REWARD_BY_LVL: OnceLock<Vec<(i32, i32)>> = OnceLock::new();
     let table = REWARD_BY_LVL.get_or_init(|| {
-        let Ok(raw) = std::fs::read_to_string("assets/BinData/MotorLvl.json") else {
-            return Vec::new();
-        };
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            return Vec::new();
-        };
-        val.as_array()
+        assets
+            .read_raw_json_array("MotorLvl")
             .into_iter()
-            .flatten()
             .filter_map(|entry| {
                 let lvl = entry.get("Level")?.as_i64()? as i32;
                 let rid = entry.get("RewardId").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
@@ -1025,7 +1019,7 @@ pub fn handle_motor_level_one_key_reward_request(
     let max_lvl = state.player_components.motor.info.level;
     if start_lvl <= max_lvl {
         for lvl in start_lvl..=max_lvl {
-            let reward_id = load_motor_level_reward_id(lvl);
+            let reward_id = load_motor_level_reward_id(&state.assets, lvl);
             if reward_id > 0 {
                 let mut rctx = state.reward_context();
                 reward::grant_drop_package_popup(&mut rctx, reward_id, 8001)

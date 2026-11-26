@@ -28,8 +28,17 @@ impl Assets {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("assets.db");
-        let db = if db_candidate.exists() {
-            Some(crate::assets_db::AssetsDb::open(&db_candidate).map_err(|e| e.to_string())?)
+        let db_path = if db_candidate.exists() {
+            Some(db_candidate)
+        } else if Path::new(crate::assets_db::DEFAULT_ASSETS_DB_PATH).exists() {
+            Some(Path::new(crate::assets_db::DEFAULT_ASSETS_DB_PATH).to_path_buf())
+        } else if Path::new("../../assets/assets.db").exists() {
+            Some(Path::new("../../assets/assets.db").to_path_buf())
+        } else {
+            None
+        };
+        let db = if let Some(path) = db_path {
+            Some(crate::assets_db::AssetsDb::open(&path).map_err(|e| e.to_string())?)
         } else {
             None
         };
@@ -76,11 +85,36 @@ impl Assets {
     }
 
     pub fn load_default() -> Result<Self, String> {
-        Self::load(if Path::new("assets/BinData").exists() {
+        let base_path = if Path::new("assets/BinData").exists()
+            || Path::new(crate::assets_db::DEFAULT_ASSETS_DB_PATH).exists()
+        {
             "assets/BinData"
         } else {
             "../../assets/BinData"
-        })
+        };
+        Self::load(base_path)
+    }
+
+    pub fn read_raw_file(&self, table_name: &str) -> Option<String> {
+        if let Some(db) = self.tables.assets_db()
+            && let Some(raw) = db.read_raw_file(table_name)
+        {
+            return Some(raw);
+        }
+        for dir in ["assets/BinData", "../../assets/BinData"] {
+            let p = Path::new(dir).join(format!("{table_name}.json"));
+            if let Ok(raw) = std::fs::read_to_string(p) {
+                return Some(raw);
+            }
+        }
+        None
+    }
+
+    pub fn read_raw_json_array(&self, table_name: &str) -> Vec<serde_json::Value> {
+        self.read_raw_file(table_name)
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
     }
 
     pub fn resolve_map_config_id(&self, instance_id: i32) -> i32 {
@@ -167,5 +201,36 @@ impl Assets {
 
     pub fn get_motorcycle_config_id(&self) -> Option<i32> {
         self.tables.get_motorcycle_config_id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Assets;
+    use std::path::Path;
+
+    #[test]
+    fn load_resolves_assets_db_when_bindata_dir_missing() {
+        let db_path = Path::new("/root/wuwa-server/assets/assets.db");
+        if !db_path.is_file() {
+            return;
+        }
+        let assets = Assets::load("/root/wuwa-server/assets/NonExistentBinData")
+            .expect("Assets::load must open sibling assets.db without BinData dir");
+        assert!(assets.tables.assets_db().is_some());
+        assert!(!assets.tables.role_info.items.is_empty());
+        for tbl in [
+            "FishingTechEffect",
+            "FishingPoint",
+            "FishingCage",
+            "MotorLvl",
+            "MaterialReplace",
+            "AutoPilotCircles",
+        ] {
+            assert!(
+                !assets.read_raw_json_array(tbl).is_empty(),
+                "assets.db raw_files must contain {tbl}"
+            );
+        }
     }
 }

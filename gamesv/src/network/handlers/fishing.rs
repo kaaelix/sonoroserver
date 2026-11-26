@@ -48,17 +48,9 @@ fn cabin_item_to_pb(rec: &FishingCabinItem) -> FishingItemInfo {
     }
 }
 
-fn load_json_array(path: &str) -> Vec<Value> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
-}
-
-fn tech_effect_consume(effect_id: i32) -> Vec<CostItem> {
+fn tech_effect_consume(assets: &Assets, effect_id: i32) -> Vec<CostItem> {
     static TABLE: OnceLock<Vec<Value>> = OnceLock::new();
-    let items = TABLE.get_or_init(|| load_json_array("assets/BinData/FishingTechEffect.json"));
+    let items = TABLE.get_or_init(|| assets.read_raw_json_array("FishingTechEffect"));
     for entry in items {
         let Some(obj) = entry.as_object() else {
             continue;
@@ -121,7 +113,7 @@ fn fish_pick_from_item(assets: &Assets, item_id: i32) -> FishPick {
 
 fn pick_fish_for_point(assets: &Assets, entity_id: i64, seed: i64) -> FishPick {
     static POINTS: OnceLock<Vec<Value>> = OnceLock::new();
-    let points = POINTS.get_or_init(|| load_json_array("assets/BinData/FishingPoint.json"));
+    let points = POINTS.get_or_init(|| assets.read_raw_json_array("FishingPoint"));
     for entry in points {
         let Some(obj) = entry.as_object() else {
             continue;
@@ -212,7 +204,7 @@ pub fn handle_fishing_tech_level_up_request(
         });
     }
     let effect_id = row.Effect[cur_lvl as usize];
-    let costs = tech_effect_consume(effect_id);
+    let costs = tech_effect_consume(&state.assets, effect_id);
     if !costs.is_empty() {
         let ok = consume::consume_costs(
             &mut state.conn,
@@ -809,7 +801,7 @@ pub fn handle_fishing_cage_info_request(
     req: FishingCageInfoRequest,
 ) -> Result<FishingCageInfoResponse, String> {
     static CAGES: OnceLock<Vec<Value>> = OnceLock::new();
-    let cages = CAGES.get_or_init(|| load_json_array("assets/BinData/FishingCage.json"));
+    let cages = CAGES.get_or_init(|| state.assets.read_raw_json_array("FishingCage"));
     let mut entity_cfg_id = req.Id;
     let mut max_count = 5i32;
     let mut refresh_time = 120i32;

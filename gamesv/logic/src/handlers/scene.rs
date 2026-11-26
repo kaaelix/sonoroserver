@@ -106,7 +106,7 @@ fn notify_transport_roadways<S: PushSink + ?Sized>(
     else {
         return;
     };
-    let Ok(roads) = autopilot::road_ids_for_map(fs, instance_dungeon.MapConfigId) else {
+    let Ok(roads) = autopilot::road_ids_for_map(assets, fs, instance_dungeon.MapConfigId) else {
         return;
     };
     if roads.is_empty() {

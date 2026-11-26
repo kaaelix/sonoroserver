@@ -3192,27 +3192,32 @@ pub fn handle_add_decal_request(
     })
 }
 
-fn material_replace_exchange_ratio(item_id: i32) -> i32 {
-    let Ok(raw) = std::fs::read_to_string("assets/BinData/MaterialReplace.json") else {
-        return 1;
-    };
-    let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&raw) else {
-        return 1;
-    };
-    for entry in arr {
-        let Some(obj) = entry.as_object() else {
-            continue;
-        };
-        if obj.get("ItemId").and_then(Value::as_i64) != Some(i64::from(item_id)) {
-            continue;
+fn material_replace_exchange_ratio(assets: &sonoro_gamesv_data::Assets, item_id: i32) -> i32 {
+    static RATIOS: std::sync::OnceLock<std::collections::HashMap<i32, i32>> =
+        std::sync::OnceLock::new();
+    let map = RATIOS.get_or_init(|| {
+        let mut out = std::collections::HashMap::new();
+        for entry in assets.read_raw_json_array("MaterialReplace") {
+            let Some(obj) = entry.as_object() else {
+                continue;
+            };
+            let Some(id) = obj
+                .get("ItemId")
+                .and_then(Value::as_i64)
+                .and_then(|v| i32::try_from(v).ok())
+            else {
+                continue;
+            };
+            let param = obj
+                .get("ExchangeParam")
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+                .clamp(1, i64::from(i32::MAX)) as i32;
+            out.insert(id, param);
         }
-        let param = obj
-            .get("ExchangeParam")
-            .and_then(Value::as_i64)
-            .unwrap_or(1);
-        return param.clamp(1, i64::from(i32::MAX)) as i32;
-    }
-    1
+        out
+    });
+    map.get(&item_id).copied().unwrap_or(1)
 }
 
 pub fn handle_batch_material_replace_request(
@@ -3238,7 +3243,10 @@ pub fn handle_batch_material_replace_request(
                 Code: Some(ErrorCode::RequestParamError),
             });
         }
-        let ratio = i64::from(material_replace_exchange_ratio(ri.TargetReplaceItemId));
+        let ratio = i64::from(material_replace_exchange_ratio(
+            &state.assets,
+            ri.TargetReplaceItemId,
+        ));
         let max_grant = (total_consume / ratio).clamp(0, i64::from(i32::MAX)) as i32;
         let grant_num = ri.TargetNum.min(max_grant);
         if grant_num <= 0 {

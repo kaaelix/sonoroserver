@@ -115,7 +115,10 @@ pub fn repo_root() -> &'static Path {
         for start in starts {
             let mut dir_opt = Some(start.as_path());
             while let Some(dir) = dir_opt {
-                if dir.join("assets").join("BinData").is_dir() || dir.join("Cargo.toml").is_file() {
+                if dir.join("assets").join("BinData").is_dir()
+                    || dir.join("assets").join("assets.db").is_file()
+                    || dir.join("Cargo.toml").is_file()
+                {
                     return dir.to_path_buf();
                 }
                 dir_opt = dir.parent();
@@ -179,7 +182,59 @@ impl BinDataCache {
     }
 }
 
+fn open_assets_db() -> Option<rusqlite::Connection> {
+    let candidates = [
+        repo_root().join("assets").join("assets.db"),
+        PathBuf::from("assets/assets.db"),
+        PathBuf::from("../../assets/assets.db"),
+    ];
+    for path in candidates {
+        if path.is_file()
+            && let Ok(conn) = rusqlite::Connection::open_with_flags(
+                &path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+        {
+            return Some(conn);
+        }
+    }
+    None
+}
+
+static ASSETS_DB: OnceLock<Option<std::sync::Mutex<rusqlite::Connection>>> = OnceLock::new();
+
+fn read_array_from_assets_db(table_name: &str) -> Option<Vec<Value>> {
+    let lock = ASSETS_DB.get_or_init(|| open_assets_db().map(std::sync::Mutex::new));
+    let conn = lock.as_ref()?.lock().ok()?;
+    if let Ok(raw) = conn.query_row(
+        "SELECT data FROM raw_files WHERE name = ?1",
+        rusqlite::params![table_name],
+        |row| row.get::<_, String>(0),
+    ) {
+        if let Ok(arr) = serde_json::from_str::<Vec<Value>>(&raw) {
+            return Some(arr);
+        }
+    }
+    let mut stmt = conn
+        .prepare_cached("SELECT data FROM kv_int WHERE table_name = ?1")
+        .ok()?;
+    let rows = stmt
+        .query_map(rusqlite::params![table_name], |row| row.get::<_, String>(0))
+        .ok()?;
+    let mut out = Vec::new();
+    for raw in rows.flatten() {
+        if let Ok(val) = serde_json::from_str::<Value>(&raw) {
+            out.push(val);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
 fn open_json_array(dir: &Path, file_name: &str) -> Vec<Value> {
+    let table_name = file_name.strip_suffix(".json").unwrap_or(file_name);
+    if let Some(arr) = read_array_from_assets_db(table_name) {
+        return arr;
+    }
     let path = dir.join(file_name);
     let Ok(bytes) = fs::read(path) else {
         return Vec::new();
