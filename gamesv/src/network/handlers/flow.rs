@@ -71,7 +71,10 @@ pub fn handle_flow_end_request(
         .scene
         .as_ref()
         .is_some_and(|s| s.client_black_screen_open);
-    if active_flow_inc_id == 0 && (client_black_screen_open || (req.IsSkip && had_active_flow)) {
+    let chained_skip = req.IsSkip && had_active_flow && active_flow_inc_id != 0;
+    if (active_flow_inc_id == 0 && (client_black_screen_open || (req.IsSkip && had_active_flow)))
+        || chained_skip
+    {
         if same_instance {
             push_skip_black_screen_clear(state, prev_flow_list, prev_flow_id, prev_state_id);
         } else if let Some(scene) = state.scene.as_mut() {

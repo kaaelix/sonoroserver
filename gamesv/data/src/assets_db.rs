@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::path::Path;
 use std::process::Command;
@@ -710,6 +710,52 @@ impl AssetsDb {
             out.push((row.get(0)?, row.get(1)?, row.get(2)?));
         }
         Ok(out)
+    }
+
+    /// Collects all FunctionIds unlocked by `OpenSystemFunction` node actions.
+    pub fn query_action_opened_function_ids(&self) -> Result<Vec<i32>, SqliteError> {
+        fn collect(val: &serde_json::Value, out: &mut HashSet<i32>) {
+            match val {
+                serde_json::Value::Object(map) => {
+                    if map.get("Name").and_then(|v| v.as_str()) == Some("OpenSystemFunction")
+                        && let Some(fid) = map
+                            .get("Params")
+                            .and_then(|p| p.get("FunctionId"))
+                            .and_then(|v| v.as_i64())
+                            .and_then(|v| i32::try_from(v).ok())
+                        && fid > 0
+                    {
+                        out.insert(fid);
+                    }
+                    for v in map.values() {
+                        collect(v, out);
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for v in arr {
+                        collect(v, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stmt = guard.conn.prepare_cached(
+            "SELECT data FROM node_trees WHERE data LIKE '%OpenSystemFunction%'",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut ids = HashSet::new();
+        while let Some(row) = rows.next()? {
+            let raw: String = row.get(0)?;
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                collect(&val, &mut ids);
+            }
+        }
+        Ok(ids.into_iter().collect())
     }
 }
 

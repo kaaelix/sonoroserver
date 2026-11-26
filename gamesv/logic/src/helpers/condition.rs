@@ -109,10 +109,13 @@ pub fn push_func_open_notify<S: PushSink + ?Sized>(
 }
 
 fn is_function_config_open(ctx: &EvalContext<'_>, config: &FunctionCondition) -> bool {
-    config.OpenConditionId == 0
+    let action_gated = ctx
+        .assets
+        .is_some_and(|a| a.indexes.is_action_opened_function(config.FunctionId));
+    (config.OpenConditionId == 0 && !action_gated)
         || config.FunctionId == 10026010
         || ctx.quest_comp.info.has_unlocked_system(config.FunctionId)
-        || eval_condition_group(ctx, config.OpenConditionId)
+        || (config.OpenConditionId != 0 && eval_condition_group(ctx, config.OpenConditionId))
 }
 
 pub fn is_function_open(ctx: &EvalContext<'_>, function_id: i32) -> bool {
@@ -2087,9 +2090,10 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
                     .iter()
                     .find(|fc| fc.FunctionId == sid)
             {
+                let action_gated = a.indexes.is_action_opened_function(fc.FunctionId);
                 open = fc.FunctionId == 10053
-                    || fc.OpenConditionId == 0
-                    || eval_condition_group(ctx, fc.OpenConditionId);
+                    || (fc.OpenConditionId == 0 && !action_gated)
+                    || (fc.OpenConditionId != 0 && eval_condition_group(ctx, fc.OpenConditionId));
             }
             if is_ne { !open } else { open }
         }

@@ -4144,3 +4144,292 @@ fn audit_117_scene_loading_finish_defers_spatial_spawns_and_skips_duplicate_logi
     assert!(sc.take_due_deferred_spatial_spawns(now_ms + 500));
     assert!(sc.deferred_spatial_spawns_at_ms.is_none());
 }
+
+#[test]
+fn audit_118_issue3_prologue_open_system_reach_area_flow_skip_echo_and_collectibles() {
+    use sonoro_proto::pb::{
+        EntityInteractRequest, EntityRemoveNotify, FlowEndRequest, FlowServerSkipNotify,
+        FlowShowEntityNotify,
+    };
+
+    let mut h = TestHarness::new("audit118", Some(8));
+    let mut events = EventQueue::new();
+
+    // 1. OpenSystemFunction systems remain locked on a fresh account even when OpenConditionId == 0.
+    {
+        let eval_ctx = h.state.eval_context();
+        assert!(condition_helper_is_open(&eval_ctx, 10001));
+        for gated_id in [10007, 10031, 10036, 10001003] {
+            assert!(
+                !condition_helper_is_open(&eval_ctx, gated_id),
+                "system {gated_id} should stay locked before OpenSystemFunction action"
+            );
+        }
+    }
+    assert!(h.state.player_components.quest.info.unlock_system(10036));
+    assert!(condition_helper_is_open(&h.state.eval_context(), 10036));
+
+    // 2. Quest 139000025 node 19 completion advances to ParallelSelect 23 (child node 4), not node 21.
+    quest_engine::tree::activate_quest(&mut h.state.quest_context(&mut events), 139_000_025, false)
+        .expect("activate 139000025");
+    {
+        let sc = h.state.scene.as_mut().unwrap();
+        sc.set_active_flow(1, 139_000_025, 19, "剧情_新主线_CE版_序章", 1, 1);
+    }
+    quest_engine::on_flow_end_with_options(
+        &mut h.state.quest_context(&mut events),
+        1,
+        &BTreeMap::new(),
+        true,
+    )
+    .expect("finish node 19 flow");
+    let aq_prologue = h
+        .state
+        .player_components
+        .quest
+        .info
+        .find_active_quest(139_000_025)
+        .expect("prologue remains active");
+    assert!(aq_prologue.is_node_finished(19));
+    assert!(
+        aq_prologue.is_node_active(4) || aq_prologue.is_node_active(23),
+        "expected node 19 to advance into ParallelSelect 23 / child 4, got active={:?}",
+        aq_prologue.active_nodes
+    );
+    assert!(
+        !aq_prologue.is_node_active(21),
+        "node 19 must not jump straight to node 21"
+    );
+
+    // 3. Flow skip transitioning directly into another flow still emits FlowServerSkipNotify,
+    //    and HideByRangeInFlow's __flow_range hidden group is restored when the flow ends.
+    h.drain_count();
+    {
+        let sc = h.state.scene.as_mut().unwrap();
+        sc.set_active_flow(10, 139_000_025, 4, "FlowA", 1, 1);
+        sc.client_black_screen_open = true;
+        sc.enqueue_pending_flow(139_000_025, 4, "FlowB", 2, 1);
+    }
+    let hide_range_act: Value = serde_json::from_str(
+        r#"{"Name":"HideByRangeInFlow","Params":{"Center":{"X":0,"Y":0,"Z":0},"Radius":500,"EntityIds":[139800002]}}"#,
+    )
+    .unwrap();
+    execute_action(
+        &mut h.state.quest_context(&mut events),
+        &mut ActionCallbacks::default(),
+        139_000_025,
+        4,
+        &hide_range_act,
+    )
+    .expect("HideByRangeInFlow");
+    assert!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .world
+            .hidden_groups
+            .iter()
+            .any(|g| g.group_key == "__flow_range")
+    );
+    let _ = h.drain_count();
+
+    crate::network::handlers::flow::handle_flow_end_request(
+        &mut h.state,
+        &mut events,
+        FlowEndRequest {
+            FlowIncId: 10,
+            OptionInfos: BTreeMap::new(),
+            IsSkip: true,
+            ..Default::default()
+        },
+    )
+    .expect("chained skip flow end");
+    let push_ids = h.drain_push_msg_ids();
+    assert!(
+        push_ids.contains(&FlowServerSkipNotify::MSG_ID),
+        "chained SkipPlot transition must emit FlowServerSkipNotify to clear FadeOutScreen"
+    );
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .world
+            .hidden_groups
+            .iter()
+            .any(|g| g.group_key == "__flow_range"),
+        "__flow_range must be cleared on flow end/skip"
+    );
+    assert!(
+        push_ids.contains(&FlowShowEntityNotify::MSG_ID),
+        "restoring __flow_range should push FlowShowEntityNotify"
+    );
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .world
+            .hidden_entities
+            .contains(&139_800_002),
+        "restoring __flow_range must remove hidden entities mark"
+    );
+
+    // 4. ReachArea uses true 3D sphere even when Range > 3000 (node 13 vs node 140).
+    let qnodes_139 = h
+        .state
+        .assets
+        .quest_nodes
+        .get_owner_nodes(139_000_025)
+        .expect("139000025 nodes");
+    let node13 = qnodes_139.iter().find(|n| n.id == 13).expect("node 13");
+    let cond13 = node13
+        .data
+        .get("Condition")
+        .and_then(|v| v.as_object())
+        .expect("node 13 Condition");
+    assert!(
+        !quest_engine::triggers::matches_reach_area_pub(
+            &mut h.state.quest_context(&mut events),
+            139_000_025,
+            &node13.data,
+            cond13,
+            [-114_191.45, 71_894.34, 13_479.53],
+        ),
+        "node 13 must not trigger 84m vertically above Z=5077 outside 3D sphere"
+    );
+    assert!(quest_engine::triggers::matches_reach_area_pub(
+        &mut h.state.quest_context(&mut events),
+        139_000_025,
+        &node13.data,
+        cond13,
+        [-110_030.0, 73_280.0, 5_200.0],
+    ));
+
+    // 5. VisionCapture Disabled=true suppresses drop/phantom, while invalid level VisionCaptureId
+    //    (139800002 -> 391090005) falls back to template ID present in CalabashDevelopReward (390077021).
+    let (disabled_mob_nid, fallback_boss_nid) = {
+        let mut s1 = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 1,
+                config_id: 310_000_578,
+                config_type: ConfigType::Level,
+                entity_type: EntityType::Monster,
+                state: EntityState::Default,
+            },
+        );
+        s1.position = Some(PositionComponent {
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+        });
+        let mut s2 = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 1,
+                config_id: 139_800_002,
+                config_type: ConfigType::Level,
+                entity_type: EntityType::Monster,
+                state: EntityState::Default,
+            },
+        );
+        s2.position = Some(PositionComponent {
+            location: [100.0, 200.0, 300.0],
+            rotation: [0.0; 3],
+        });
+        let sc = h.state.scene.as_mut().unwrap();
+        let e1 = sc.spawn(s1).net_id;
+        let e2 = sc.spawn(s2).net_id;
+        (e1, e2)
+    };
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut lp_ctx = level_play::LevelPlayContext::from_quest_ctx(&mut qctx).expect("lp ctx");
+        level_play::on_entity_killed(&mut lp_ctx, disabled_mob_nid, Some(310_000_578))
+            .expect("kill disabled mob");
+    }
+    assert!(
+        !h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .entities
+            .iter()
+            .any(|e| e.world_item.monster_capture.is_some()),
+        "Disabled VisionCaptureComponent must not spawn an Echo phantom"
+    );
+
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut lp_ctx = level_play::LevelPlayContext::from_quest_ctx(&mut qctx).expect("lp ctx");
+        level_play::on_entity_killed(&mut lp_ctx, fallback_boss_nid, Some(139_800_002))
+            .expect("kill 139800002");
+    }
+    let phantom = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .entities
+        .iter()
+        .find_map(|e| e.world_item.monster_capture.as_ref())
+        .expect("139800002 should spawn Echo phantom using valid template VisionCaptureId");
+    assert_eq!(phantom.monster_id, 39_0077_021);
+
+    // 6. Collectible interaction (Collect106 102001084 with RefreshComponent) removes entity from scene,
+    //    sets cooldown, and does not stick permanently in hidden_entities.
+    let collect_nid = {
+        let mut s = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 2,
+                config_id: 102_001_084,
+                config_type: ConfigType::Level,
+                entity_type: EntityType::SceneItem,
+                state: EntityState::Default,
+            },
+        );
+        s.position = Some(PositionComponent {
+            location: [0.0; 3],
+            rotation: [0.0; 3],
+        });
+        h.state.scene.as_mut().unwrap().spawn(s).net_id
+    };
+    let _ = h.drain_count();
+    let resp = scene::handle_entity_interact_request(
+        &mut h.state,
+        &mut events,
+        EntityInteractRequest {
+            EntityId: collect_nid,
+            OptionIndex: 0,
+            ..Default::default()
+        },
+    )
+    .expect("interact collectible");
+    assert_eq!(resp.ErrorCode, Some(ErrorCode::Success));
+    assert!(h.state.scene.as_ref().unwrap().entity(collect_nid).is_none());
+    let removes: Vec<EntityRemoveNotify> = h.drain_decoded(EntityRemoveNotify::MSG_ID);
+    assert!(
+        removes
+            .iter()
+            .any(|n| n.RemoveInfos.iter().any(|ri| ri.EntityId == collect_nid))
+    );
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .world
+            .hidden_entities
+            .contains(&102_001_084),
+        "repeatable RefreshComponent collectible should use cooldown, not permanent hidden_entities"
+    );
+}
+
+fn condition_helper_is_open(
+    ctx: &sonoro_gamesv_logic::helpers::condition::EvalContext<'_>,
+    function_id: i32,
+) -> bool {
+    sonoro_gamesv_logic::helpers::condition::is_function_open(ctx, function_id)
+}

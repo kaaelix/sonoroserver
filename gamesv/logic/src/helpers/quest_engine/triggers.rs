@@ -3040,8 +3040,8 @@ fn check_point(pt: &Map<String, Value>, pos: [f32; 3], range: f32) -> bool {
     let tz = json_float(pt.get("Z")).unwrap_or(pos[2]);
     let dx = pos[0] - tx;
     let dy = pos[1] - ty;
-    let dz = (pos[2] - tz).abs();
-    (dx * dx + dy * dy <= range * range) && (dz <= range.max(3000.0))
+    let dz = pos[2] - tz;
+    dx * dx + dy * dy + dz * dz <= range * range
 }
 
 pub fn matches_quest_interact_starter<S: PushSink + ?Sized>(

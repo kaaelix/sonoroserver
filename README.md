@@ -6,10 +6,13 @@ Wuthering Waves 3.8 server emulator in Rust.
 
 Run `launch.bat`, choose `1. Connect Server`, and enter the server IP.
 No Rust, compiler, or `assets.db` required.
+In-game, open the server list and pick `Local Server`.
 
 ## Client (Android)
 
-Coming soon.
+Use [SonoroLauncher](https://github.com/kaaelix/sonorolauncher) (`Android 8.0+`, `arm64-v8a`, requires Shizuku or Root).
+Choose `Connect Server` (enter server IP or proxy link) or `Local Server` (`Solo` / `Co-op` on-device) and tap `Start`.
+In-game, open the server list and pick `Local Server`.
 
 ## Host (Windows)
 

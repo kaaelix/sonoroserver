@@ -572,8 +572,8 @@ fn check_point(pt: &Map<String, Value>, pos: [f32; 3], range: f32) -> bool {
     let tz = json_float(pt.get("Z")).unwrap_or(pos[2]);
     let dx = pos[0] - tx;
     let dy = pos[1] - ty;
-    let dz = (pos[2] - tz).abs();
-    (dx * dx + dy * dy <= range * range) && (dz <= range.max(3000.0))
+    let dz = pos[2] - tz;
+    dx * dx + dy * dy + dz * dz <= range * range
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2196,6 +2196,43 @@ fn record_world_respawn_cooldown<S: PushSink + ?Sized>(
     ctx.scene.save_instance(ctx.fs)
 }
 
+fn resolve_valid_vision_capture_id(assets: &Assets, resolved: &ResolvedEntityConfig) -> i32 {
+    if resolved
+        .components
+        .VisionCaptureComponent
+        .as_ref()
+        .is_some_and(|vc| vc.Disabled.unwrap_or(false))
+    {
+        return 0;
+    }
+    let has_calabash_entry =
+        |id: i32| id > 0 && assets.tables.calabash_develop_reward.get_data_by_id(&id).is_some();
+
+    if let Some(id) = resolved
+        .components
+        .VisionCaptureComponent
+        .as_ref()
+        .and_then(|vc| vc.VisionCaptureId)
+        .filter(|&id| has_calabash_entry(id))
+    {
+        return id;
+    }
+
+    if let Some(tpl) = assets.find_template_config(&resolved.blueprint_type)
+        && let Some(id) = tpl
+            .ComponentsData
+            .VisionCaptureComponent
+            .as_ref()
+            .filter(|vc| !vc.Disabled.unwrap_or(false))
+            .and_then(|vc| vc.VisionCaptureId)
+            .filter(|&id| has_calabash_entry(id))
+    {
+        return id;
+    }
+
+    0
+}
+
 pub fn spawn_vision_capture_phantom<S: PushSink + ?Sized>(
     ctx: &mut LevelPlayContext<'_, S>,
     killed_net_id: i64,
@@ -2309,12 +2346,7 @@ pub fn on_entity_killed<S: PushSink + ?Sized>(
                 .as_ref()
                 .and_then(|rc| rc.RewardId)
                 .unwrap_or(0);
-            let vision_id = resolved
-                .components
-                .VisionCaptureComponent
-                .as_ref()
-                .and_then(|vc| vc.VisionCaptureId)
-                .unwrap_or(0);
+            let vision_id = resolve_valid_vision_capture_id(ctx.assets, &resolved);
             let is_monster = resolved.blueprint_type.contains("Monster");
             let is_boss = resolved.blueprint_type.contains("Boss")
                 || resolved.blueprint_type.contains("Elite");
@@ -2482,7 +2514,8 @@ pub fn on_entity_interact_fallback<S: PushSink + ?Sized>(
 
     let is_collectible = resolved.components.RewardComponent.is_some()
         && (resolved.blueprint_type.contains("Collect")
-            || resolved.blueprint_type.contains("Pick"));
+            || resolved.blueprint_type.contains("Pick")
+            || resolved.components.CollectComponent.is_some());
 
     if is_collectible {
         let now_ms = now_millis();

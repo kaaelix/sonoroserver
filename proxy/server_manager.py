@@ -80,11 +80,14 @@ _PAYLOAD_CACHE: dict[str, bytes] = {}
 _PAYLOAD_LOCK = threading.Lock()
 _ACCOUNT_SEX_CACHE: dict[str, int] = {"597938510": 1}
 _ACCOUNT_CACHE_LOCK = threading.Lock()
+# Direct internal HTTP client that ignores Windows/Linux HTTP_PROXY env vars
+# so local forwarding never routes back through :8080.
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def _sync_loginsv_async(target_url: str, user_id: str) -> None:
     try:
-        with urllib.request.urlopen(target_url, timeout=2) as sv_resp:
+        with _NO_PROXY_OPENER.open(target_url, timeout=2) as sv_resp:
             sv_data = json.loads(sv_resp.read().decode("utf-8"))
             sex = sv_data.get("sex", -1)
             if sex is not None and sex >= 0:
@@ -225,7 +228,7 @@ def _proxy_to_gm_upstream(
                 headers[k] = v
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with _NO_PROXY_OPENER.open(req, timeout=10) as resp:
             ctype = resp.headers.get("Content-Type", "application/json; charset=utf-8")
             return resp.status, ctype, resp.read()
     except urllib.error.HTTPError as e:
@@ -430,7 +433,7 @@ class LoginHandler(BaseHTTPRequestHandler):
                 else:
                     print(f"login:{LOGIN_PORT} sync loginsv: {target_url}")
                     try:
-                        with urllib.request.urlopen(target_url, timeout=1.5) as sv_resp:
+                        with _NO_PROXY_OPENER.open(target_url, timeout=1.5) as sv_resp:
                             sv_data = json.loads(sv_resp.read().decode("utf-8"))
                             sv_code = sv_data.get("code", 0)
                             account_sex = sv_data.get("sex", -1)
@@ -488,7 +491,7 @@ class LoginHandler(BaseHTTPRequestHandler):
                 content_length = _parse_content_length(self.headers)
                 post_body = self.rfile.read(content_length) if content_length > 0 else None
                 req = urllib.request.Request(target_url, data=post_body, method="POST")
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with _NO_PROXY_OPENER.open(req, timeout=5) as resp:
                     resp_data = resp.read()
                     data = json.loads(resp_data.decode("utf-8"))
                     data["udpHosts"] = [{"host": target_host, "port": GATEWAY_PORT}]
@@ -707,7 +710,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             }
             req = urllib.request.Request(url, data=body, headers=headers, method=self.command)
 
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with _NO_PROXY_OPENER.open(req, timeout=30) as resp:
                 self.send_response(resp.status)
                 has_cl = False
                 for k, v in resp.getheaders():

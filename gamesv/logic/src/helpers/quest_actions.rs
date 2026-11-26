@@ -2621,6 +2621,18 @@ fn apply_hide_by_range_in_flow<S: PushSink + ?Sized>(
     Ok(())
 }
 
+pub(crate) fn restore_flow_range_hidden_group<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+) -> io::Result<()> {
+    let Some(rec) = ctx.quest_comp.info.pop_hidden_group("__flow_range") else {
+        return Ok(());
+    };
+    if !rec.entity_ids.is_empty() {
+        send_quest_entity_visibility(ctx, &rec.entity_ids, true)?;
+    }
+    Ok(())
+}
+
 fn restore_all_hidden_groups<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
 ) -> io::Result<()> {
@@ -4085,7 +4097,35 @@ fn apply_interact_collect_or_reward<S: PushSink + ?Sized>(
     if is_lp_reward && cfg_id > 0 {
         apply_entity_state_change(ctx, callbacks, cfg_id, "关卡.Common.状态.激活")?;
     }
-    if is_collect || is_sun_spirit {
+    if is_collect && has_refresh && cfg_id > 0 {
+        // Repeatable collectibles with RefreshComponent rely on respawn cooldown;
+        // do not persist them in permanent world.hidden_entities.
+        if let Some(scene) = ctx.scene.as_deref_mut() {
+            let mut to_remove = Vec::new();
+            for storage in &scene.entities {
+                if storage.config.config_id == cfg_id {
+                    to_remove.push(storage.net_id);
+                }
+            }
+            if !to_remove.is_empty() {
+                let mut remove_infos = Vec::with_capacity(to_remove.len());
+                for net_id in to_remove {
+                    scene.remove(ctx.fs, net_id)?;
+                    remove_infos.push(EntityRemoveInfo {
+                        EntityId: net_id,
+                        Type: Some(ERemoveEntityType::RemoveTypeNormal),
+                    });
+                }
+                ctx.sink.push(
+                    EntityRemoveNotify::MSG_ID,
+                    &EntityRemoveNotify {
+                        RemoveInfos: remove_infos,
+                        IsRemove: true,
+                    },
+                );
+            }
+        }
+    } else if is_collect || is_sun_spirit {
         apply_destroy_self(ctx)?;
     }
     Ok(())

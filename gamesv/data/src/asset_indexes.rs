@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use crate::assets_db::AssetsDb;
@@ -115,6 +115,7 @@ pub struct AssetIndexes {
     pub blueprint_by_type: HashMap<String, u32>,
     pub template_by_type: HashMap<String, u32>,
     pub entity_groups_by_member: HashMap<MapEntityKey, Vec<EntityGroupSpec>>,
+    pub action_opened_functions: HashSet<i32>,
 }
 
 impl AssetIndexes {
@@ -135,6 +136,9 @@ impl AssetIndexes {
         build_level_entity_indexes_from_db(db, &mut out).map_err(|e| e.to_string())?;
         build_teleporter_index(tables.teleporter.as_slice(), &mut out);
         build_level_play_indexes(tables.level_play_data.as_slice(), &mut out);
+        if let Ok(fids) = db.query_action_opened_function_ids() {
+            out.action_opened_functions.extend(fids);
+        }
         Ok(out)
     }
 
@@ -232,6 +236,10 @@ impl AssetIndexes {
 
     pub fn level_play_indices_for_reward_entity(&self, entity_id: i32) -> &[u32] {
         self.level_plays_by_reward_entity.get(entity_id)
+    }
+
+    pub fn is_action_opened_function(&self, function_id: i32) -> bool {
+        self.action_opened_functions.contains(&function_id)
     }
 }
 

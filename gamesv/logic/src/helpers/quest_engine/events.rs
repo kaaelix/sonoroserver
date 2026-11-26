@@ -2672,20 +2672,7 @@ pub fn on_flow_end_with_options<S: PushSink + ?Sized>(
                 IsFinished: true,
             },
         );
-
-        if matched_qid == PROLOGUE_QUEST_ID && matched_nid == 19 {
-            if let Some(scene) = ctx.scene.as_deref_mut() {
-                scene.prologue_flow_started = true;
-                prologue_quest::transition_node(ctx.sink, scene, 19, 21);
-            }
-            if let Some(aq_ptr) = ctx.quest_comp.info.find_active_quest_mut(PROLOGUE_QUEST_ID) {
-                aq_ptr.mark_node_inactive(19);
-                aq_ptr.mark_node_active(21);
-            }
-            ctx.quest_comp.info.mark_node_finished(PROLOGUE_QUEST_ID, 19);
-            finalize_progression(ctx)?;
-            return Ok(());
-        }
+        quest_actions::restore_flow_range_hidden_group(ctx)?;
 
         let interact_blocked_cancel =
             !is_skip && replay.has_finish_do_interact && !replay.finish_do_interact_executed;
