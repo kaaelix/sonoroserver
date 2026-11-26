@@ -242,6 +242,7 @@ pub fn handle_scene_loading_finish_request(
         scene.scene_loading_finished = true;
         let run_deferred = scene.deferred_join_sync_pending;
         scene.deferred_join_sync_pending = false;
+        let already_login_synced = std::mem::take(&mut scene.login_world_synced);
         let player_loc = scene.instance.players.first().map(|p| p.location);
         if let Some(loc) = player_loc {
             scene.last_spatial_check_loc = loc;
@@ -250,7 +251,7 @@ pub fn handle_scene_loading_finish_request(
         let deferred_flow = scene.deferred_join_flow.take();
 
         super::flow::clear_client_black_screen_if_idle(state);
-        if run_deferred {
+        if run_deferred && !already_login_synced {
             let mut qctx = state.quest_context(events);
             quest_actions::sync_world_state_on_join(&mut qctx).map_err(|e| e.to_string())?;
             if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx) {

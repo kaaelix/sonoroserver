@@ -245,6 +245,8 @@ pub struct Scene {
     pub join_scene_pushed: bool,
     pub scene_loading_finished: bool,
     pub deferred_join_sync_pending: bool,
+    pub login_world_synced: bool,
+    pub deferred_spatial_spawns_at_ms: Option<i64>,
     pub deferred_join_flow: Option<DeferredJoinFlow>,
     pub next_entity_id: i64,
     pub plot_added_rover_slot: Option<usize>,
@@ -333,6 +335,8 @@ impl Scene {
             join_scene_pushed: false,
             scene_loading_finished: false,
             deferred_join_sync_pending: false,
+            login_world_synced: false,
+            deferred_spatial_spawns_at_ms: None,
             deferred_join_flow: None,
             next_entity_id: 1,
             plot_added_rover_slot: None,
@@ -972,6 +976,29 @@ impl Scene {
                 EntityId: entry.entity_id,
                 Type: Some(entry.remove_type),
             });
+        }
+    }
+
+    pub fn schedule_deferred_spatial_spawns(&mut self, due_ms: i64) {
+        self.deferred_spatial_spawns_at_ms = Some(match self.deferred_spatial_spawns_at_ms {
+            Some(cur) => cur.min(due_ms),
+            None => due_ms,
+        });
+    }
+
+    pub fn next_deferred_spatial_spawns_delay_ms(&self, now_ms: i64) -> Option<i64> {
+        self.deferred_spatial_spawns_at_ms.map(|due| due - now_ms)
+    }
+
+    pub fn take_due_deferred_spatial_spawns(&mut self, now_ms: i64) -> bool {
+        if self
+            .deferred_spatial_spawns_at_ms
+            .is_some_and(|due| due <= now_ms)
+        {
+            self.deferred_spatial_spawns_at_ms = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -1805,7 +1832,8 @@ impl Scene {
         let fsm = self.fsm_wakes.next_wake_delay_ms(now_ms);
         let quest = self.next_quest_wake_delay_ms(now_ms);
         let pending = self.pending_update_wake_delay_ms(now_ms);
-        [fsm, quest, pending].into_iter().flatten().min()
+        let spatial = self.next_deferred_spatial_spawns_delay_ms(now_ms);
+        [fsm, quest, pending, spatial].into_iter().flatten().min()
     }
 
     pub fn entity_attribute_and_tags(&self, net_id: i64) -> Option<(Option<&crate::component::entity::AttributeComponent>, Option<&TagComponent>)> {

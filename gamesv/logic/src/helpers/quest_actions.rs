@@ -3846,6 +3846,28 @@ pub fn ensure_quest_entity_spawned<S: PushSink + ?Sized>(
             emit_entity_state_tag_update_checked(scene, Some(ctx.assets), ctx.sink, nid, upd);
         }
     }
+
+    if let Some(scene) = ctx.scene.as_deref_mut() {
+        let cfg64 = i64::from(entity_config_id);
+        if scene.join_scene_pushed {
+            let _ = crate::helpers::quest_engine::sync_dynamic_interact_options_for_entity(
+                scene,
+                ctx.assets,
+                ctx.sink,
+                &ctx.quest_comp.info,
+                ctx.progress_comp.as_deref(),
+                cfg64,
+            );
+        } else {
+            let _ = crate::helpers::quest_engine::register_dynamic_interact_options_for_entity(
+                scene,
+                ctx.assets,
+                &ctx.quest_comp.info,
+                ctx.progress_comp.as_deref(),
+                cfg64,
+            );
+        }
+    }
 }
 
 fn apply_destroy_entity<S: PushSink + ?Sized>(

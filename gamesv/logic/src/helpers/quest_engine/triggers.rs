@@ -1948,8 +1948,40 @@ fn sync_dynamic_interact_options_for_entity_mode<S: PushSink + ?Sized>(
         sink,
         quest_info,
         progress_comp,
-        cfg_id,
+        Some(cfg_id),
         push_notifies,
+    )
+}
+
+pub fn sync_active_dynamic_interact_options<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+) -> io::Result<()> {
+    let aq_snap: Vec<(i32, Vec<i32>)> = ctx
+        .quest_comp
+        .info
+        .active_quests
+        .iter()
+        .map(|aq| (aq.quest_id, aq.active_nodes.clone()))
+        .collect();
+    let Some(scene) = ctx.scene.as_deref_mut() else {
+        return Ok(());
+    };
+    for (quest_id, active_nodes) in aq_snap {
+        let Ok(nodes) = ctx.assets.quest_nodes.get_owner_nodes(quest_id) else {
+            continue;
+        };
+        for nid in active_nodes {
+            if let Some(node) = find_node_by_id(&nodes, nid) {
+                push_do_interact_options_for_node(scene, ctx.sink, quest_id, node, None)?;
+            }
+        }
+    }
+    crate::helpers::level_play::sync_active_dynamic_interact_options(
+        scene,
+        ctx.assets,
+        ctx.sink,
+        &ctx.quest_comp.info,
+        ctx.progress_comp.as_deref(),
     )
 }
 

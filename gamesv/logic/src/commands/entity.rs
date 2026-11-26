@@ -399,7 +399,7 @@ fn append_configured_buff_ids(buff_ids: &mut Vec<i64>, components: &Components) 
     }
 }
 
-fn attach_dynamic_interact_infos(scene: &Scene, entity_pb: &mut EntityPb) {
+pub fn attach_dynamic_interact_infos(scene: &Scene, entity_pb: &mut EntityPb) {
     let net_id = entity_pb.Id;
     let mut infos = Vec::new();
     for opt in &scene.dynamic_interact_options {

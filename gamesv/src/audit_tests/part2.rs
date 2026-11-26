@@ -3966,3 +3966,181 @@ fn audit_115_lift_initial_pos_dungeon_level_play_npc_priority_and_batch_spawn() 
     );
     let _ = EnterLevelPlayNotify::MSG_ID;
 }
+
+#[test]
+fn audit_116_join_scene_and_quest_entity_spawn_attach_dynamic_interact_infos() {
+    let mut h = TestHarness::new("audit116", Some(8));
+    let mut events = EventQueue::new();
+
+    {
+        let info = &mut h.state.player_components.quest.info;
+        info.active_quests.push(sonoro_gamesv_fs::quest_info::ActiveQuest {
+            quest_id: 152_750_013,
+            active_nodes: vec![2],
+            finished_nodes: Vec::new(),
+            killed_entities: Vec::new(),
+        });
+        info.active_quests.push(sonoro_gamesv_fs::quest_info::ActiveQuest {
+            quest_id: 880_000_044,
+            active_nodes: vec![4],
+            finished_nodes: Vec::new(),
+            killed_entities: Vec::new(),
+        });
+    }
+
+    // Simulate EnterGame sync_on_login spawning quest target entities prior to JoinSceneNotify.
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::quest_actions::ensure_quest_entity_spawned(
+            &mut qctx,
+            152_750_020,
+        );
+        if let Some(sc) = qctx.scene.as_deref_mut() {
+            sc.instance.players.push(ScenePlayer {
+                id: 1,
+                group_type: 1,
+                location: [305_050.0, 127_199.0, 4_895.0],
+                rotation: [0.0; 3],
+            });
+        }
+    }
+    let _ = h.drain_push_msg_ids();
+
+    scene_logic::notify_join_scene(
+        None,
+        &mut events,
+        &h.state.fs,
+        &h.state.assets,
+        &mut h.state.conn,
+        1,
+        &mut h.state.player_components.scene,
+        &h.state.player_components.basic,
+        &mut h.state.player_components.role,
+        &mut h.state.player_components.weapon,
+        &mut h.state.player_components.motor,
+        &mut h.state.player_components.echo,
+        &mut h.state.player_components.inventory,
+        &mut h.state.player_components.map,
+        &h.state.player_components.quest,
+        &h.state.player_components.progress,
+        h.state.scene.as_mut().unwrap(),
+        &mut h.state.buff_timers,
+    )
+    .expect("notify_join_scene");
+
+    let join_notifies: Vec<JoinSceneNotify> = h.drain_decoded(JoinSceneNotify::MSG_ID);
+    assert_eq!(join_notifies.len(), 1);
+    let aoi_ents = &join_notifies[0]
+        .SceneInfo
+        .as_ref()
+        .expect("SceneInfo")
+        .AoiData
+        .as_ref()
+        .expect("AoiData")
+        .Entities;
+    let npc_pb = aoi_ents
+        .iter()
+        .find(|e| e.ConfigId == 152_750_020)
+        .expect("NPC 152750020 in JoinSceneNotify");
+    let has_join_dyn = npc_pb.ComponentPbs.iter().any(|c| {
+        matches!(
+            &c.ComponentPb,
+            Some(EntityComponentPbComponentPbOneof::InteractComponent(ic))
+                if ic
+                    .DynamicInteractInfos
+                    .iter()
+                    .any(|di| di.OptionGuid == b"60011bf2c6c944dfb768850e90548d0b")
+        )
+    });
+    assert!(
+        has_join_dyn,
+        "JoinSceneNotify must embed quest NPC DynamicInteractInfo inside InteractComponentPb"
+    );
+
+    // After JoinSceneNotify, ensure_quest_entity_spawned for 880000345 must also register & sync its DoInteract option.
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::quest_actions::ensure_quest_entity_spawned(
+            &mut qctx,
+            880_000_345,
+        );
+    }
+    let dyn_notifies: Vec<EntityAddDynamicInteractNotify> =
+        h.drain_decoded(EntityAddDynamicInteractNotify::MSG_ID);
+    assert!(
+        dyn_notifies
+            .iter()
+            .any(|n| n.OptionGuid == b"089ae92a86984afcbb6f230705750e25"),
+        "post-join quest entity spawn must emit EntityAddDynamicInteractNotify for 880000345"
+    );
+
+    // Subsequent on_scene_loading_finish must preserve dynamic interact options idempotently.
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        quest_engine::on_scene_loading_finish(&mut qctx).expect("on_scene_loading_finish");
+    }
+    let scene_ref = h.state.scene.as_ref().unwrap();
+    assert!(
+        scene_ref
+            .find_dynamic_interact_option("60011bf2c6c944dfb768850e90548d0b")
+            .is_some()
+            && scene_ref
+                .find_dynamic_interact_option("089ae92a86984afcbb6f230705750e25")
+                .is_some(),
+        "dynamic interact options must remain registered after scene loading finish"
+    );
+}
+
+#[test]
+fn audit_117_scene_loading_finish_defers_spatial_spawns_and_skips_duplicate_login_sync() {
+    let mut h = TestHarness::new("audit117", Some(8));
+    h.state
+        .player_components
+        .quest
+        .info
+        .progress
+        .entered_level_plays
+        .push(200_700_001);
+    {
+        let sc = h.state.scene.as_mut().unwrap();
+        sc.join_scene_pushed = true;
+        sc.deferred_join_sync_pending = true;
+        sc.login_world_synced = true;
+        sc.instance.players.push(ScenePlayer {
+            id: 1,
+            group_type: 1,
+            location: [305_050.0, 127_199.0, 4_895.0],
+            rotation: [0.0; 3],
+        });
+    }
+    let _ = h.drain_push_msg_ids();
+
+    let req_msg = crate::network::message::Message {
+        header: crate::network::message::Header::Request(crate::network::message::RequestHeader {
+            seq_no: 1,
+            rpc_id: 77,
+            msg_id: SceneLoadingFinishRequest::MSG_ID,
+        }),
+        payload: sonoro_proto::PbMessage::encode_to_vec(&SceneLoadingFinishRequest::default()),
+    };
+    crate::network::handlers::dispatch_message(&mut h.state, &req_msg)
+        .expect("dispatch SceneLoadingFinishRequest");
+
+    let push_ids = h.drain_push_msg_ids();
+    assert!(
+        !push_ids.contains(&BehaviorTreeInfoNotify::MSG_ID),
+        "initial login SceneLoadingFinishRequest must not duplicate LevelPlay BehaviorTreeInfoNotify"
+    );
+    assert!(
+        !push_ids.contains(&EntityAddNotify::MSG_ID),
+        "live SceneLoadingFinishRequest must defer SpatialSpawnsCheck instead of flooding EntityAddNotify ahead of mask4 RPCs"
+    );
+
+    let now_ms = sonoro_gamesv_logic::scene::now_millis();
+    let sc = h.state.scene.as_mut().unwrap();
+    assert!(!sc.login_world_synced);
+    assert!(sc.deferred_spatial_spawns_at_ms.is_some());
+    assert!(!sc.take_due_deferred_spatial_spawns(now_ms));
+    assert!(sc.take_due_deferred_spatial_spawns(now_ms + 500));
+    assert!(sc.deferred_spatial_spawns_at_ms.is_none());
+}

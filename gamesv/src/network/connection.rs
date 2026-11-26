@@ -425,6 +425,20 @@ fn drain_gameplay_deadlines(state: &mut State, now_ms: i64) -> bool {
             scheduled_changed = true;
         }
 
+        let spatial_due = state
+            .scene
+            .as_mut()
+            .is_some_and(|s| s.take_due_deferred_spatial_spawns(now_ms));
+        if spatial_due && budget.can_start() {
+            let mut events = EventQueue::new();
+            events.enqueue(Event::SpatialSpawnsCheck {
+                player_id: state.player_id,
+            });
+            drain_event_queue_best_effort(&mut events, state);
+            budget.complete();
+            scheduled_changed = true;
+        }
+
         while state
             .buff_timers
             .peek_due_ms()
@@ -445,13 +459,15 @@ fn drain_gameplay_deadlines(state: &mut State, now_ms: i64) -> bool {
 fn next_gameplay_wake_delay_ms(state: Option<&State>, now_ms: i64) -> Option<i64> {
     let s = state?;
     let scene = s.scene.as_ref();
-    gameplay_wake_delay_ms(
+    let base = gameplay_wake_delay_ms(
         scene.and_then(|_| s.buff_timers.next_wake_delay_ms(now_ms)),
         scene.and_then(|sc| sc.fsm_wakes.next_wake_delay_ms(now_ms)),
         scene.and_then(|sc| sc.next_quest_wake_delay_ms(now_ms)),
         scene.and_then(|sc| sc.pending_update_wake_delay_ms(now_ms)),
         s.dirty_saves.next_wake_delay_ms(now_ms),
-    )
+    );
+    let spatial = scene.and_then(|sc| sc.next_deferred_spatial_spawns_delay_ms(now_ms));
+    [base, spatial].into_iter().flatten().min()
 }
 
 pub fn gameplay_wake_delay_ms(

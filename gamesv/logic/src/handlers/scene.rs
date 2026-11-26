@@ -1195,12 +1195,29 @@ pub fn notify_join_scene<S: PushSink + ?Sized>(
         }
     }
 
+    for &(net_id, config_id, entity_type) in &entity_snap {
+        if entity_type != EntityType::Player
+            && entity_type != EntityType::PlayerEntity
+            && config_id > 0
+            && !stale_net_ids.contains(&net_id)
+        {
+            let _ = quest_engine::register_dynamic_interact_options_for_entity(
+                scene,
+                assets,
+                &quest_comp.info,
+                Some(progress_comp),
+                i64::from(config_id),
+            );
+        }
+    }
+
     let mut aoi_entities = Vec::with_capacity(scene.entities.len());
     for storage in &scene.entities {
         if stale_net_ids.contains(&storage.net_id) {
             continue;
         }
         let mut pb_ent = storage.to_proto(assets, now_ms);
+        entity_cmd::attach_dynamic_interact_infos(scene, &mut pb_ent);
         if force_hidden_ids.contains(&storage.net_id) {
             pb_ent.IsVisible = false;
             pb_ent.IsActorVisible = false;

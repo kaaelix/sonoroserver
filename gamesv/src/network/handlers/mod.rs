@@ -163,7 +163,23 @@ where
     if let Err(err) = f(state, &mut events, req) {
         tracing::error!("handler failed for msg_id={msg_id}: {err}");
     }
-    drain_event_queue_best_effort(&mut events, state);
+    if msg_id == pb::SceneLoadingFinishRequest::MSG_ID {
+        let mut deferred_spatial = false;
+        let mut immediate = EventQueue::new();
+        while let Some(ev) = events.dequeue() {
+            if matches!(ev, sonoro_gamesv_logic::events::Event::SpatialSpawnsCheck { .. }) {
+                deferred_spatial = true;
+            } else {
+                immediate.enqueue(ev);
+            }
+        }
+        drain_event_queue_best_effort(&mut immediate, state);
+        if deferred_spatial && let Some(scene) = state.scene.as_mut() {
+            scene.schedule_deferred_spatial_spawns(sonoro_gamesv_logic::scene::now_millis() + 350);
+        }
+    } else {
+        drain_event_queue_best_effort(&mut events, state);
+    }
     Ok(())
 }
 

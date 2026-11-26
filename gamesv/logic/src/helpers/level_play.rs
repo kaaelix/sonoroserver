@@ -577,6 +577,25 @@ fn check_point(pt: &Map<String, Value>, pos: [f32; 3], range: f32) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn sync_active_dynamic_interact_options<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    assets: &Assets,
+    sink: &mut S,
+    quest_info: &sonoro_gamesv_fs::quest_info::QuestInfo,
+    progress_comp: Option<&PlayerProgressComponent>,
+) -> io::Result<()> {
+    sync_dynamic_interact_options_for_entity_mode(
+        scene,
+        assets,
+        sink,
+        quest_info,
+        progress_comp,
+        None,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn sync_dynamic_interact_options_for_entity<S: PushSink + ?Sized>(
     scene: &mut Scene,
     assets: &Assets,
@@ -591,7 +610,7 @@ pub fn sync_dynamic_interact_options_for_entity<S: PushSink + ?Sized>(
         sink,
         quest_info,
         progress_comp,
-        cfg_id,
+        Some(cfg_id),
         true,
     )
 }
@@ -603,10 +622,10 @@ pub fn sync_dynamic_interact_options_for_entity_mode<S: PushSink + ?Sized>(
     sink: &mut S,
     quest_info: &sonoro_gamesv_fs::quest_info::QuestInfo,
     progress_comp: Option<&PlayerProgressComponent>,
-    cfg_id: i64,
+    filter_cfg_id: Option<i64>,
     push_notifies: bool,
 ) -> io::Result<()> {
-    if cfg_id <= 0 {
+    if filter_cfg_id.is_some_and(|id| id <= 0) {
         return Ok(());
     }
     for &lp_id in &quest_info.progress.entered_level_plays {
@@ -626,7 +645,7 @@ pub fn sync_dynamic_interact_options_for_entity_mode<S: PushSink + ?Sized>(
                 BtType::BtTypeLevelPlay,
                 lp_id,
                 node,
-                Some(cfg_id),
+                filter_cfg_id,
                 push_notifies,
             )?;
         }

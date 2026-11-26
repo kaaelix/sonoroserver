@@ -241,6 +241,9 @@ pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>) -> io:
     tree::ensure_active_quest_timers_scheduled(ctx)?;
     let _ = quest_actions::sync_world_state_on_join(ctx);
     ensure_active_quest_targets_spawned(ctx);
+    if let Some(scene) = ctx.scene.as_deref_mut() {
+        scene.login_world_synced = true;
+    }
     ctx.quest_comp.save(ctx.fs)?;
     Ok(())
 }
@@ -385,6 +388,7 @@ pub fn on_scene_loading_finish<S: PushSink + ?Sized>(
     }
     reenter_save_blocks_after_login(ctx)?;
     ensure_active_quest_targets_spawned(ctx);
+    triggers::sync_active_dynamic_interact_options(ctx)?;
     tree::ensure_active_quest_timers_scheduled(ctx)?;
     triggers::ensure_tracked_focus_valid(ctx);
     triggers::sync_scene_current_node(ctx);
