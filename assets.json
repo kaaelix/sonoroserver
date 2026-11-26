@@ -7,7 +7,7 @@
   "sha256": "a0dcf3b1e31f3b3c98c556a013e080dc53b66de14d13ce6ca24cc54f337df11e",
   "url": "https://github.com/kaaelix/sonoroserver/releases/download/assets-db/assets.db",
   "server": {
-    "version": "3.8.0-20261126-6",
+    "version": "3.8.0-20261126-7",
     "exclude": [
       "assets/BinData/",
       "assets/assets.db"
@@ -473,7 +473,7 @@
       "gamesv/src/network/mod.rs": "137d1d974f6c985d526fbf6a889f4e0e27a471b713646fb026ba4728f0f0978a",
       "gamesv/src/network/session_supervisor.rs": "e1aa5ab0757071413c95c8a33fa3cb5167d3e43a4bd6b53e6954b1dcee89d35e",
       "gamesv/src/network/state.rs": "4a9ac02ac72acb665d31cd70fa7ffe383befd2985391bb7589b3c6d409b6194a",
-      "launch.bat": "7add88fc5fb942d288511c01e8dfc4695f18b53329d66ca9af1751445ad6826b",
+      "launch.bat": "3af3f5a130830b65fe2940e43f7ae20bb660fdd6e10f27c72fa30a4d5661fcc0",
       "loginsv/Cargo.toml": "0b26aa0f9c561558bbda2197da34d1d21409a1d811c02d343f59b229566340a6",
       "loginsv/src/account.rs": "3f012c3a9baadf60db52864ca7d13f1a3535aaa10ca39f41b022c52d169f3e5d",
       "loginsv/src/main.rs": "fa97dadcc6ff8fb07589ea2c1043086306f3879894d57d1a701fd50910fac4e9",
@@ -519,7 +519,8 @@
       "services/aki-logic/src/lib.rs": "9316ce223f4f474969a18815fd3f4b3c4aca33a13464ec28ce1f98dad91aa005",
       "services/aki-logic/src/main.rs": "5df4399658534c7fdf94179fd3214eec1c01377b5293a0391cf3cdc3a302825a",
       "services/aki-logic/src/sqlite_store.rs": "cb4e5b04a13bdb0cb1e2acdf464fac90f2d8b16f8733f5356f2424e5a673638d",
-      "start-private-server.sh": "02ba939a4cbb4287d08a7772c239e0bc90cb70b8ee37474979c4aa47f70784a9",
+      "start-private-server.sh": "53083fc90dc404f039a0fe4904ac9c19cd25180ca336fe63c8933569976b52f1",
+      "state/gateway/client_public_key.der": "9d32c1be5103b910b4d3f2629753f270bcc17c76900f9f3e6b1477bc0570fa77",
       "stop-private-server.sh": "0df006cdf9048c2845f960d959acc244331b8dc8ea55a212e43ef3e4ddc8832c"
     }
   }

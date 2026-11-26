@@ -216,7 +216,7 @@ if not local_ver and os.path.exists(os.path.join(root, "assets.json")):
         pass
 req_missing = any(
     not os.path.exists(os.path.join(root, req))
-    for req in ("start-private-server.sh", "stop-private-server.sh", "proxy/server_manager.py", "proxy/modified_3.8_index.json", "proxy/encrypted_3.8_index.b64")
+    for req in ("start-private-server.sh", "stop-private-server.sh", "proxy/server_manager.py", "proxy/modified_3.8_index.json", "proxy/encrypted_3.8_index.b64", "state/gateway/client_public_key.der")
 )
 if not req_missing and local_ver == remote_ver:
     print(f"OK|{remote_ver}")

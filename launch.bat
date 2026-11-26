@@ -508,7 +508,7 @@ function Ensure-ServerProject {
     }
 
     $requiredMissing = $false
-    foreach ($req in @("start-private-server.sh", "stop-private-server.sh", "proxy/server_manager.py", "proxy/modified_3.8_index.json", "proxy/encrypted_3.8_index.b64")) {
+    foreach ($req in @("start-private-server.sh", "stop-private-server.sh", "proxy/server_manager.py", "proxy/modified_3.8_index.json", "proxy/encrypted_3.8_index.b64", "state/gateway/client_public_key.der")) {
         $rp = Join-Path $ServerRoot ($req -replace '/', [System.IO.Path]::DirectorySeparatorChar)
         if (-not (Test-Path -LiteralPath $rp)) {
             $requiredMissing = $true
