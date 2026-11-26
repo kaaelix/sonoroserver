@@ -69,6 +69,7 @@ pub mod giant_delivery_reward;
 pub mod giant_item;
 pub mod gift_package;
 pub mod guide_group;
+pub mod hardness_mode;
 pub mod honami_story_effect;
 pub mod infr_road_build;
 pub mod infr_v2_tree_build;

@@ -231,6 +231,7 @@ pub struct DataTables {
     pub gacha_texture_info: Table<crate::tables::gacha_texture_info::GachaTextureInfo, i32>,
     pub ai_state_machine_config: Table<crate::tables::ai_state_machine_config::AiStateMachineConfig, String>,
     pub ai_base: Table<crate::tables::ai_base::AiBase, i32>,
+    pub hardness_mode: Table<crate::tables::hardness_mode::HardnessMode, i32>,
     pub ai_sense_group: Table<crate::tables::ai_sense_group::AiSenseGroup, i32>,
     pub phantom_item: Table<crate::tables::phantom_item::PhantomItem, i32>,
     pub phantom_skill: Table<crate::tables::phantom_skill::PhantomSkill, i32>,
@@ -501,6 +502,7 @@ impl DataTables {
             load_table_from_disk(base_path, "AiStateMachineConfig.json", |item: &crate::tables::ai_state_machine_config::AiStateMachineConfig| item.Id.clone())?
         };
         let ai_base = load_table(db.as_deref(), base_path, "AiBase.json", "AiBase", |item: &crate::tables::ai_base::AiBase| item.Id)?;
+        let hardness_mode = load_table(db.as_deref(), base_path, "HardnessMode.json", "HardnessMode", |item: &crate::tables::hardness_mode::HardnessMode| item.Id)?;
         let ai_sense_group = load_table(db.as_deref(), base_path, "AiSenseGroup.json", "AiSenseGroup", |item: &crate::tables::ai_sense_group::AiSenseGroup| item.Id)?;
         let phantom_item = load_table(db.as_deref(), base_path, "PhantomItem.json", "PhantomItem", |item: &crate::tables::phantom_item::PhantomItem| item.ItemId)?;
         let phantom_skill = load_table(db.as_deref(), base_path, "PhantomSkill.json", "PhantomSkill", |item: &crate::tables::phantom_skill::PhantomSkill| item.PhantomSkillId)?;
@@ -736,6 +738,7 @@ impl DataTables {
             gacha_texture_info,
             ai_state_machine_config,
             ai_base,
+            hardness_mode,
             ai_sense_group,
             phantom_item,
             phantom_skill,

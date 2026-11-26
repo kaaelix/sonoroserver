@@ -434,6 +434,165 @@ fn sanitize_part_index(scene: &Scene, target_net_id: i64, requested_part: i32) -
     }
 }
 
+fn hardness_mode_multiplier(
+    assets: &Assets,
+    mode_id: i32,
+    damage_type: i32,
+    default_without_mode: f64,
+) -> f64 {
+    let Some(mode) = (mode_id > 0)
+        .then(|| assets.tables.hardness_mode.get_data_by_id(&mode_id))
+        .flatten()
+    else {
+        return default_without_mode;
+    };
+    let pct = f64::from(mode.Percent) / 10_000.0;
+    if pct <= 0.0 {
+        return 0.0;
+    }
+    let skill_param = usize::try_from(damage_type)
+        .ok()
+        .and_then(|idx| mode.SkillTypeParam.get(idx).copied())
+        .unwrap_or(1.0);
+    (pct * skill_param).max(0.0)
+}
+
+fn entity_has_gameplay_tag(
+    storage: &crate::component::entity::EntityComponentStorage,
+    assets: &Assets,
+    target_tag_id: Option<i32>,
+) -> bool {
+    let Some(target_tag_id) = target_tag_id.filter(|&id| id != 0) else {
+        return false;
+    };
+    let parents = &assets.tables.gameplay_tag_parent;
+    if storage
+        .tag
+        .as_ref()
+        .is_some_and(|t| t.has_tag(parents, target_tag_id))
+    {
+        return true;
+    }
+    if storage.fsm.as_ref().is_some_and(|fsm| {
+        fsm.tags.iter().any(|tag| {
+            tag.count > 0
+                && i32::try_from(tag.id)
+                    .is_ok_and(|gid| gameplay_tags::contains(parents, gid, target_tag_id))
+        })
+    }) {
+        return true;
+    }
+    storage.buffs.as_ref().is_some_and(|buffs| {
+        buffs.buffs.iter().any(|info| {
+            info.IsActive
+                && assets
+                    .tables
+                    .buff
+                    .get_data_by_id(&info.BuffId)
+                    .is_some_and(|buff_cfg| {
+                        buff_cfg.GrantedTags.iter().any(|name| {
+                            gameplay_tags::id_from_name(&assets.tables.gameplay_tag_remap, name)
+                                .is_some_and(|gid| gameplay_tags::contains(parents, gid, target_tag_id))
+                        })
+                    })
+        })
+    })
+}
+
+fn apply_hardness_and_rage_on_hit(
+    combat_receive_pack: &mut Vec<CombatReceiveData>,
+    assets: &Assets,
+    damage: &Damage,
+    request: &DamageExecuteRequest,
+    attacker_attr: &AttributeComponent,
+    scene: &mut Scene,
+    target_idx: usize,
+) -> bool {
+    if scene.entities[target_idx].config.entity_type != crate::component::entity::EntityType::Monster
+    {
+        return false;
+    }
+    let hardness_lv = f64::from(level_slice_value(&damage.HardnessLv, request.SkillLevel, 0));
+    if hardness_lv <= 0.0 {
+        return false;
+    }
+
+    let rage_tag_id =
+        gameplay_tags::id_from_name(&assets.tables.gameplay_tag_remap, "功能.功能制作.狂暴生效");
+    let palsy_tag_id =
+        gameplay_tags::id_from_name(&assets.tables.gameplay_tag_remap, "怪物.common.状态标识.瘫痪");
+    let target_storage = &scene.entities[target_idx];
+    let in_rage_mode = entity_has_gameplay_tag(target_storage, assets, rage_tag_id);
+    let is_paralyzed = entity_has_gameplay_tag(target_storage, assets, palsy_tag_id);
+
+    let Some(target_attr) = scene.entities[target_idx].attribute.as_mut() else {
+        return false;
+    };
+
+    let (attr_type, signed_delta) = if in_rage_mode {
+        let rage_max = attributes::get_attr_value(target_attr, EAttributeType::RageMax);
+        let cur_rage = attributes::get_attr_value(target_attr, EAttributeType::Rage);
+        if rage_max <= 0 || cur_rage <= 0 {
+            return false;
+        }
+        let mode_mult =
+            hardness_mode_multiplier(assets, target_attr.rage_mode_id, damage.Type, 1.0);
+        let atk_chg = (1.0
+            + f64::from(attributes::get_attr_value(attacker_attr, EAttributeType::RageChange))
+                / 10_000.0)
+            .max(0.0);
+        let tgt_red = (1.0
+            + f64::from(attributes::get_attr_value(target_attr, EAttributeType::RageReduce))
+                / 10_000.0)
+            .max(0.0);
+        let amount = ((hardness_lv * mode_mult * atk_chg * tgt_red).round() as i32).max(0);
+        let actual = -(amount.min(cur_rage));
+        (EAttributeType::Rage, actual)
+    } else {
+        if is_paralyzed {
+            return false;
+        }
+        let hardness_max = attributes::get_attr_value(target_attr, EAttributeType::HardnessMax);
+        let cur_hardness = attributes::get_attr_value(target_attr, EAttributeType::Hardness);
+        if hardness_max <= 0 || cur_hardness >= hardness_max {
+            return false;
+        }
+        let mode_mult =
+            hardness_mode_multiplier(assets, target_attr.hardness_mode_id, damage.Type, 0.0);
+        let atk_chg = (1.0
+            + f64::from(attributes::get_attr_value(
+                attacker_attr,
+                EAttributeType::HardnessChange,
+            )) / 10_000.0)
+            .max(0.0);
+        let tgt_red = (1.0
+            + f64::from(attributes::get_attr_value(
+                target_attr,
+                EAttributeType::HardnessReduce,
+            )) / 10_000.0)
+            .max(0.0);
+        let amount = ((hardness_lv * mode_mult * atk_chg * tgt_red).round() as i32).max(0);
+        let actual = amount.min(hardness_max - cur_hardness);
+        (EAttributeType::Hardness, actual)
+    };
+
+    if signed_delta == 0 {
+        return false;
+    }
+    let change = attributes::change_attr(
+        target_attr,
+        attr_type,
+        AttributeChangeType::Delta,
+        AttributeValueType::Current,
+        signed_delta,
+    );
+    if change.is_empty() {
+        return false;
+    }
+    attributes::generate_attr_messages(combat_receive_pack, request.TargetEntityId, target_attr, &change);
+    true
+}
+
 pub fn damage_entity(
     combat_receive_pack: &mut Vec<CombatReceiveData>,
     request: &DamageExecuteRequest,
@@ -677,6 +836,21 @@ pub fn damage_entity(
             }
             let _ = scene.append_battle_state_notify(combat_receive_pack);
         }
+    }
+
+    if damage.CalculateType == 0
+        && !killed_target
+        && apply_hardness_and_rage_on_hit(
+            combat_receive_pack,
+            assets,
+            damage,
+            request,
+            &attacker_attr,
+            scene,
+            target_idx,
+        )
+    {
+        scene.mark_fsm_dirty(request.TargetEntityId, wake_reason::ATTRIBUTE);
     }
 
     DamageExecuteNotify {

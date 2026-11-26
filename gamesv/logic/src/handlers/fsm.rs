@@ -273,6 +273,14 @@ pub fn handle_fsm_wake<S: PushSink + ?Sized>(
                 );
                 let _ = fsm.append_dirty_state_transitions(entity_id, &mut data, &eval_ctx);
                 fsm.finish_tick(now_ms);
+                if !fsm.lifecycle_effects().is_empty() {
+                    let _ = fsm_lifecycle::enqueue_effects_without_recheck(
+                        handle,
+                        fsm,
+                        qctx.events,
+                        now_ms,
+                    );
+                }
             }
             deferred
         };
@@ -509,6 +517,9 @@ pub fn handle_fsm_lifecycle_complete<S: PushSink + ?Sized>(
             }
         }
         fsm.finish_tick(now_ms);
+        if !deferred && !fsm.lifecycle_effects().is_empty() {
+            let _ = fsm_lifecycle::enqueue_effects_without_recheck(handle, fsm, events, now_ms);
+        }
     }
     if !data.is_empty() {
         sink.push(

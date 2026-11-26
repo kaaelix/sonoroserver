@@ -158,15 +158,26 @@ pub fn build_short_message_infos(
         if (38000..=38999).contains(&cid) {
             continue;
         }
+        if progress_comp.info.has_claim(&format!("sm:del:{cid}")) {
+            continue;
+        }
+        let unlocked = progress_comp.info.has_claim(&format!("sm:unlock:{cid}"))
+            || progress_comp.info.has_claim(&format!("sm:read:{cid}"))
+            || progress_comp.info.has_claim(&format!("sm:recv:{cid}"))
+            || progress_comp.info.has_claim(&format!("sm:fin:{cid}"));
+        if !unlocked {
+            continue;
+        }
         let saved_last = progress_comp.info.get_key_int(&format!("sm:last:{cid}"));
         let last_cid = if saved_last > 0 { saved_last as i32 } else { cid };
+        let unlock_time = progress_comp.info.get_key_int(&format!("sm:time:{cid}"));
         infos.push(ShortMessageInfo {
             ConfigId: cid,
             LastConfigId: last_cid,
             IsRead: progress_comp.info.has_claim(&format!("sm:read:{cid}")),
             IsReceived: progress_comp.info.has_claim(&format!("sm:recv:{cid}")),
             IsFinish: progress_comp.info.has_claim(&format!("sm:fin:{cid}")),
-            UnlockTime: 1,
+            UnlockTime: if unlock_time > 0 { unlock_time } else { 1 },
             ..Default::default()
         });
     }

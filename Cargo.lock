@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "sonoro-aki-logic"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "getrandom",
  "rusqlite",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "sonoro-cfgsv"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "aes",
  "axum",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "sonoro-common"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "rusqlite",
  "thiserror",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "sonoro-gamesv"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "aes",
  "axum",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "sonoro-gamesv-data"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "rusqlite",
  "serde",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "sonoro-gamesv-fs"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "sonoro-common",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "sonoro-gamesv-logic"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "base64",
  "serde",
@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "sonoro-loginsv"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "axum",
  "serde",
@@ -720,11 +720,11 @@ dependencies = [
 
 [[package]]
 name = "sonoro-proto"
-version = "0.1.3"
+version = "0.1.4"
 
 [[package]]
 name = "sonoro-tools"
-version = "0.1.3"
+version = "0.1.4"
 
 [[package]]
 name = "syn"

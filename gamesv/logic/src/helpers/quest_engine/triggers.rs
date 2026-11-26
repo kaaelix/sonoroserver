@@ -3442,7 +3442,28 @@ pub fn is_schedule_time_window_match(
     cur_total >= start_total
 }
 
-pub fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
+pub fn matches_prologue_single_role_switch_guide<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    quest_id: i32,
+    guide_group_id: i32,
+) -> bool {
+    if quest_id != PROLOGUE_QUEST_ID || !matches!(guide_group_id, 10043 | 10044) {
+        return false;
+    }
+    ctx.scene.as_deref().is_some_and(|scene| {
+        let idx = usize::try_from(scene.formation_info.cur_formation).unwrap_or(0);
+        scene.formation_info.formations.get(idx).is_some_and(|f| {
+            f.roles
+                .iter()
+                .flatten()
+                .filter(|fr| fr.entity_id > 0 && fr.role_id > 0)
+                .count()
+                < 2
+        })
+    })
+}
+
+pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
     ctx: &QuestContext<'_, S>,
     quest_id: i32,
     node: &NodeEntry,
@@ -3516,11 +3537,15 @@ pub fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
             if GameConfig::embedded().autocomplete_guides {
                 return true;
             }
-            if let Some(gc) = ctx.guide_comp.as_deref() {
-                let gid = json_int(cond.get("GuideGroupId")).unwrap_or(0);
-                if gid > 0 && gc.info.has_finished(gid) {
-                    return true;
-                }
+            let gid = json_int(cond.get("GuideGroupId")).unwrap_or(0);
+            if matches_prologue_single_role_switch_guide(ctx, quest_id, gid) {
+                return true;
+            }
+            if let Some(gc) = ctx.guide_comp.as_deref()
+                && gid > 0
+                && gc.info.has_finished(gid)
+            {
+                return true;
             }
             false
         }

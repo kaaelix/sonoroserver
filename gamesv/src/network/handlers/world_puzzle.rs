@@ -1265,6 +1265,12 @@ pub fn handle_hardness_mode_changed_request(
     state: &mut State,
     req: HardnessModeChangedRequest,
 ) -> Result<HardnessModeChangedResponse, String> {
+    if let Some(scene) = state.scene.as_mut()
+        && let Some(handle) = scene.entity_handle(req.EntityId)
+        && let Some(attr) = scene.entities[handle.index].attribute.as_mut()
+    {
+        attr.hardness_mode_id = req.HardnessModeId;
+    }
     pb_kv::persist_int(
         &state.fs,
         &mut state.player_components.progress,

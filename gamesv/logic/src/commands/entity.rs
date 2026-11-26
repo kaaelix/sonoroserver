@@ -243,17 +243,6 @@ fn initial_tag_component(
                 result.entity_common_tags.push(fight_tag_id);
             }
         }
-        if let Some(attr) = &components.AttributeComponent
-            && attr.RageModeId.unwrap_or(0) > 0
-            && let Some(rage_tag_id) =
-                gameplay_tags::id_from_name(tag_remaps, "功能.功能制作.狂暴生效")
-            && rage_tag_id != 0
-        {
-            result.add_tag(rage_tag_id, 1);
-            if !result.entity_common_tags.contains(&rage_tag_id) {
-                result.entity_common_tags.push(rage_tag_id);
-            }
-        }
     }
     result
 }
@@ -393,9 +382,6 @@ fn append_configured_buff_ids(buff_ids: &mut Vec<i64>, components: &Components) 
     };
     if let Some(configured_ids) = &attr.AppendBuffIds {
         buff_ids.extend_from_slice(configured_ids);
-    }
-    if attr.RageModeId.unwrap_or(0) > 0 && !buff_ids.contains(&70000045) {
-        buff_ids.push(70000045);
     }
 }
 

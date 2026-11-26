@@ -11,8 +11,8 @@ use sonoro_gamesv_fs::inventory_info::InventoryInfo;
 use sonoro_gamesv_fs::last_scene_info::LastSceneInfo;
 use sonoro_gamesv_fs::quest_info::{QuestInfo, append_unique_int, append_unique_str, remove_int_value, remove_str_value};
 use sonoro_proto::enums::{
-    BtType, ERemoveEntityType, ExitVehicleType, GameCtxType, GravityFlipType, IllustratedType,
-    MoveStatus, SuspendType, TeleportReason,
+    BtType, ChangeReason, ERemoveEntityType, ExitVehicleType, GameCtxType, GravityFlipType,
+    IllustratedType, MoveStatus, SuspendType, TeleportReason,
 };
 use sonoro_proto::pb::{
     AddGuestNotify, AlertArea, AlertAreaNotify, AudioStatePb, AudioStateUpdateNotify,
@@ -31,9 +31,10 @@ use sonoro_proto::pb::{
     RoleTrialCloseNotify, RoleTrialOpenNotify, Rotator, RoverRogueRoomInfoNotify, SceneAreaState,
     SceneAreaStateNotify, SceneChangeDataLayerNotify, SceneItemMoveTargetInfo,
     SceneItemMoveTargetNotify, SceneItemSplineRuntimeData, SceneSubLevelsChangedNotify,
-    SceneTimeInfo, SummonEntityNotify, SyncSceneTimeNotify, TeleportNotify, TeleportUpdateNotify,
-    TemporaryTeleportAllInfoNotify, TimeLockInfoNotify, TrialRoleItem, VarDefinePb,
-    VarDefinePbValueOneof, Vector, VehicleUpdateEntityNotify, VehicleUpdateNotify, WeatherNotify,
+    SceneTimeInfo, ShortMessageInfo, ShortMessageUpdateNotify, SummonEntityNotify,
+    SyncSceneTimeNotify, TeleportNotify, TeleportUpdateNotify, TemporaryTeleportAllInfoNotify,
+    TimeLockInfoNotify, TrialRoleItem, VarDefinePb, VarDefinePbValueOneof, Vector,
+    VehicleUpdateEntityNotify, VehicleUpdateNotify, WeatherNotify,
 };
 use sonoro_proto::wire::PbEnum;
 
@@ -3008,15 +3009,77 @@ fn apply_phone_system_interact<S: PushSink + ?Sized>(
             .get("PhoneRecordActionConfig")
             .and_then(|v| v.as_object())
             && let Some(pmid) = json_int(cfg.get("PhoneMessageId"))
+            && pmid > 0
         {
-            append_unique_int(&mut ctx.quest_comp.info.progress.read_phone_messages, pmid);
-            if let Some(cb) = callbacks.on_phone_message {
-                cb(ctx, pmid, 0)?;
+            let unlock_sec = now_unix_secs();
+            let (newly_unlocked, info_pb) = if let Some(pc) = ctx.progress_comp.as_deref_mut() {
+                pc.info.remove_claim(&format!("sm:del:{pmid}"));
+                let fresh = pc.info.mark_claim(&format!("sm:unlock:{pmid}"));
+                let saved_time = if fresh {
+                    pc.info.set_key_int(&format!("sm:time:{pmid}"), unlock_sec);
+                    unlock_sec
+                } else {
+                    pc.info.get_key_int(&format!("sm:time:{pmid}"))
+                };
+                let saved_last = pc.info.get_key_int(&format!("sm:last:{pmid}"));
+                let _ = pc.save(ctx.fs);
+                (
+                    fresh,
+                    ShortMessageInfo {
+                        ConfigId: pmid,
+                        LastConfigId: if saved_last > 0 { saved_last as i32 } else { pmid },
+                        IsRead: pc.info.has_claim(&format!("sm:read:{pmid}")),
+                        IsReceived: pc.info.has_claim(&format!("sm:recv:{pmid}")),
+                        IsFinish: pc.info.has_claim(&format!("sm:fin:{pmid}")),
+                        UnlockTime: if saved_time > 0 { saved_time } else { unlock_sec },
+                        ..Default::default()
+                    },
+                )
+            } else {
+                (
+                    true,
+                    ShortMessageInfo {
+                        ConfigId: pmid,
+                        LastConfigId: pmid,
+                        UnlockTime: unlock_sec,
+                        ..Default::default()
+                    },
+                )
+            };
+            if newly_unlocked {
+                ctx.sink.push(
+                    ShortMessageUpdateNotify::MSG_ID,
+                    &ShortMessageUpdateNotify {
+                        Adds: vec![info_pb],
+                        Reason: Some(ChangeReason::ActionFinish),
+                        ..Default::default()
+                    },
+                );
             }
         }
     } else if kind == "DeletePhoneMessage" {
-        if let Some(pmid) = json_int(itype.get("PhoneMessageId")) {
+        if let Some(pmid) = json_int(itype.get("PhoneMessageId"))
+            && pmid > 0
+        {
             remove_int_value(&mut ctx.quest_comp.info.progress.read_phone_messages, pmid);
+            let removed = if let Some(pc) = ctx.progress_comp.as_deref_mut() {
+                let was_unlocked = pc.info.remove_claim(&format!("sm:unlock:{pmid}"));
+                pc.info.mark_claim(&format!("sm:del:{pmid}"));
+                let _ = pc.save(ctx.fs);
+                was_unlocked
+            } else {
+                true
+            };
+            if removed {
+                ctx.sink.push(
+                    ShortMessageUpdateNotify::MSG_ID,
+                    &ShortMessageUpdateNotify {
+                        Removes: vec![pmid],
+                        Reason: Some(ChangeReason::ActionFinish),
+                        ..Default::default()
+                    },
+                );
+            }
         }
     } else if let Some(tid) = json_int(itype.get("TelecomId")) {
         append_unique_int(&mut ctx.quest_comp.info.progress.received_telecoms, tid);

@@ -4433,3 +4433,427 @@ fn condition_helper_is_open(
 ) -> bool {
     sonoro_gamesv_logic::helpers::condition::is_function_open(ctx, function_id)
 }
+
+#[test]
+fn audit_119_rage_hardness_switch_guard_and_wavesline_gating() {
+    use sonoro_proto::pb::{
+        HardnessModeChangedRequest, ShortMessageInfoRequest, ShortMessageReadRequest,
+        ShortMessageUpdateNotify,
+    };
+
+    let mut h = TestHarness::new("audit_119", Some(8));
+    let mut events = EventQueue::new();
+
+    // 1. Item 8: spawn + FSM BindBuff drives Rage / 狂暴生效 without hardcoded non-FSM bypass.
+    let rage_tag_id = gameplay_tags::id_from_name(
+        &h.state.assets.tables.gameplay_tag_remap,
+        "功能.功能制作.狂暴生效",
+    )
+    .expect("rage tag id");
+
+    // 2. Item 8 Step B: Damage with HardnessLv > 0 depletes Rage in Rage state (and triggers FSM
+    //    transition 10130 -> 10131 paralysis when Rage hits 0, clearing 70000045 / 狂暴生效), and
+    //    builds Hardness in non-rage HardnessMode when Percent > 0.
+    let mut boss_props = vec![0i32; 144];
+    boss_props[EAttributeType::LifeMax.to_i32() as usize] = 100_000;
+    boss_props[EAttributeType::Life.to_i32() as usize] = 100_000;
+    boss_props[EAttributeType::RageMax.to_i32() as usize] = 200;
+    boss_props[EAttributeType::Rage.to_i32() as usize] = 200;
+    boss_props[EAttributeType::HardnessMax.to_i32() as usize] = 500;
+    boss_props[EAttributeType::Hardness.to_i32() as usize] = 0;
+
+    let mut boss_attr = AttributeComponent::create_with_modes(&boss_props, 101, 1);
+    boss_attr.set_prop(EAttributeType::RageMax, 200);
+    boss_attr.set_prop(EAttributeType::Rage, 200);
+
+    let graph = h
+        .state
+        .assets
+        .fsm_graphs
+        .get("SM_MB1DaniyaMd00101")
+        .expect("SM_MB1DaniyaMd00101 graph");
+
+    let mut boss_storage = EntityComponentStorage::new(
+        0,
+        ConfigComponent {
+            camp: 2,
+            config_id: 1,
+            config_type: ConfigType::Level,
+            entity_type: EntityType::Monster,
+            state: EntityState::Default,
+        },
+    );
+    boss_storage.attribute = Some(boss_attr);
+    boss_storage.buffs = Some(FightBuffComponent::default());
+    boss_storage.logic_state = Some(LogicStateComponent::default());
+    boss_storage.tag = Some(TagComponent::default());
+    boss_storage.part = Some(PartComponent::default());
+    boss_storage.fsm = Some(FsmComponent::from_graph(graph, 0).expect("fsm graph"));
+
+    let boss_nid = h.state.scene.as_mut().unwrap().spawn(boss_storage).net_id;
+    let attacker_nid = {
+        let mut s = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 1,
+                config_id: 1501,
+                config_type: ConfigType::Character,
+                entity_type: EntityType::Player,
+                state: EntityState::Default,
+            },
+        );
+        let mut props = vec![0i32; 144];
+        props[EAttributeType::Atk.to_i32() as usize] = 1000;
+        props[EAttributeType::LifeMax.to_i32() as usize] = 10_000;
+        props[EAttributeType::Life.to_i32() as usize] = 10_000;
+        s.attribute = Some(AttributeComponent::create(&props));
+        s.buffs = Some(FightBuffComponent::default());
+        h.state.scene.as_mut().unwrap().spawn(s).net_id
+    };
+
+    // Give the boss an active hate target so SM_Common 10131 does not immediately de-aggro back to 10130.
+    {
+        let sc = h.state.scene.as_mut().unwrap();
+        sc.update_fsm_hate_target(boss_nid, true);
+        sc.set_fsm_encounter_target(boss_nid, Some(attacker_nid))
+            .expect("set encounter target");
+    }
+
+    // Verify entity spawn did NOT hardcode non-FSM Buff 70000045 before FSM wake runs.
+    assert!(
+        !h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .entity(boss_nid)
+            .unwrap()
+            .tag
+            .as_ref()
+            .unwrap()
+            .has_tag(&h.state.assets.tables.gameplay_tag_parent, rage_tag_id),
+        "Spawn must let FSM apply 狂暴生效 instead of hardcoding it pre-FSM"
+    );
+
+    // Flush initial FSM BindBuff (10130 -> 70000045 -> grants 狂暴生效) via Event::FsmWake.
+    let now_ms = 1_000_000i64;
+    events.enqueue(Event::FsmWake {
+        entity_id: 0,
+        now_ms,
+    });
+    crate::network::connection::drain_event_queue_best_effort(&mut events, &mut h.state);
+
+    let boss_has_rage_buff = {
+        let sc = h.state.scene.as_ref().unwrap();
+        let st = sc.entity(boss_nid).unwrap();
+        st.buffs
+            .as_ref()
+            .unwrap()
+            .get_by_buff_id(70_000_045)
+            .is_some()
+    };
+    assert!(
+        boss_has_rage_buff,
+        "FSM initial state 10130 must apply BindBuff 70000045 -> 狂暴生效"
+    );
+
+    let dmg = Damage {
+        Id: 999_001,
+        CalculateType: 0,
+        Type: 1,
+        FormulaType: 0,
+        RateLv: vec![10_000],
+        HardnessLv: vec![120],
+        ..Default::default()
+    };
+    let req = DamageExecuteRequest {
+        DamageId: 999_001,
+        SkillLevel: 1,
+        AttackerEntityId: attacker_nid,
+        TargetEntityId: boss_nid,
+        ..Default::default()
+    };
+    let mut pack = Vec::new();
+    damage_helper::damage_entity(
+        &mut pack,
+        &req,
+        &dmg,
+        &h.state.assets,
+        h.state.scene.as_mut().unwrap(),
+        Some(&mut h.state.buff_timers),
+    );
+    let rage_after_one = attributes::get_attr_value(
+        h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .entity(boss_nid)
+            .unwrap()
+            .attribute
+            .as_ref()
+            .unwrap(),
+        EAttributeType::Rage,
+    );
+    assert_eq!(rage_after_one, 80, "120 HardnessLv hit should reduce 200 Rage to 80");
+
+    damage_helper::damage_entity(
+        &mut pack,
+        &req,
+        &dmg,
+        &h.state.assets,
+        h.state.scene.as_mut().unwrap(),
+        Some(&mut h.state.buff_timers),
+    );
+    let rage_after_two = attributes::get_attr_value(
+        h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .entity(boss_nid)
+            .unwrap()
+            .attribute
+            .as_ref()
+            .unwrap(),
+        EAttributeType::Rage,
+    );
+    assert_eq!(rage_after_two, 0, "Second hit clamps Rage at 0");
+
+    // Wake FSM -> sets pending transition 10130 -> 10131; client confirm commits paralysis and drops 70000045.
+    events.enqueue(Event::FsmWake {
+        entity_id: 0,
+        now_ms: now_ms + 100,
+    });
+    crate::network::connection::drain_event_queue_best_effort(&mut events, &mut h.state);
+    {
+        let pending = h
+            .state
+            .scene
+            .as_ref()
+            .unwrap()
+            .entity(boss_nid)
+            .unwrap()
+            .fsm
+            .as_ref()
+            .unwrap()
+            .runtime_nodes
+            .iter()
+            .find(|r| r.fsm_id == 10129)
+            .and_then(|r| r.pending_to);
+        assert_eq!(pending, Some(10131), "Rage=0 must initiate transition 10130 -> 10131");
+    }
+    let confirm_resp = crate::network::handlers::fsm::handle_change_state_confirm_request(
+        &mut h.state,
+        &mut events,
+        Some(&sonoro_proto::pb::CombatCommon {
+            EntityId: boss_nid,
+            ..Default::default()
+        }),
+        &mut pack,
+        sonoro_proto::pb::ChangeStateConfirmRequest {
+            FsmId: 10129,
+            State: 10131,
+            ..Default::default()
+        },
+    );
+    assert_eq!(confirm_resp.State, 10132);
+    crate::network::connection::drain_event_queue_best_effort(&mut events, &mut h.state);
+
+    let sc = h.state.scene.as_ref().unwrap();
+    let st = sc.entity(boss_nid).unwrap();
+    assert!(
+        st.buffs
+            .as_ref()
+            .unwrap()
+            .get_by_buff_id(70_000_045)
+            .is_none()
+            && !st
+                .tag
+                .as_ref()
+                .unwrap()
+                .has_tag(&h.state.assets.tables.gameplay_tag_parent, rage_tag_id),
+        "Paralyzed state 10131 must drop BindBuff 70000045 and 狂暴生效 tag"
+    );
+
+    // Non-rage Hardness buildup when HardnessModeChangedRequest sets an active HardnessModeId (1 = Percent 10000).
+    let hp_resp = crate::network::handlers::world_puzzle::handle_hardness_mode_changed_request(
+        &mut h.state,
+        HardnessModeChangedRequest {
+            EntityId: boss_nid,
+            HardnessModeId: 1,
+        },
+    )
+    .expect("HardnessModeChangedRequest");
+    assert_eq!(hp_resp.ErrorCode, Some(ErrorCode::Success));
+    damage_helper::damage_entity(
+        &mut pack,
+        &req,
+        &dmg,
+        &h.state.assets,
+        h.state.scene.as_mut().unwrap(),
+        Some(&mut h.state.buff_timers),
+    );
+    let hardness_after = attributes::get_attr_value(
+        h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .entity(boss_nid)
+            .unwrap()
+            .attribute
+            .as_ref()
+            .unwrap(),
+        EAttributeType::Hardness,
+    );
+    assert_eq!(hardness_after, 120, "Active HardnessModeId=1 builds 120 Hardness");
+
+    // 3. Item 3 (Opsi 1): 139000025 Guide 10043/10044 waits when >= 2 roles exist, auto-completes if < 2 roles.
+    let owner_nodes = h
+        .state
+        .assets
+        .quest_nodes
+        .get_owner_nodes(quest_engine::PROLOGUE_QUEST_ID)
+        .expect("139000025 nodes");
+    let single_node = owner_nodes
+        .iter()
+        .find(|n| {
+            n.node_type == "ChildQuest"
+                && n.data
+                    .get("Condition")
+                    .and_then(|c| c.get("GuideGroupId"))
+                    .and_then(|v| v.as_i64())
+                    == Some(10043)
+        })
+        .cloned()
+        .expect("139000025 Guide 10043 child node");
+    {
+        let sc = h.state.scene.as_mut().unwrap();
+        sc.formation_info.cur_formation = 0;
+        sc.formation_info.formations[0] = Formation {
+            cur_role: 1501,
+            name: None,
+            roles: [
+                Some(FormationRole {
+                    role_id: 1501,
+                    entity_id: attacker_nid,
+                    on_stage_without_control: false,
+                }),
+                None,
+                None,
+            ],
+        };
+    }
+    let auto_single = quest_engine::triggers::eval_child_condition_auto(
+        &h.state.quest_context(&mut events),
+        quest_engine::PROLOGUE_QUEST_ID,
+        &single_node,
+    );
+    assert!(
+        auto_single,
+        "139000025 switch-role tutorial must auto-complete when active party has < 2 roles"
+    );
+    {
+        let sc = h.state.scene.as_mut().unwrap();
+        sc.formation_info.formations[0].roles[1] = Some(FormationRole {
+            role_id: 1402,
+            entity_id: attacker_nid + 1,
+            on_stage_without_control: false,
+        });
+    }
+    let auto_multi = quest_engine::triggers::eval_child_condition_auto(
+        &h.state.quest_context(&mut events),
+        quest_engine::PROLOGUE_QUEST_ID,
+        &single_node,
+    );
+    assert!(
+        !auto_multi,
+        "139000025 switch-role tutorial should remain active when party has >= 2 roles"
+    );
+
+    // 4. WavesLine ShortMessage gating: empty before triggers, unlocks only triggered message.
+    let initial_sm = crate::network::handlers::qol::handle_short_message_info_request(
+        &mut h.state,
+        ShortMessageInfoRequest::default(),
+    )
+    .expect("short message info");
+    assert!(
+        initial_sm.ShortMessageInfos.is_empty(),
+        "Fresh account must start with 0 WavesLine messages unlocked"
+    );
+
+    let send_msg_act: Value = serde_json::from_str(
+        r#"{"Name":"PhoneSystemInteract","Params":{"InteractType":{"Type":"SendPhoneMessage","PhoneRecordActionConfig":{"PhoneMessageId":30015}}}}"#,
+    )
+    .unwrap();
+    let _ = h.drain_count();
+    execute_action(
+        &mut h.state.quest_context(&mut events),
+        &mut ActionCallbacks::default(),
+        196_700_003,
+        2,
+        &send_msg_act,
+    )
+    .expect("SendPhoneMessage");
+
+    let updates: Vec<ShortMessageUpdateNotify> = h.drain_decoded(ShortMessageUpdateNotify::MSG_ID);
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].Adds.len(), 1);
+    assert_eq!(updates[0].Adds[0].ConfigId, 30015);
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .progress
+            .read_phone_messages
+            .contains(&30015),
+        "SendPhoneMessage must unlock without prematurely marking the message read"
+    );
+
+    let after_unlock = crate::network::handlers::qol::handle_short_message_info_request(
+        &mut h.state,
+        ShortMessageInfoRequest::default(),
+    )
+    .expect("short message info after unlock");
+    assert_eq!(after_unlock.ShortMessageInfos.len(), 1);
+    assert_eq!(after_unlock.ShortMessageInfos[0].ConfigId, 30015);
+    assert!(!after_unlock.ShortMessageInfos[0].IsRead);
+
+    let read_resp = crate::network::handlers::qol::handle_short_message_read_request(
+        &mut h.state,
+        &mut events,
+        ShortMessageReadRequest { ConfigId: 30015 },
+    )
+    .expect("read short message");
+    assert_eq!(read_resp.ErrCode, Some(ErrorCode::Success));
+    assert!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .progress
+            .read_phone_messages
+            .contains(&30015)
+    );
+
+    let del_msg_act: Value = serde_json::from_str(
+        r#"{"Name":"PhoneSystemInteract","Params":{"InteractType":{"Type":"DeletePhoneMessage","PhoneMessageId":30015}}}"#,
+    )
+    .unwrap();
+    let _ = h.drain_count();
+    execute_action(
+        &mut h.state.quest_context(&mut events),
+        &mut ActionCallbacks::default(),
+        196_700_003,
+        2,
+        &del_msg_act,
+    )
+    .expect("DeletePhoneMessage");
+    let del_updates: Vec<ShortMessageUpdateNotify> = h.drain_decoded(ShortMessageUpdateNotify::MSG_ID);
+    assert_eq!(del_updates.len(), 1);
+    assert_eq!(del_updates[0].Removes, vec![30015]);
+    let after_del = crate::network::handlers::qol::handle_short_message_info_request(
+        &mut h.state,
+        ShortMessageInfoRequest::default(),
+    )
+    .expect("short message info after delete");
+    assert!(after_del.ShortMessageInfos.is_empty());
+}
