@@ -4857,3 +4857,335 @@ fn audit_119_rage_hardness_switch_guard_and_wavesline_gating() {
     .expect("short message info after delete");
     assert!(after_del.ShortMessageInfos.is_empty());
 }
+
+#[test]
+fn audit_120_tune_break_elite_regen_and_active_flow_collectibles() {
+    use crate::network::handlers::damage as net_damage;
+    use crate::network::handlers::scene as net_scene;
+    use sonoro_gamesv_data::tables::damage::Damage;
+    use sonoro_gamesv_logic::component::entity::{
+        AttributeComponent, ConfigComponent, FightBuffComponent, FsmComponent, LogicStateComponent,
+        PartComponent, PositionComponent, TagComponent,
+        small::{ConfigType, EntityState, EntityType},
+    };
+    use sonoro_gamesv_logic::events::Event;
+    use sonoro_gamesv_logic::helpers::damage as damage_helper;
+    use sonoro_gamesv_logic::helpers::gameplay_tags;
+    use sonoro_gamesv_logic::helpers::level_play;
+    use sonoro_proto::enums::{EAttributeType, ErrorCode};
+    use sonoro_proto::pb::{
+        AnimalDropRequest, DamageExecuteRequest, EntityInteractRequest, EntityRemoveNotify,
+    };
+
+    let mut h = TestHarness::new("audit_120", Some(8));
+    let mut events = EventQueue::new();
+
+    // 1. Item #11 (Tune Break): WeaknessBuildUp fill -> Buff 3158 (FullTag) -> IsBreakWeakness
+    //    scaling via WeaknessMastery -> ChangeWeakness=1 -> resets buildup & applies Buff 3197 (Elite CD)
+    //    which strips 3158 and blocks buildup while CdTag is active.
+    let full_tid = gameplay_tags::id_from_name(
+        &h.state.assets.tables.gameplay_tag_remap,
+        damage_helper::TAG_WEAKNESS_FULL,
+    );
+    let cd_tid = gameplay_tags::id_from_name(
+        &h.state.assets.tables.gameplay_tag_remap,
+        damage_helper::TAG_WEAKNESS_CD,
+    );
+
+    let attacker_nid = {
+        let mut s = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 1,
+                config_id: 1402,
+                config_type: ConfigType::Character,
+                entity_type: EntityType::Player,
+                state: EntityState::Default,
+            },
+        );
+        let mut props = vec![0i32; 144];
+        props[EAttributeType::Lv.to_i32() as usize] = 10;
+        props[EAttributeType::Atk.to_i32() as usize] = 1000;
+        props[EAttributeType::LifeMax.to_i32() as usize] = 10_000;
+        props[EAttributeType::Life.to_i32() as usize] = 10_000;
+        props[EAttributeType::BreakWeaknessRatio.to_i32() as usize] = 10_000;
+        props[EAttributeType::WeaknessMastery.to_i32() as usize] = 100;
+        s.attribute = Some(AttributeComponent::create(&props));
+        s.buffs = Some(FightBuffComponent::default());
+        h.state.scene.as_mut().unwrap().spawn(s).net_id
+    };
+
+    let mut elite_props = vec![0i32; 144];
+    elite_props[EAttributeType::Lv.to_i32() as usize] = 5;
+    elite_props[EAttributeType::LifeMax.to_i32() as usize] = 100_000;
+    elite_props[EAttributeType::Life.to_i32() as usize] = 100_000;
+    elite_props[EAttributeType::HardnessMax.to_i32() as usize] = 27_950;
+    elite_props[EAttributeType::Hardness.to_i32() as usize] = 0;
+    elite_props[EAttributeType::HardnessRecover.to_i32() as usize] = 1_863;
+    elite_props[EAttributeType::RageMax.to_i32() as usize] = 26_503;
+    elite_props[EAttributeType::Rage.to_i32() as usize] = 26_503;
+    elite_props[EAttributeType::WeaknessBuildUpMax.to_i32() as usize] = 10_000;
+    elite_props[EAttributeType::WeaknessBuildUp.to_i32() as usize] = 0;
+
+    let elite_graph = h
+        .state
+        .assets
+        .fsm_graphs
+        .get("SM_ME1QunJingMd00001_New")
+        .expect("Antanke graph");
+    let mut elite_storage = EntityComponentStorage::new(
+        0,
+        ConfigComponent {
+            camp: 2,
+            config_id: 139_800_002,
+            config_type: ConfigType::Level,
+            entity_type: EntityType::Monster,
+            state: EntityState::Default,
+        },
+    );
+    elite_storage.attribute = Some(AttributeComponent::create_with_modes(&elite_props, 101, 1));
+    elite_storage.buffs = Some(FightBuffComponent::default());
+    elite_storage.logic_state = Some(LogicStateComponent::default());
+    elite_storage.tag = Some(TagComponent::default());
+    elite_storage.part = Some(PartComponent::default());
+    elite_storage.fsm = Some(FsmComponent::from_graph(elite_graph, 0).expect("fsm graph"));
+    let elite_nid = h.state.scene.as_mut().unwrap().spawn(elite_storage).net_id;
+
+    {
+        let sc = h.state.scene.as_mut().unwrap();
+        sc.update_fsm_hate_target(elite_nid, true);
+        sc.set_fsm_encounter_target(elite_nid, Some(attacker_nid))
+            .expect("set encounter");
+    }
+    events.enqueue(Event::FsmWake {
+        entity_id: 0,
+        now_ms: 1_000_000,
+    });
+    crate::network::connection::drain_event_queue_best_effort(&mut events, &mut h.state);
+
+    // Item #8 check on Antanke 139800002: initiates conduit 10026 -> 10029, confirms into C白条狂暴 (70000045) + attaches Buff 1102.
+    {
+        let pending = h
+            .state
+            .scene
+            .as_ref()
+            .unwrap()
+            .entity(elite_nid)
+            .unwrap()
+            .fsm
+            .as_ref()
+            .unwrap()
+            .runtime_nodes
+            .iter()
+            .find(|r| r.fsm_id == 10023)
+            .and_then(|r| r.pending_to);
+        assert_eq!(pending, Some(10029), "Antanke must initiate 10026 -> 10029 when Rage > 0");
+    }
+    let mut pack = Vec::new();
+    let confirm_elite = crate::network::handlers::fsm::handle_change_state_confirm_request(
+        &mut h.state,
+        &mut events,
+        Some(&sonoro_proto::pb::CombatCommon {
+            EntityId: elite_nid,
+            ..Default::default()
+        }),
+        &mut pack,
+        sonoro_proto::pb::ChangeStateConfirmRequest {
+            FsmId: 10_023,
+            State: 10_029,
+            ..Default::default()
+        },
+    );
+    assert!(
+        confirm_elite.Error.is_none() || confirm_elite.Error.as_ref().is_some_and(|e| e.ErrorCode == Some(ErrorCode::Success)),
+        "confirm_elite failed: {confirm_elite:?}"
+    );
+    crate::network::connection::drain_event_queue_best_effort(&mut events, &mut h.state);
+    {
+        let sc = h.state.scene.as_ref().unwrap();
+        let st = sc.entity(elite_nid).unwrap();
+        let buffs = st.buffs.as_ref().unwrap();
+        assert!(
+            buffs.get_by_buff_id(70_000_045).is_some(),
+            "Antanke should enter C白条狂暴 (70000045); confirm={confirm_elite:?}, runtime={:?}, buffs={:?}",
+            st.fsm.as_ref().unwrap().runtime_nodes,
+            buffs.buffs.iter().map(|b| (b.BuffId, b.IsActive)).collect::<Vec<_>>()
+        );
+        assert!(buffs.get_by_buff_id(1102).is_some(), "Antanke should receive passive HardnessRecover Buff 1102");
+    }
+
+    // While 狂暴生效 (70000045) is active, Buff 1102 periodic tick must NOT recover Hardness.
+    let buff_1102 = h.state.assets.tables.buff.get_data_by_id(&1102).unwrap().into_owned();
+    sonoro_gamesv_logic::helpers::buff::execute_periodic_with_assets(
+        &mut pack,
+        elite_nid,
+        elite_nid,
+        &buff_1102,
+        h.state.scene.as_mut().unwrap(),
+        &h.state.assets,
+    );
+    assert_eq!(
+        h.state.scene.as_ref().unwrap().entity(elite_nid).unwrap().attribute.as_ref().unwrap().get_current(EAttributeType::Hardness),
+        0,
+        "Hardness must stay 0 during 狂暴生效"
+    );
+
+    // Remove 70000045 (simulating entry into C白条常态) and tick Buff 1102 once: Hardness recovers by 1863 * 0.1 = 186.
+    let (elite_handle, rage_handle) = {
+        let sc = h.state.scene.as_ref().unwrap();
+        let eh = sc.entity_handle(elite_nid).unwrap();
+        let rh = sc.entity(elite_nid).unwrap().buffs.as_ref().unwrap().get_by_buff_id(70_000_045).unwrap().HandleId;
+        (eh, rh)
+    };
+    sonoro_gamesv_logic::handlers::buff::remove_buff_from_entity(
+        &mut h.state.conn,
+        &mut events,
+        h.state.scene.as_mut().unwrap(),
+        &h.state.assets,
+        &mut h.state.buff_timers,
+        elite_handle,
+        &[rage_handle],
+        None,
+    );
+    sonoro_gamesv_logic::helpers::buff::execute_periodic_with_assets(
+        &mut pack,
+        elite_nid,
+        elite_nid,
+        &buff_1102,
+        h.state.scene.as_mut().unwrap(),
+        &h.state.assets,
+    );
+    assert_eq!(
+        h.state.scene.as_ref().unwrap().entity(elite_nid).unwrap().attribute.as_ref().unwrap().get_current(EAttributeType::Hardness),
+        186,
+        "Buff 1102 must recover HardnessRecover * Period (1863 * 0.1 = 186) in C白条常态"
+    );
+
+    // Pick a real Damage ID with WeaknessLvl from assets (1202004001 -> WeakLv [10400]) + break hit (1000009900)
+    let _ = h.drain_count();
+    let req_build = DamageExecuteRequest {
+        DamageId: 1_202_004_001,
+        SkillLevel: 1,
+        AttackerEntityId: attacker_nid,
+        TargetEntityId: elite_nid,
+        ..Default::default()
+    };
+    let build_resp = net_damage::handle_damage_execute_request(&mut h.state, &mut events, &mut pack, req_build);
+    assert_eq!(build_resp.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(build_resp.ChangeWeakness, 0);
+    {
+        let st = h.state.scene.as_ref().unwrap().entity(elite_nid).unwrap();
+        assert_eq!(st.attribute.as_ref().unwrap().get_current(EAttributeType::WeaknessBuildUp), 10_000);
+        assert!(st.buffs.as_ref().unwrap().get_by_buff_id(3158).is_some(), "Full WeaknessBuildUp must grant Buff 3158");
+        assert!(damage_helper::entity_has_gameplay_tag(st, &h.state.assets, full_tid));
+    }
+
+    // Compare normal 1000009900 damage vs IsBreakWeakness=true with WeaknessMastery=100 (2.0x)
+    let req_break = DamageExecuteRequest {
+        DamageId: 1_000_009_900,
+        SkillLevel: 1,
+        AttackerEntityId: attacker_nid,
+        TargetEntityId: elite_nid,
+        IsBreakWeakness: true,
+        ..Default::default()
+    };
+    let break_resp = net_damage::handle_damage_execute_request(&mut h.state, &mut events, &mut pack, req_break);
+    assert_eq!(break_resp.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(break_resp.ChangeWeakness, 1, "IsBreakWeakness on FullTag target must return ChangeWeakness=1");
+    assert!(break_resp.Damage > 0);
+    {
+        let st = h.state.scene.as_ref().unwrap().entity(elite_nid).unwrap();
+        assert_eq!(st.attribute.as_ref().unwrap().get_current(EAttributeType::WeaknessBuildUp), 0, "Tune Break must reset WeaknessBuildUp to 0");
+        assert!(st.buffs.as_ref().unwrap().get_by_buff_id(3158).is_none(), "Cooldown buff 3197 must remove FullTag buff 3158");
+        assert!(st.buffs.as_ref().unwrap().get_by_buff_id(3197).is_some(), "Elite monster must enter 6s Tune Break cooldown Buff 3197");
+        assert!(damage_helper::entity_has_gameplay_tag(st, &h.state.assets, cd_tid));
+    }
+
+    // While Buff 3197 CdTag is active, WeaknessLvl hit must NOT add WeaknessBuildUp
+    let cd_hit = Damage {
+        Id: 999_120,
+        CalculateType: 0,
+        Type: 0,
+        FormulaType: 0,
+        RateLv: vec![1_000],
+        WeaknessLvl: vec![5_000],
+        ..Default::default()
+    };
+    let _ = damage_helper::damage_entity(
+        &mut pack,
+        &DamageExecuteRequest {
+            DamageId: 999_120,
+            SkillLevel: 1,
+            AttackerEntityId: attacker_nid,
+            TargetEntityId: elite_nid,
+            ..Default::default()
+        },
+        &cd_hit,
+        &h.state.assets,
+        h.state.scene.as_mut().unwrap(),
+        Some(&mut h.state.buff_timers),
+    );
+    assert_eq!(
+        h.state.scene.as_ref().unwrap().entity(elite_nid).unwrap().attribute.as_ref().unwrap().get_current(EAttributeType::WeaknessBuildUp),
+        0,
+        "CdTag must prevent WeaknessBuildUp accumulation during cooldown"
+    );
+
+    // 2. Item #10: Collect106 (136001964) and Animal028 (136001965) collected cleanly even when active_flow_inc_id != 0
+    h.state.scene.as_mut().unwrap().active_flow_inc_id = 42;
+    let (plant_nid, lizard_interact_nid, lizard_drop_nid) = {
+        let mut s1 = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 2,
+                config_id: 136_001_964,
+                config_type: ConfigType::Level,
+                entity_type: EntityType::SceneItem,
+                state: EntityState::Default,
+            },
+        );
+        s1.position = Some(PositionComponent { location: [0.0; 3], rotation: [0.0; 3] });
+        let mut s2 = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 6,
+                config_id: 136_001_965,
+                config_type: ConfigType::Level,
+                entity_type: EntityType::Animal,
+                state: EntityState::Default,
+            },
+        );
+        s2.position = Some(PositionComponent { location: [10.0; 3], rotation: [0.0; 3] });
+        let s3 = s2.clone();
+        let sc = h.state.scene.as_mut().unwrap();
+        (sc.spawn(s1).net_id, sc.spawn(s2).net_id, sc.spawn(s3).net_id)
+    };
+    let _ = h.drain_count();
+    let r1 = net_scene::handle_entity_interact_request(
+        &mut h.state,
+        &mut events,
+        EntityInteractRequest { EntityId: plant_nid, OptionIndex: 0, ..Default::default() },
+    ).expect("Collect106 interact during flow");
+    let r2 = net_scene::handle_entity_interact_request(
+        &mut h.state,
+        &mut events,
+        EntityInteractRequest { EntityId: lizard_interact_nid, OptionIndex: 0, ..Default::default() },
+    ).expect("Animal028 interact during flow");
+    let r3 = net_scene::handle_animal_drop_request(
+        &mut h.state,
+        &mut events,
+        AnimalDropRequest { EntityId: lizard_drop_nid },
+    ).expect("Animal028 drop during flow");
+    assert_eq!(r1.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(r2.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(r3.ErrorCode, Some(ErrorCode::Success));
+    let sc = h.state.scene.as_ref().unwrap();
+    assert!(sc.entity(plant_nid).is_none(), "136001964 must be removed from scene during active flow");
+    assert!(sc.entity(lizard_interact_nid).is_none(), "136001965 must be removed on interact during active flow");
+    assert!(sc.entity(lizard_drop_nid).is_none(), "136001965 must be removed on AnimalDropRequest during active flow");
+    let removes: Vec<EntityRemoveNotify> = h.drain_decoded(EntityRemoveNotify::MSG_ID);
+    assert!(removes.iter().flat_map(|n| n.RemoveInfos.iter()).any(|ri| ri.EntityId == plant_nid));
+    assert!(removes.iter().flat_map(|n| n.RemoveInfos.iter()).any(|ri| ri.EntityId == lizard_interact_nid));
+    assert!(removes.iter().flat_map(|n| n.RemoveInfos.iter()).any(|ri| ri.EntityId == lizard_drop_nid));
+    assert!(level_play::resolve_entity_config(&h.state.assets, 8, 136_001_965).is_some());
+}

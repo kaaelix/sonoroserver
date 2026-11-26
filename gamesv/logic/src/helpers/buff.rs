@@ -133,7 +133,13 @@ fn compute_from_attr_delta(
         .map_or(f64::from(i32::MAX), f64::from);
 
     let calculated = ((source_value - min_required) / conversion_factor) * (modifier / 1e4);
-    Some(calculated.min(max_value).trunc() as i32)
+    let scaled = if buff_data.Id == 1102 && buff_data.Period > 0.0 {
+        // HardnessRecover is specified per second while Buff 1102 ticks on a 0.1s period.
+        calculated * f64::from(buff_data.Period)
+    } else {
+        calculated
+    };
+    Some(scaled.min(max_value).trunc() as i32)
 }
 
 fn compute_rate_reference(attr_type: EAttributeType, target_attr: &AttributeComponent) -> i32 {
@@ -247,6 +253,46 @@ fn execute_buff_effects_inner(
     let Some(calc_policy) = resolve_policy(buff_data) else {
         return;
     };
+
+    if mode == ExecutionMode::Periodic {
+        let storage = &scene.entities[idx];
+        let assets_ref = maybe_assets;
+        if let Some(assets) = assets_ref {
+            if !buff_data.OngoingTagIgnores.is_empty()
+                && buff_data.OngoingTagIgnores.iter().any(|name| {
+                    let tid = crate::helpers::gameplay_tags::id_from_name(
+                        &assets.tables.gameplay_tag_remap,
+                        name,
+                    );
+                    crate::helpers::damage::entity_has_gameplay_tag(storage, assets, tid)
+                })
+            {
+                return;
+            }
+            if buff_data.Id == 1102 {
+                let rage_tid = crate::helpers::gameplay_tags::id_from_name(
+                    &assets.tables.gameplay_tag_remap,
+                    "功能.功能制作.狂暴生效",
+                );
+                let palsy_tid = crate::helpers::gameplay_tags::id_from_name(
+                    &assets.tables.gameplay_tag_remap,
+                    "怪物.common.状态标识.瘫痪",
+                );
+                if crate::helpers::damage::entity_has_gameplay_tag(storage, assets, rage_tid)
+                    || crate::helpers::damage::entity_has_gameplay_tag(storage, assets, palsy_tid)
+                {
+                    return;
+                }
+                if let Some(attr) = storage.attribute.as_ref() {
+                    let cur_h = attributes::get_attr_value(attr, EAttributeType::Hardness);
+                    let max_h = attributes::get_attr_value(attr, EAttributeType::HardnessMax);
+                    if max_h <= 0 || cur_h >= max_h {
+                        return;
+                    }
+                }
+            }
+        }
+    }
 
     let (eff_level, eff_stacks) = {
         let active_buff = scene.entities[idx]
@@ -483,7 +529,13 @@ fn compute_from_attr_delta_with_source(
         .map_or(f64::from(i32::MAX), f64::from);
 
     let calculated = ((source_value - min_required) / conversion_factor) * (modifier / 1e4);
-    Some(calculated.min(max_value).trunc() as i32)
+    let scaled = if buff_data.Id == 1102 && buff_data.Period > 0.0 {
+        // HardnessRecover is specified per second while Buff 1102 ticks on a 0.1s period.
+        calculated * f64::from(buff_data.Period)
+    } else {
+        calculated
+    };
+    Some(scaled.min(max_value).trunc() as i32)
 }
 
 pub fn sync_continuous_buff_modifiers(

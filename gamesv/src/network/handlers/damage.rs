@@ -2,11 +2,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sonoro_gamesv_logic::component::entity::small::{ConfigType, EntityType};
 use sonoro_gamesv_logic::event_queue::EventQueue;
-use sonoro_gamesv_logic::events::Event;
+use sonoro_gamesv_logic::events::{BuffAdditionEntry, Event};
 use sonoro_gamesv_logic::fsm::types::wake_reason;
+use sonoro_gamesv_logic::handlers::buff as buff_handlers;
 use sonoro_gamesv_logic::helpers::{
     attributes::{self, AttributeChangeType, AttributeValueType},
-    buff as buff_helper, damage as damage_helper, level_play::{self, LevelPlayContext},
+    buff as buff_helper, damage as damage_helper, gameplay_tags,
+    level_play::{self, LevelPlayContext},
     quest_engine, role as role_helper,
 };
 use sonoro_gamesv_logic::scene::Scene;
@@ -139,6 +141,8 @@ pub fn handle_damage_execute_request(
         (execute_data, target_info)
     };
 
+    apply_tune_break_buffs(state, events, &execute_data);
+
     if let Some((entity_type, config_type, _cfg_id, hp_ratio)) = target_info {
         let target_is_player = entity_type == EntityType::Player;
         if target_is_player
@@ -214,7 +218,106 @@ pub fn handle_damage_execute_request(
         ImmuneType: execute_data.ImmuneType,
         ElementType: execute_data.ElementType,
         ChangeLife: execute_data.ChangeLife,
+        ChangeWeakness: execute_data.ChangeWeakness,
         ..Default::default()
+    }
+}
+
+fn apply_tune_break_buffs(
+    state: &mut State,
+    events: &mut EventQueue,
+    execute_data: &sonoro_proto::pb::DamageExecuteNotify,
+) {
+    if execute_data.KilledTarget {
+        return;
+    }
+    let Some(scene) = state.scene.as_mut() else {
+        return;
+    };
+    let Some(target_handle) = scene.entity_handle(execute_data.TargetEntityId) else {
+        return;
+    };
+    if scene.entities[target_handle.index].config.entity_type != EntityType::Monster {
+        return;
+    }
+    let attacker_handle = scene
+        .entity_handle(execute_data.AttackerEntityId)
+        .unwrap_or(target_handle);
+
+    let full_tid = gameplay_tags::id_from_name(
+        &state.assets.tables.gameplay_tag_remap,
+        damage_helper::TAG_WEAKNESS_FULL,
+    );
+    let break_tid = gameplay_tags::id_from_name(
+        &state.assets.tables.gameplay_tag_remap,
+        damage_helper::TAG_WEAKNESS_BREAK,
+    );
+    let cd_tid = gameplay_tags::id_from_name(
+        &state.assets.tables.gameplay_tag_remap,
+        damage_helper::TAG_WEAKNESS_CD,
+    );
+    let lock_tid = gameplay_tags::id_from_name(
+        &state.assets.tables.gameplay_tag_remap,
+        damage_helper::TAG_WEAKNESS_LOCK,
+    );
+
+    let buff_to_add = {
+        let storage = &scene.entities[target_handle.index];
+        if execute_data.ChangeWeakness == 1 {
+            Some(damage_helper::tune_break_cooldown_buff_id(
+                &state.assets,
+                scene.instance_id,
+                storage,
+            ))
+        } else {
+            let has_state_tag = damage_helper::entity_has_gameplay_tag(
+                storage,
+                &state.assets,
+                full_tid,
+            ) || damage_helper::entity_has_gameplay_tag(
+                storage,
+                &state.assets,
+                break_tid,
+            ) || damage_helper::entity_has_gameplay_tag(
+                storage,
+                &state.assets,
+                cd_tid,
+            ) || damage_helper::entity_has_gameplay_tag(
+                storage,
+                &state.assets,
+                lock_tid,
+            );
+            let filled = !has_state_tag
+                && storage.attribute.as_ref().is_some_and(|attr| {
+                    let max_w = attributes::get_attr_value(attr, EAttributeType::WeaknessBuildUpMax);
+                    let cur_w = attributes::get_attr_value(attr, EAttributeType::WeaknessBuildUp);
+                    max_w > 0 && cur_w >= max_w
+                });
+            filled.then_some(damage_helper::BUFF_AUTO_WEAKNESS)
+        }
+    };
+
+    if let Some(buff_id) = buff_to_add {
+        buff_handlers::add_buff_to_entity(
+            &mut state.conn,
+            events,
+            scene,
+            &mut state.buff_timers,
+            &state.assets,
+            target_handle,
+            attacker_handle,
+            &[BuffAdditionEntry {
+                id: buff_id,
+                is_active: true,
+                stack_count: 1,
+                duration_seconds: None,
+                fsm_bind_source: None,
+                message_id: -1,
+                skill_id: 0,
+                level: 1,
+                notify_client: true,
+            }],
+        );
     }
 }
 

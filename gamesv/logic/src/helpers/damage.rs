@@ -6,12 +6,19 @@ use sonoro_proto::enums::{EAttributeType, EDamageImmune};
 use sonoro_proto::pb::{CombatReceiveData, DamageExecuteNotify, DamageExecuteRequest};
 use sonoro_proto::wire::PbEnum;
 
+use crate::component::entity::EntityComponentStorage;
 use crate::component::entity::attribute::{Attribute, AttributeComponent};
 use crate::fsm::types::wake_reason;
 use crate::helpers::attributes::{self, AttributeChangeType, AttributeValueType};
-use crate::helpers::{buff as buff_helper, gameplay_tags};
+use crate::helpers::{buff as buff_helper, gameplay_tags, level_play};
 use crate::scene::Scene;
 use crate::schedulers::BuffTimerScheduler;
+
+pub const TAG_WEAKNESS_FULL: &str = "功能.逻辑状态标识.6067066e.39f6ce36";
+pub const TAG_WEAKNESS_BREAK: &str = "功能.逻辑状态标识.6067066e.39f6ce36.44cd27ac";
+pub const TAG_WEAKNESS_CD: &str = "功能.逻辑状态标识.6067066e.0cbeb185.14d851f7";
+pub const TAG_WEAKNESS_LOCK: &str = "功能.逻辑状态标识.6067066e.f2d5373f";
+pub const BUFF_AUTO_WEAKNESS: i64 = 3158;
 
 fn level_slice_value(slice: &[i32], skill_level: i32, default_val: i32) -> i32 {
     if slice.is_empty() {
@@ -61,6 +68,7 @@ fn calculate_hurt_core(
     target_attr: &AttributeComponent,
     damage: &Damage,
     is_crit: bool,
+    weakness_mult: f64,
 ) -> f64 {
     let raw_crit_dmg = attributes::get_attr_value(attacker_attr, EAttributeType::CritDamage);
     let crit_dmg_bp = if raw_crit_dmg > 0 {
@@ -125,7 +133,8 @@ fn calculate_hurt_core(
         * res_mult
         * (1.0 - dmg_reduce)
         * (1.0 - elem_reduce)
-        * special_mult)
+        * special_mult
+        * weakness_mult.max(0.0))
         .max(0.0)
 }
 
@@ -136,6 +145,7 @@ fn compute_formula_raw(
     target_attr: &AttributeComponent,
     skill_level: i32,
     is_crit: bool,
+    weakness_mult: f64,
 ) -> f64 {
     let rate_bp = level_slice_value(&damage.RateLv, skill_level, 0);
     let prop_id = if damage.RelatedProperty > 0 {
@@ -163,7 +173,14 @@ fn compute_formula_raw(
                 let cure_base = level_slice_value(&damage.CureBaseValue, skill_level, 0);
                 return (rate_scaled + f64::from(cure_base.max(0))).max(0.0);
             }
-            calculate_hurt_core(rate_scaled, attacker_attr, target_attr, damage, is_crit)
+            calculate_hurt_core(
+                rate_scaled,
+                attacker_attr,
+                target_attr,
+                damage,
+                is_crit,
+                weakness_mult,
+            )
         }
         1 => {
             let num11 = attr_from_owner(attacker_attr, target_attr, p3, p2) * (p4 / 10_000.0) + p5;
@@ -179,6 +196,7 @@ fn compute_formula_raw(
                 target_attr,
                 damage,
                 is_crit,
+                weakness_mult,
             )
         }
         2 => {
@@ -213,7 +231,14 @@ fn compute_formula_raw(
         }
         9 => {
             if rate_bp > 0 {
-                return calculate_hurt_core(rate_scaled, attacker_attr, target_attr, damage, is_crit);
+                return calculate_hurt_core(
+                    rate_scaled,
+                    attacker_attr,
+                    target_attr,
+                    damage,
+                    is_crit,
+                    weakness_mult,
+                );
             }
             let lv = attributes::get_attr_value(attacker_attr, EAttributeType::Lv).max(1);
             f64::from(lv * 25 + 100)
@@ -274,7 +299,14 @@ fn compute_formula_raw(
                 * (1.0 + special_change.max(-1.0)))
             .max(0.0)
         }
-        _ => calculate_hurt_core(rate_scaled, attacker_attr, target_attr, damage, is_crit),
+        _ => calculate_hurt_core(
+            rate_scaled,
+            attacker_attr,
+            target_attr,
+            damage,
+            is_crit,
+            weakness_mult,
+        ),
     }
 }
 
@@ -414,6 +446,7 @@ fn default_attacker_attributes() -> AttributeComponent {
     set(&mut comp, EAttributeType::Lv, 1);
     set(&mut comp, EAttributeType::Atk, 100);
     set(&mut comp, EAttributeType::CritDamage, 15_000);
+    set(&mut comp, EAttributeType::BreakWeaknessRatio, 10_000);
     comp
 }
 
@@ -457,8 +490,8 @@ fn hardness_mode_multiplier(
     (pct * skill_param).max(0.0)
 }
 
-fn entity_has_gameplay_tag(
-    storage: &crate::component::entity::EntityComponentStorage,
+pub fn entity_has_gameplay_tag(
+    storage: &EntityComponentStorage,
     assets: &Assets,
     target_tag_id: Option<i32>,
 ) -> bool {
@@ -593,6 +626,174 @@ fn apply_hardness_and_rage_on_hit(
     true
 }
 
+pub fn tune_break_cooldown_buff_id(
+    assets: &Assets,
+    scene_map_id: i32,
+    storage: &EntityComponentStorage,
+) -> i64 {
+    let match_type = level_play::resolve_entity_config(
+        assets,
+        scene_map_id,
+        i64::from(storage.config.config_id),
+    )
+    .and_then(|resolved| resolved.components.BaseInfoComponent)
+    .and_then(|bi| bi.Category)
+    .and_then(|cat| cat.MonsterMatchType)
+    .unwrap_or(0);
+    match match_type {
+        0 => 3196,
+        1 => 3197,
+        2 => 3198,
+        3 => 3199,
+        _ => 3196,
+    }
+}
+
+fn weakness_damage_multiplier(
+    assets: &Assets,
+    damage: &Damage,
+    request: &DamageExecuteRequest,
+    attacker_attr: &AttributeComponent,
+    target_attr: &AttributeComponent,
+    target_storage: &EntityComponentStorage,
+) -> f64 {
+    if damage.CalculateType != 0 {
+        return 1.0;
+    }
+    let break_tag_id = gameplay_tags::id_from_name(&assets.tables.gameplay_tag_remap, TAG_WEAKNESS_BREAK);
+    let target_has_break = entity_has_gameplay_tag(target_storage, assets, break_tag_id);
+    let is_break_hit = request.IsBreakWeakness || damage.Type == 11;
+    if !is_break_hit && !target_has_break {
+        return 1.0;
+    }
+
+    let total_bonus =
+        attributes::get_attr_value(target_attr, EAttributeType::WeaknessTotalBonus).max(0);
+    let total_bonus_mult = 1.0 + f64::from(total_bonus) / 10_000.0;
+    let mastery_mult = if is_break_hit {
+        let mastery =
+            attributes::get_attr_value(attacker_attr, EAttributeType::WeaknessMastery).max(0);
+        1.0 + f64::from(mastery) / 100.0
+    } else {
+        1.0
+    };
+    total_bonus_mult * mastery_mult
+}
+
+fn apply_weakness_on_hit(
+    combat_receive_pack: &mut Vec<CombatReceiveData>,
+    assets: &Assets,
+    damage: &Damage,
+    request: &DamageExecuteRequest,
+    attacker_attr: &AttributeComponent,
+    scene: &mut Scene,
+    target_idx: usize,
+) -> i32 {
+    if scene.entities[target_idx].config.entity_type
+        != crate::component::entity::EntityType::Monster
+        || damage.CalculateType != 0
+    {
+        return 0;
+    }
+
+    let full_tid = gameplay_tags::id_from_name(&assets.tables.gameplay_tag_remap, TAG_WEAKNESS_FULL);
+    let break_tid =
+        gameplay_tags::id_from_name(&assets.tables.gameplay_tag_remap, TAG_WEAKNESS_BREAK);
+    let cd_tid = gameplay_tags::id_from_name(&assets.tables.gameplay_tag_remap, TAG_WEAKNESS_CD);
+    let lock_tid = gameplay_tags::id_from_name(&assets.tables.gameplay_tag_remap, TAG_WEAKNESS_LOCK);
+
+    let target_storage = &scene.entities[target_idx];
+    let has_full = entity_has_gameplay_tag(target_storage, assets, full_tid);
+    let has_break = entity_has_gameplay_tag(target_storage, assets, break_tid);
+    let has_cd = entity_has_gameplay_tag(target_storage, assets, cd_tid);
+    let has_lock = entity_has_gameplay_tag(target_storage, assets, lock_tid);
+
+    let Some(target_attr) = scene.entities[target_idx].attribute.as_mut() else {
+        return 0;
+    };
+
+    if request.IsBreakWeakness {
+        if !has_full {
+            return 0;
+        }
+        let change = attributes::change_attr(
+            target_attr,
+            EAttributeType::WeaknessBuildUp,
+            AttributeChangeType::Override,
+            AttributeValueType::Current,
+            0,
+        );
+        if !change.is_empty() {
+            attributes::generate_attr_messages(
+                combat_receive_pack,
+                request.TargetEntityId,
+                target_attr,
+                &change,
+            );
+        }
+        return 1;
+    }
+
+    if has_full || has_break || has_cd || has_lock {
+        return 0;
+    }
+
+    let weakness_lv = f64::from(level_slice_value(&damage.WeaknessLvl, request.SkillLevel, 0));
+    if weakness_lv <= 0.0 {
+        return 0;
+    }
+
+    let weakness_max = attributes::get_attr_value(target_attr, EAttributeType::WeaknessBuildUpMax);
+    let cur_weakness = attributes::get_attr_value(target_attr, EAttributeType::WeaknessBuildUp);
+    if weakness_max <= 0 || cur_weakness >= weakness_max {
+        return 0;
+    }
+
+    let ratio_bp = if damage.WeaknessRatio.is_empty() {
+        10_000
+    } else {
+        damage
+            .WeaknessRatio
+            .get(&damage.Element)
+            .or_else(|| damage.WeaknessRatio.get(&0))
+            .copied()
+            .unwrap_or(10_000)
+    };
+    let raw_brk_ratio = attributes::get_attr_value(attacker_attr, EAttributeType::BreakWeaknessRatio);
+    let brk_ratio = if raw_brk_ratio > 0 {
+        raw_brk_ratio
+    } else {
+        10_000
+    };
+    let amount =
+        ((weakness_lv * (f64::from(ratio_bp) / 10_000.0) * (f64::from(brk_ratio) / 10_000.0))
+            .round() as i32)
+            .max(0);
+    let actual = amount.min(weakness_max - cur_weakness);
+    if actual <= 0 {
+        return 0;
+    }
+
+    let change = attributes::change_attr(
+        target_attr,
+        EAttributeType::WeaknessBuildUp,
+        AttributeChangeType::Delta,
+        AttributeValueType::Current,
+        actual,
+    );
+    if change.is_empty() {
+        return 0;
+    }
+    attributes::generate_attr_messages(
+        combat_receive_pack,
+        request.TargetEntityId,
+        target_attr,
+        &change,
+    );
+    scene.mark_fsm_dirty(request.TargetEntityId, wake_reason::ATTRIBUTE);
+    0
+}
+
 pub fn damage_entity(
     combat_receive_pack: &mut Vec<CombatReceiveData>,
     request: &DamageExecuteRequest,
@@ -673,6 +874,14 @@ pub fn damage_entity(
     } else {
         false
     };
+    let weakness_mult = weakness_damage_multiplier(
+        assets,
+        damage,
+        request,
+        &attacker_attr,
+        &target_attr_snap,
+        &scene.entities[target_idx],
+    );
     let base_val = compute_formula_raw(
         assets,
         damage,
@@ -680,6 +889,7 @@ pub fn damage_entity(
         &target_attr_snap,
         request.SkillLevel,
         is_crit,
+        weakness_mult,
     );
     let fluct = fluctuation_factor(damage, request);
 
@@ -838,9 +1048,9 @@ pub fn damage_entity(
         }
     }
 
-    if damage.CalculateType == 0
-        && !killed_target
-        && apply_hardness_and_rage_on_hit(
+    let mut change_weakness = 0;
+    if damage.CalculateType == 0 && !killed_target {
+        if apply_hardness_and_rage_on_hit(
             combat_receive_pack,
             assets,
             damage,
@@ -848,9 +1058,18 @@ pub fn damage_entity(
             &attacker_attr,
             scene,
             target_idx,
-        )
-    {
-        scene.mark_fsm_dirty(request.TargetEntityId, wake_reason::ATTRIBUTE);
+        ) {
+            scene.mark_fsm_dirty(request.TargetEntityId, wake_reason::ATTRIBUTE);
+        }
+        change_weakness = apply_weakness_on_hit(
+            combat_receive_pack,
+            assets,
+            damage,
+            request,
+            &attacker_attr,
+            scene,
+            target_idx,
+        );
     }
 
     DamageExecuteNotify {
@@ -867,7 +1086,7 @@ pub fn damage_entity(
         ImmuneType: None,
         ElementType: damage.Element,
         ChangeLife: change_life,
-        ChangeWeakness: 0,
+        ChangeWeakness: change_weakness,
         Bop: 0,
     }
 }

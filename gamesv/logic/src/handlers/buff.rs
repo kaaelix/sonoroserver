@@ -369,6 +369,40 @@ pub fn add_buff_to_entity<S: PushSink + ?Sized>(
     buff_timers.ensure_entity_registered(scene, assets, target.net_id, now_ms);
     let player_id = scene.player_id;
 
+    // Attach passive HardnessRecover regen (Buff 1102) once for FSM-driven monsters
+    // whose BaseProperty has recoverable white bar (e.g. elites Cycling into C白条常态).
+    let needs_hardness_regen_buff = {
+        let storage = &scene.entities[handle.index];
+        storage.config.entity_type == crate::component::entity::small::EntityType::Monster
+            && entries.iter().any(|e| e.fsm_bind_source.is_some())
+            && !entries.iter().any(|e| e.id == 1102)
+            && storage
+                .buffs
+                .as_ref()
+                .is_some_and(|b| b.get_by_buff_id(1102).is_none())
+            && storage.attribute.as_ref().is_some_and(|a| {
+                crate::helpers::attributes::get_attr_value(a, sonoro_proto::enums::EAttributeType::HardnessMax) > 0
+                    && crate::helpers::attributes::get_attr_value(a, sonoro_proto::enums::EAttributeType::HardnessRecover) > 0
+            })
+    };
+    if needs_hardness_regen_buff {
+        events.enqueue(Event::BuffAddition {
+            target,
+            instigator: target,
+            buffs: vec![BuffAdditionEntry {
+                id: 1102,
+                is_active: true,
+                stack_count: 1,
+                duration_seconds: None,
+                fsm_bind_source: None,
+                message_id: -1,
+                skill_id: 0,
+                level: 1,
+                notify_client: true,
+            }],
+        });
+    }
+
     for entry in entries {
         let Some(buff_data) = assets.tables.buff.get_data_by_id(&entry.id) else {
             continue;
