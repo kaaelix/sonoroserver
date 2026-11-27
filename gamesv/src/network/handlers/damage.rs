@@ -426,6 +426,7 @@ fn handle_drown_impl(
                     state.buff_timers.cancel_handle(eid, hid);
                 }
             } else {
+                scene.entities[idx].dead_notified = true;
                 scene.set_battle_entity_active(eid, false);
                 receive_data_pack.push(CombatReceiveData {
                     Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
@@ -491,18 +492,23 @@ fn kill_entity_direct(
         let Some(&idx) = scene.net_id_map.get(&eid) else {
             return;
         };
+        if scene.entities[idx].dead_notified
+            || scene.entities[idx]
+                .attribute
+                .as_ref()
+                .is_some_and(|attr| attributes::get_attr_value(attr, EAttributeType::Life) <= 0)
+        {
+            return;
+        }
         let cfg = scene.entities[idx].config;
         if let Some(attr) = scene.entities[idx].attribute.as_mut() {
-            let before_hp = attributes::get_attr_value(attr, EAttributeType::Life);
-            if before_hp > 0 {
-                let _ = attributes::set_life_unconditional(attr, 0);
-                attributes::generate_attr_messages(
-                    receive_data_pack,
-                    eid,
-                    attr,
-                    &[EAttributeType::Life],
-                );
-            }
+            let _ = attributes::set_life_unconditional(attr, 0);
+            attributes::generate_attr_messages(
+                receive_data_pack,
+                eid,
+                attr,
+                &[EAttributeType::Life],
+            );
         }
         if scene.entities[idx].buffs.is_some() {
             let removed =
@@ -511,6 +517,7 @@ fn kill_entity_direct(
                 state.buff_timers.cancel_handle(eid, hid);
             }
         } else {
+            scene.entities[idx].dead_notified = true;
             scene.set_battle_entity_active(eid, false);
             receive_data_pack.push(CombatReceiveData {
                 Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(

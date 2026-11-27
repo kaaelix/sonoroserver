@@ -8,6 +8,7 @@ use sonoro_proto::pb::{
 };
 use sonoro_proto::wire::PbEnum;
 
+use crate::component::entity::EntityComponentStorage;
 use crate::component::entity::attribute::AttributeComponent;
 use crate::component::entity::fight_buff::{AppliedBuffMod, FightBuffComponent, Shield};
 use crate::fsm::types::wake_reason;
@@ -317,6 +318,8 @@ fn execute_buff_effects_inner(
         None
     };
 
+    let lock_floor = maybe_assets.and_then(|assets| lock_hp_floor(&scene.entities[idx], assets));
+
     let (before_hp, after_hp, change) = {
         let target_attr = scene.entities[idx]
             .attribute
@@ -341,6 +344,18 @@ fn execute_buff_effects_inner(
                 }
             }
         }
+        if let Some(floor) = lock_floor
+            && before_hp > 0
+        {
+            let cur_after = attributes::get_attr_value(target_attr, EAttributeType::Life);
+            let min_allowed = before_hp.min(floor);
+            if cur_after < min_allowed {
+                let _ = attributes::set_life_unconditional(target_attr, min_allowed);
+                if min_allowed == before_hp {
+                    change.retain(|a| *a != EAttributeType::Life);
+                }
+            }
+        }
         let after_hp = attributes::get_attr_value(target_attr, EAttributeType::Life);
         if !change.is_empty() {
             attributes::generate_attr_messages(combat_receive_pack, target_id, target_attr, &change);
@@ -355,7 +370,8 @@ fn execute_buff_effects_inner(
     if before_hp > 0 && after_hp <= 0 {
         if let Some(assets) = maybe_assets {
             let _ = handle_entity_death(combat_receive_pack, scene, assets, target_id);
-        } else {
+        } else if !scene.entities[idx].dead_notified {
+            scene.entities[idx].dead_notified = true;
             scene.set_battle_entity_active(target_id, false);
             combat_receive_pack.push(CombatReceiveData {
                 Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
@@ -1035,12 +1051,72 @@ pub fn clear_dead_remove_buffs(
     removed_handles
 }
 
+/// Compute the minimum HP floor enforced by any active Lock-HP (`ExtraEffectID == 16`)
+/// buff on `entity`, matching the client's `((LifeMax * Grow1[lvl]) / 10000 + Grow2[lvl]).clamp(1, LifeMax)`.
+pub fn lock_hp_floor(entity: &EntityComponentStorage, assets: &Assets) -> Option<i32> {
+    let attr = entity.attribute.as_ref()?;
+    let buffs = entity.buffs.as_ref()?;
+    let life_max = attributes::get_attr_value(attr, EAttributeType::LifeMax);
+    if life_max <= 0 {
+        return None;
+    }
+
+    let life_attr_id = EAttributeType::Life.to_i32();
+    let mut max_floor: Option<i32> = None;
+    for info in &buffs.buffs {
+        let is_prebaked = buffs.prebaked_handles.contains(&info.HandleId);
+        if !info.IsActive && !is_prebaked {
+            continue;
+        }
+        let Some(buff_data) = assets.tables.buff.get_data_by_id(&info.BuffId) else {
+            continue;
+        };
+        if buff_data.ExtraEffectID != 16 {
+            continue;
+        }
+        let targets_life = buff_data.ExtraEffectParameters.is_empty()
+            || buff_data.ExtraEffectParameters[0].trim().parse::<i32>() == Ok(life_attr_id);
+        if !targets_life {
+            continue;
+        }
+
+        let level = if info.Level > 0 { info.Level } else { 1 };
+        let idx = (level - 1).max(0) as usize;
+        let pct = i64::from(
+            buff_data
+                .ExtraEffectParametersGrow1
+                .get(idx)
+                .or_else(|| buff_data.ExtraEffectParametersGrow1.last())
+                .copied()
+                .unwrap_or(0),
+        );
+        let flat = i64::from(
+            buff_data
+                .ExtraEffectParametersGrow2
+                .get(idx)
+                .or_else(|| buff_data.ExtraEffectParametersGrow2.last())
+                .copied()
+                .unwrap_or(0),
+        );
+        let floor = ((i64::from(life_max) * pct) / 10_000 + flat)
+            .clamp(1, i64::from(life_max)) as i32;
+        max_floor = Some(max_floor.map_or(floor, |cur| cur.max(floor)));
+    }
+    max_floor
+}
+
 pub fn handle_entity_death(
     combat_receive_pack: &mut Vec<CombatReceiveData>,
     scene: &mut Scene,
     assets: &Assets,
     entity_id: i64,
 ) -> Vec<i32> {
+    if let Some(&idx) = scene.net_id_map.get(&entity_id) {
+        if scene.entities[idx].dead_notified {
+            return Vec::new();
+        }
+        scene.entities[idx].dead_notified = true;
+    }
     scene.set_battle_entity_active(entity_id, false);
     combat_receive_pack.push(CombatReceiveData {
         Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(

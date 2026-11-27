@@ -354,7 +354,7 @@ pub fn repeater_cooldown_key(tree_id: i32, node_id: i32) -> i64 {
     (i64::from(tree_id) << 32) | (i64::from(node_id) & 0xffff_ffff)
 }
 
-fn wait_action_delay_ms(act_val: &Value) -> i64 {
+pub fn wait_action_delay_ms(act_val: &Value) -> i64 {
     let Some(obj) = act_val.as_object() else {
         return 0;
     };

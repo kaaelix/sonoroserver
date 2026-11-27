@@ -909,6 +909,10 @@ pub async fn run_gameplay(
         }
 
         while let Ok(job) = gm_inbox_rx.try_recv() {
+            if handle.close_reason() != CloseReason::Active {
+                job.fail_and_signal("session closed");
+                return;
+            }
             run_gm_job(gameplay, session_manager, job);
         }
 

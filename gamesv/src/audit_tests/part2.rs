@@ -1270,7 +1270,7 @@ fn audit_104_damage_formula_solo_sync_delayed_boss_removal_and_shop() {
         CalculateType: 0,
         Element: 0,
         Type: 0,
-        ImmuneType: 1,
+        ImmuneType: 0,
         RelatedProperty: EAttributeType::Atk.to_i32(),
         RateLv: vec![10000],
         FluctuationLower: vec![9000],
@@ -2759,10 +2759,26 @@ fn audit_114_boss_teleport_battle_lock_chest_owner_trace_gacha_trophy_and_quest_
 
     // 2. Boss/challenge MapMarks do not hijack EntityMapMarkInfo, and quick-transfer teleporters (Type == 3)
     // are included in TeleportDataResponse.Ids.
+    let prev_level = h.state.player_components.basic.info.attributes.level;
+    h.state.player_components.basic.info.attributes.level = 10;
+    h.state
+        .player_components
+        .quest
+        .info
+        .finish_quest(quest_engine::PROLOGUE_QUEST_ID);
     let mark_notify = misc_logic::build_map_mark_info_notify(
         &h.state.assets,
         &h.state.player_components.map,
+        &h.state.player_components.basic,
+        &h.state.player_components.quest,
     );
+    h.state.player_components.basic.info.attributes.level = prev_level;
+    h.state
+        .player_components
+        .quest
+        .info
+        .finished_quests
+        .retain(|&qid| qid != quest_engine::PROLOGUE_QUEST_ID);
     assert!(mark_notify.EntityMapMarkInfo.is_empty());
     assert!(!mark_notify.UnlockMarkIds.is_empty());
 
@@ -2968,7 +2984,7 @@ fn audit_115_comprehensive_server_fixes() {
     .expect("monster_detection");
     assert!(!det_info.DetectionTarget.is_empty());
 
-    // 2. Chest Drops & DropShowPlan: chest drop 1001 grants real rewards with ShowPlanId > 0 and Reason 7000.
+    // 2. Chest Drops & DropShowPlan: chest drop 1001 grants real rewards with ShowPlanId > 0 and non-modal chest reason.
     {
         let pcs = &mut h.state.player_components;
         let mut rctx = RewardContext {
@@ -2986,7 +3002,7 @@ fn audit_115_comprehensive_server_fixes() {
     }
     let notifies = h.drain_decoded::<ItemRewardNotify>(ItemRewardNotify::MSG_ID);
     assert!(!notifies.is_empty(), "chest should emit ItemRewardNotify");
-    assert_eq!(notifies[0].Reason, 7000);
+    assert_eq!(notifies[0].Reason, reward::CHEST_REWARD_REASON);
     assert!(
         notifies[0]
             .RewardItems
@@ -3777,6 +3793,8 @@ fn audit_115_lift_initial_pos_dungeon_level_play_npc_priority_and_batch_spawn() 
     let mm_notify: MapMarkInfoNotify = sonoro_gamesv_logic::handlers::misc::build_map_mark_info_notify(
         &h.state.assets,
         &h.state.player_components.map,
+        &h.state.player_components.basic,
+        &h.state.player_components.quest,
     );
     assert!(mm_notify.ShowMarkIds.iter().all(|m| show_seen.insert(m.MarkId)));
     let fetter_rec = echo::presets::handle_phantom_fetter_recommend_request(
@@ -5189,3 +5207,1805 @@ fn audit_120_tune_break_elite_regen_and_active_flow_collectibles() {
     assert!(removes.iter().flat_map(|n| n.RemoveInfos.iter()).any(|ri| ri.EntityId == lizard_drop_nid));
     assert!(level_play::resolve_entity_config(&h.state.assets, 8, 136_001_965).is_some());
 }
+
+#[test]
+fn audit_client_log_fixes_lock_hp_guide_chest_and_multiwave() {
+    let mut h = TestHarness::new("audit_client_log_fixes", Some(8));
+    let mut events = EventQueue::default();
+    let _ = h.drain_count();
+
+    // 1. Invulnerability parity + Lock-HP (ExtraEffectID == 16) + duplicate death guard.
+    let (atk_net, boss_net) = {
+        let mut atk_attr = AttributeComponent::default();
+        atk_attr.set_prop(EAttributeType::Atk, 1_000);
+        atk_attr.set_prop(EAttributeType::LifeMax, 10_000);
+        atk_attr.set_prop(EAttributeType::Life, 10_000);
+        let mut atk_s = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 1,
+                config_id: 1104,
+                config_type: ConfigType::Character,
+                entity_type: EntityType::Player,
+                state: EntityState::Default,
+            },
+        );
+        atk_s.attribute = Some(atk_attr);
+
+        let mut def_attr = AttributeComponent::default();
+        def_attr.set_prop(EAttributeType::LifeMax, 1_000);
+        def_attr.set_prop(EAttributeType::Life, 1_000);
+        let mut boss_s = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 2,
+                config_id: 990_001,
+                config_type: ConfigType::Level,
+                entity_type: EntityType::Monster,
+                state: EntityState::Default,
+            },
+        );
+        boss_s.attribute = Some(def_attr);
+        boss_s.buffs = Some(FightBuffComponent::default());
+        boss_s.tag = Some(TagComponent::default());
+        boss_s.fsm = Some(FsmComponent::from_graph(Arc::new(Graph::default()), 0).unwrap());
+
+        let sc = h.state.scene.as_mut().unwrap();
+        sc.spawn_with_net_id(910_101, atk_s).unwrap();
+        sc.spawn_with_net_id(910_102, boss_s).unwrap();
+        (910_101, 910_102)
+    };
+
+    let inv_tag = gameplay_tags::id_from_name(
+        &h.state.assets.tables.gameplay_tag_remap,
+        "功能.逻辑状态标识.无敌",
+    )
+    .unwrap_or(1_918_148_596);
+    h.state
+        .scene
+        .as_mut()
+        .unwrap()
+        .entity_mut(boss_net)
+        .unwrap()
+        .tag
+        .as_mut()
+        .unwrap()
+        .add_tag(inv_tag, 1);
+
+    let mut dmg_cfg = Damage {
+        Id: 910_001,
+        FormulaType: 0,
+        CalculateType: 0,
+        ImmuneType: 0,
+        RelatedProperty: EAttributeType::Atk.to_i32(),
+        RateLv: vec![50_000],
+        FluctuationLower: vec![10_000],
+        FluctuationUpper: vec![10_000],
+        ..Default::default()
+    };
+    let mut pack: Vec<CombatReceiveData> = Vec::new();
+    let blocked = damage_helper::damage_entity(
+        &mut pack,
+        &DamageExecuteRequest {
+            DamageId: dmg_cfg.Id,
+            SkillLevel: 1,
+            AttackerEntityId: atk_net,
+            TargetEntityId: boss_net,
+            RandomSeed: 5_000,
+            ..Default::default()
+        },
+        &dmg_cfg,
+        &h.state.assets,
+        h.state.scene.as_mut().unwrap(),
+        None,
+    );
+    assert_eq!(blocked.ImmuneType, Some(EDamageImmune::Invincible));
+    assert_eq!(blocked.Damage, 0);
+
+    // Non-zero ImmuneType bypasses the invulnerable tag per client BaseDamageComponent.
+    dmg_cfg.ImmuneType = 1;
+    let lock_buff_id = h
+        .state
+        .assets
+        .tables
+        .buff
+        .get_data_by_id(&41_601)
+        .filter(|b| b.ExtraEffectID == 16)
+        .map(|b| b.Id)
+        .expect("asset table must contain ExtraEffectID=16 Life Lock-HP buff 41601");
+    {
+        let sc = h.state.scene.as_mut().unwrap();
+        let st = sc.entity_mut(boss_net).unwrap();
+        st.tag.as_mut().unwrap().remove_tag(inv_tag);
+        st.buffs.as_mut().unwrap().buffs.push(sonoro_proto::pb::FightBuffInformation {
+            BuffId: lock_buff_id,
+            HandleId: 77,
+            Level: 1,
+            IsActive: true,
+            ..Default::default()
+        });
+    }
+    let expected_floor = {
+        let sc = h.state.scene.as_ref().unwrap();
+        let st = sc.entity(boss_net).unwrap();
+        buff_helper::lock_hp_floor(st, &h.state.assets).expect("active lock_hp_floor")
+    };
+    assert!(expected_floor >= 1 && expected_floor <= 1_000);
+
+    pack.clear();
+    let _ = damage_helper::damage_entity(
+        &mut pack,
+        &DamageExecuteRequest {
+            DamageId: dmg_cfg.Id,
+            SkillLevel: 1,
+            AttackerEntityId: atk_net,
+            TargetEntityId: boss_net,
+            RandomSeed: 5_000,
+            ..Default::default()
+        },
+        &dmg_cfg,
+        &h.state.assets,
+        h.state.scene.as_mut().unwrap(),
+        None,
+    );
+    {
+        let sc = h.state.scene.as_ref().unwrap();
+        let st = sc.entity(boss_net).unwrap();
+        let cur_hp = attributes::get_attr_value(st.attribute.as_ref().unwrap(), EAttributeType::Life);
+        assert!(
+            cur_hp >= expected_floor,
+            "Lock-HP buff must prevent HP ({cur_hp}) from dropping below floor ({expected_floor})"
+        );
+        assert!(!st.dead_notified, "locked boss must not emit dead_notified");
+    }
+
+    // Remove Lock-HP buff and deal lethal damage twice -> EntityLivingStatusNotify(Dead) emitted once.
+    h.state
+        .scene
+        .as_mut()
+        .unwrap()
+        .entity_mut(boss_net)
+        .unwrap()
+        .buffs
+        .as_mut()
+        .unwrap()
+        .buffs
+        .clear();
+    pack.clear();
+    for _ in 0..2 {
+        let _ = damage_helper::damage_entity(
+            &mut pack,
+            &DamageExecuteRequest {
+                DamageId: dmg_cfg.Id,
+                SkillLevel: 1,
+                AttackerEntityId: atk_net,
+                TargetEntityId: boss_net,
+                RandomSeed: 5_000,
+                ..Default::default()
+            },
+            &dmg_cfg,
+            &h.state.assets,
+            h.state.scene.as_mut().unwrap(),
+            None,
+        );
+    }
+    let dead_notifies = pack
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.Message,
+                Some(CombatReceiveDataMessageOneof::CombatNotifyData(cn))
+                    if matches!(cn.Message, Some(CombatNotifyDataMessageOneof::EntityLivingStatusNotify(_)))
+            )
+        })
+        .count();
+    assert_eq!(dead_notifies, 1, "EntityLivingStatusNotify(Dead) must only fire once per death");
+    assert!(h.state.scene.as_ref().unwrap().entity(boss_net).unwrap().dead_notified);
+
+    // 2. Tutorials: GuideTrigger pushes GuideCondDoneNotify without pre-completing, and GuideTriggerRequest does not finish.
+    let guide_act: Value =
+        serde_json::from_str(r#"{"Name":"GuideTrigger","Params":{"GuideId":10001}}"#).unwrap();
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = ActionCallbacks::default();
+        execute_action(&mut qctx, &mut cbs, 0, 0, &guide_act).expect("GuideTrigger");
+    }
+    let guide_notifies: Vec<sonoro_proto::pb::GuideCondDoneNotify> =
+        h.drain_decoded(sonoro_proto::pb::GuideCondDoneNotify::MSG_ID);
+    assert_eq!(guide_notifies.len(), 1);
+    assert_eq!(guide_notifies[0].GroupId, 10_001);
+    assert!(
+        !h.state.player_components.guide.info.has_finished(10_001),
+        "GuideTrigger must not pre-complete tutorial before client finishes it"
+    );
+    let guide_resp = crate::network::handlers::guide::handle_guide_trigger_request(
+        &mut h.state,
+        &mut events,
+        sonoro_proto::pb::GuideTriggerRequest { GroupId: 10_001 },
+    )
+    .expect("GuideTriggerRequest");
+    assert_eq!(guide_resp.ErrorCode, Some(ErrorCode::Success));
+    assert!(
+        !h.state.player_components.guide.info.has_finished(10_001),
+        "GuideTriggerRequest (on opening) must not mark tutorial finished"
+    );
+
+    // 3. Multi-wave MonsterCreator target expansion.
+    assert!(h.state.assets.has_spawn_monster_component(8, 102_700_037));
+    assert!(
+        h.state.assets.spawn_monster_targets(8, 102_700_037).len() > 1,
+        "multi-wave SpawnMonsterComponent 102700037 must expand to all configured monster targets"
+    );
+}
+
+#[test]
+fn audit_issue4_jinzhou_early_game_fixes() {
+    let mut h = TestHarness::new("audit_issue4_fixes", Some(8));
+    let mut events = EventQueue::default();
+    let _ = h.drain_count();
+
+    // 1. Elevator 109002461 updates quest entity state tag ("关卡.电梯.上升") and emits ElevatorMoveNotify.
+    let lift_nid = {
+        let mut s = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 0,
+                config_id: 109_002_461,
+                config_type: ConfigType::Level,
+                entity_type: EntityType::SceneItem,
+                state: EntityState::Default,
+            },
+        );
+        s.world_item.lift = Some(sonoro_gamesv_logic::component::entity::LiftComponent { location: 1 });
+        h.state.scene.as_mut().unwrap().spawn(s).net_id
+    };
+    let elev_resp = world_puzzle::handle_elevator_state_change_request(
+        &mut h.state,
+        sonoro_proto::pb::ElevatorStateChangeRequest {
+            EntityId: lift_nid,
+            State: Some(sonoro_proto::enums::ElevatorState::Forward),
+            TagState: 2,
+        },
+    )
+    .expect("elevator state change");
+    assert_eq!(elev_resp.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(
+        h.state.player_components.quest.info.get_entity_state(109_002_461),
+        Some("关卡.电梯.上升")
+    );
+    let elev_moves: Vec<sonoro_proto::pb::ElevatorMoveNotify> =
+        h.drain_decoded(sonoro_proto::pb::ElevatorMoveNotify::MSG_ID);
+    assert!(
+        elev_moves.iter().any(|m| m.EntityId == lift_nid && m.Location == 2),
+        "Forward elevator change must emit ElevatorMoveNotify for floor 2"
+    );
+    // Proto3 omits default End (0) => State: None must map to 关卡.电梯.停靠 without ElevatorMoveNotify.
+    let end_none_resp = world_puzzle::handle_elevator_state_change_request(
+        &mut h.state,
+        sonoro_proto::pb::ElevatorStateChangeRequest {
+            EntityId: lift_nid,
+            State: None,
+            TagState: 1,
+        },
+    )
+    .expect("elevator none end");
+    assert_eq!(end_none_resp.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(
+        h.state.player_components.quest.info.get_entity_state(109_002_461),
+        Some("关卡.电梯.停靠")
+    );
+    assert!(
+        h.drain_decoded::<sonoro_proto::pb::ElevatorMoveNotify>(
+            sonoro_proto::pb::ElevatorMoveNotify::MSG_ID
+        )
+        .is_empty(),
+        "State: None (proto3 End) must not emit ElevatorMoveNotify"
+    );
+
+    // 2. ChangePhantomFormation switches SceneGroup to Phantom (Group 2), spawns Echo role, allows SwitchRoleRequest, and RestorePhantomFormation reverts to Battle (Group 1).
+    {
+        let act: Value = serde_json::from_str(
+            r#"{"Name":"ChangePhantomFormation","Params":{"FormationId":1}}"#,
+        )
+        .unwrap();
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = ActionCallbacks::default();
+        execute_action(&mut qctx, &mut cbs, 0, 0, &act).expect("ChangePhantomFormation");
+    }
+    assert!(
+        h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .phantom_role_entity_id(5_001_001)
+            .is_some(),
+        "ChangePhantomFormation must spawn Echo role 5001001"
+    );
+    let mut grp_updates: Vec<sonoro_proto::pb::UpdateGroupFormationNotify> = Vec::new();
+    let mut sw_groups_enter: Vec<sonoro_proto::pb::SwitchSceneGroupNotify> = Vec::new();
+    while let Ok(frame) = h.rx.try_recv() {
+        if frame.len() >= 3
+            && let Ok(msg) = super::Message::decode(&frame[3..])
+        {
+            match msg.header.message_id() {
+                sonoro_proto::pb::UpdateGroupFormationNotify::MSG_ID => {
+                    if let Ok(v) = <sonoro_proto::pb::UpdateGroupFormationNotify as sonoro_proto::wire::PbMessage>::decode(&msg.payload) {
+                        grp_updates.push(v);
+                    }
+                }
+                sonoro_proto::pb::SwitchSceneGroupNotify::MSG_ID => {
+                    if let Ok(v) = <sonoro_proto::pb::SwitchSceneGroupNotify as sonoro_proto::wire::PbMessage>::decode(&msg.payload) {
+                        sw_groups_enter.push(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        grp_updates
+            .iter()
+            .flat_map(|n| &n.GroupFormation)
+            .any(|gf| gf.CurrentGroupType == sonoro_proto::enums::ESceneRolesGroup::Phantom.to_i32()),
+        "ChangePhantomFormation must push UpdateGroupFormationNotify for Phantom group"
+    );
+    assert!(
+        sw_groups_enter
+            .iter()
+            .any(|n| n.Group == sonoro_proto::enums::ESceneRolesGroup::Phantom.to_i32()),
+        "ChangePhantomFormation must emit SwitchSceneGroupNotify to Phantom"
+    );
+    let sw_role_resp = crate::network::handlers::role::handle_switch_role_request(
+        &mut h.state,
+        sonoro_proto::pb::SwitchRoleRequest {
+            RoleId: 5_001_001,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        sw_role_resp.ErrorCode,
+        Some(ErrorCode::Success),
+        "SwitchRoleRequest for spawned Echo role 5001001 must succeed"
+    );
+    {
+        let act: Value =
+            serde_json::from_str(r#"{"Name":"RestorePhantomFormation","Params":{}}"#).unwrap();
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = ActionCallbacks::default();
+        execute_action(&mut qctx, &mut cbs, 0, 0, &act).expect("RestorePhantomFormation");
+    }
+    assert!(
+        h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .phantom_role_entity_ids
+            .is_empty(),
+        "RestorePhantomFormation must remove phantom role entities"
+    );
+    let sw_groups_exit: Vec<sonoro_proto::pb::SwitchSceneGroupNotify> =
+        h.drain_decoded(sonoro_proto::pb::SwitchSceneGroupNotify::MSG_ID);
+    assert!(
+        sw_groups_exit
+            .iter()
+            .any(|n| n.Group == sonoro_proto::enums::ESceneRolesGroup::Battle.to_i32()),
+        "RestorePhantomFormation must emit SwitchSceneGroupNotify back to Battle"
+    );
+
+    // 2b. EnableNearbyTracking pushes EnableNearbyTrackingNotify for self entity.
+    {
+        let act: Value =
+            serde_json::from_str(r#"{"Name":"EnableNearbyTracking","Params":{"IsEnable":true}}"#)
+                .unwrap();
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = ActionCallbacks::default();
+        execute_action(&mut qctx, &mut cbs, 109_002_461, 0, &act)
+            .expect("EnableNearbyTracking");
+    }
+    let track_notifies: Vec<sonoro_proto::pb::EnableNearbyTrackingNotify> =
+        h.drain_decoded(sonoro_proto::pb::EnableNearbyTrackingNotify::MSG_ID);
+    assert_eq!(track_notifies.len(), 1);
+    assert_eq!(track_notifies[0].EntityIds, vec![lift_nid]);
+    assert!(track_notifies[0].IsEnable);
+
+    // 3. Interrupting active Flow closes black screen cleanly via FlowServerSkipNotify { FadeOutScreen: true }.
+    {
+        let sc = h.state.scene.as_mut().unwrap();
+        sc.active_flow_inc_id = 42;
+        sc.active_flow_quest_id = 139_000_027;
+        sc.active_flow_list_name = "Flow_Jinzhou_Test".to_owned();
+        sc.active_flow_id = 3;
+        sc.active_flow_state_id = 9;
+        sc.client_black_screen_open = true;
+    }
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let ended = quest_engine::interrupt_active_flow_for_quest(&mut qctx, 139_000_027);
+        assert_eq!(ended, Some(42));
+    }
+    let flow_skips: Vec<sonoro_proto::pb::FlowServerSkipNotify> =
+        h.drain_decoded(sonoro_proto::pb::FlowServerSkipNotify::MSG_ID);
+    assert!(
+        flow_skips.iter().any(|n| n.FadeOutScreen),
+        "interrupt_active_flow_for_quest must emit FlowServerSkipNotify with FadeOutScreen=true"
+    );
+
+    // 4. First Echo GetSkill (200001) condition satisfied once echo 60000182 is in echo_map.
+    let get_skill_cond: Value =
+        serde_json::from_str(r#"{"Type":"GetSkill","SkillId":200001}"#).unwrap();
+    {
+        let qctx = h.state.quest_context(&mut events);
+        let eval_ctx = qctx.make_eval_context();
+        assert!(!eval_single_inline_condition(&eval_ctx, &get_skill_cond));
+    }
+    h.state.player_components.echo.echo_map.insert(
+        1,
+        EchoInfo {
+            id: 60_000_182,
+            level: 1,
+            ..Default::default()
+        },
+    );
+    {
+        let qctx = h.state.quest_context(&mut events);
+        let eval_ctx = qctx.make_eval_context();
+        assert!(
+            eval_single_inline_condition(&eval_ctx, &get_skill_cond),
+            "echo 60000182 (SkillId 200001) must satisfy GetSkill 200001"
+        );
+    }
+}
+
+#[test]
+fn audit_prologue_spawns_towers_chests_rover_and_boss_level1() {
+    use sonoro_gamesv_logic::commands::entity as entity_cmd;
+    use sonoro_gamesv_logic::component::entity::small::PositionComponent;
+    use sonoro_gamesv_logic::handlers::scene as scene_logic;
+
+    // 1. Fresh player join emits Battle group with Rover (1501) in FightRoleInfos & AoiData, no UI hide restriction.
+    let mut h = TestHarness::new("audit_prologue_join_and_spawns", None);
+    let mut events = EventQueue::default();
+    h.state.player_components.basic.info.attributes.sex = 1;
+    h.state.player_components.basic.info.attributes.cur_world_level = 1;
+    sonoro_gamesv_logic::handlers::phase::notify_push_data_complete(
+        &mut h.state.quest_context(&mut events),
+    )
+    .expect("notify_push_data_complete");
+    scene_logic::on_initial_scene_join(
+        Some(8),
+        None,
+        None,
+        None,
+        &mut events,
+        &h.state.fs,
+        h.state.player_id,
+        &h.state.assets,
+        &mut h.state.player_components.scene,
+        &h.state.player_components.basic,
+        &mut h.state.player_components.role,
+        &mut h.state.player_components.weapon,
+        &mut h.state.player_components.echo,
+        &mut h.state.player_components.quest,
+        &mut h.state.scene,
+        &mut h.state.buff_timers,
+        &mut h.state.dirty_saves,
+    )
+    .expect("on_initial_scene_join");
+    {
+        let mut sc = h.state.scene.take().expect("scene");
+        let _ = h.drain_count();
+        scene_logic::notify_join_scene(
+            None,
+            &mut events,
+            &h.state.fs,
+            &h.state.assets,
+            &mut h.state.conn,
+            h.state.player_id,
+            &mut h.state.player_components.scene,
+            &h.state.player_components.basic,
+            &mut h.state.player_components.role,
+            &mut h.state.player_components.weapon,
+            &mut h.state.player_components.motor,
+            &mut h.state.player_components.echo,
+            &mut h.state.player_components.inventory,
+            &mut h.state.player_components.map,
+            &mut h.state.player_components.quest,
+            &mut h.state.player_components.progress,
+            &mut sc,
+            &mut h.state.buff_timers,
+        )
+        .expect("notify_join_scene");
+        h.state.scene = Some(sc);
+    }
+    let join_notifies: Vec<sonoro_proto::pb::JoinSceneNotify> =
+        h.drain_decoded(sonoro_proto::pb::JoinSceneNotify::MSG_ID);
+    assert_eq!(join_notifies.len(), 1);
+    let scene_info = join_notifies[0].SceneInfo.as_ref().expect("SceneInfo");
+    let pinfo = &scene_info.PlayerInfos[0];
+    assert_eq!(pinfo.GroupType, 1);
+    assert_eq!(pinfo.CurRole, 1501);
+    let grp = &pinfo.FightRoleInfos[0];
+    assert_eq!(grp.CurRole, 1501);
+    assert!(
+        grp.FightRoleInfos.iter().any(|r| r.RoleId == 1501),
+        "Rover (1501) must be present in initial FightRoleInfos"
+    );
+    let rover_eid = grp
+        .FightRoleInfos
+        .iter()
+        .find(|r| r.RoleId == 1501)
+        .unwrap()
+        .EntityId;
+    assert!(
+        scene_info
+            .AoiData
+            .as_ref()
+            .unwrap()
+            .Entities
+            .iter()
+            .any(|e| e.Id == rover_eid),
+        "Rover entity must be present in JoinScene AoiData.Entities"
+    );
+
+    // 2. Boss Crownless (310000014) and prologue mob (310000587) keep explicit Level 1;
+    //    unleveled world monster (11000229) still scales with Area/WorldLevel.
+    entity_cmd::spawn_with_location(
+        &mut events,
+        h.state.scene.as_mut().unwrap(),
+        &h.state.fs,
+        &h.state.assets,
+        &mut h.state.conn,
+        &h.state.player_components.basic,
+        310_000_014,
+        Some(false),
+        Some(false),
+        Some(8),
+        None,
+        true,
+    )
+    .expect("spawn Crownless");
+    let crownless_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(310_000_014)
+        .expect("Crownless spawned");
+    entity_cmd::spawn_with_location(
+        &mut events,
+        h.state.scene.as_mut().unwrap(),
+        &h.state.fs,
+        &h.state.assets,
+        &mut h.state.conn,
+        &h.state.player_components.basic,
+        310_000_587,
+        Some(false),
+        Some(false),
+        Some(8),
+        None,
+        true,
+    )
+    .expect("spawn prologue mob");
+    let prologue_mob_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(310_000_587)
+        .expect("prologue mob spawned");
+    entity_cmd::spawn_with_location(
+        &mut events,
+        h.state.scene.as_mut().unwrap(),
+        &h.state.fs,
+        &h.state.assets,
+        &mut h.state.conn,
+        &h.state.player_components.basic,
+        11_000_229,
+        Some(false),
+        Some(false),
+        Some(8),
+        None,
+        true,
+    )
+    .expect("spawn overworld mob");
+    let overworld_mob_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(11_000_229)
+        .expect("overworld mob spawned");
+
+    {
+        let sc = h.state.scene.as_ref().unwrap();
+        let boss_lv = attributes::get_attr_value(
+            sc.entity(crownless_nid).unwrap().attribute.as_ref().unwrap(),
+            EAttributeType::Lv,
+        );
+        let pmob_lv = attributes::get_attr_value(
+            sc.entity(prologue_mob_nid).unwrap().attribute.as_ref().unwrap(),
+            EAttributeType::Lv,
+        );
+        let ow_lv = attributes::get_attr_value(
+            sc.entity(overworld_mob_nid).unwrap().attribute.as_ref().unwrap(),
+            EAttributeType::Lv,
+        );
+        assert_eq!(boss_lv, 1, "Prologue boss Crownless (310000014) must be Level 1");
+        assert_eq!(pmob_lv, 1, "Prologue mob (310000587) must be Level 1");
+        assert!(ow_lv >= 5, "Normal unleveled overworld monster (11000229) must still scale (got {ow_lv})");
+    }
+
+    // 3. Towers (Teleport007 122750076) and Chests (Treasure001 122001000 / 122000241)
+    //    spawn and stay protected past >60m / >30m Z even when 240 closer ambient entities exist.
+    let prologue_pos = [-139333.3f32, 66243.8, 7550.0];
+    entity_cmd::spawn_with_location(
+        &mut events,
+        h.state.scene.as_mut().unwrap(),
+        &h.state.fs,
+        &h.state.assets,
+        &mut h.state.conn,
+        &h.state.player_components.basic,
+        122_000_241,
+        Some(false),
+        Some(false),
+        Some(8),
+        None,
+        true,
+    )
+    .expect("spawn chest 122000241");
+    let existing_chest_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(122_000_241)
+        .expect("chest 122000241 spawned");
+    {
+        let sc = h.state.scene.as_mut().unwrap();
+        let base_count = sc.entities.len();
+        for i in base_count..240usize {
+            let mut s = EntityComponentStorage::new(
+                0,
+                ConfigComponent {
+                    camp: 2,
+                    config_id: 11_000_229,
+                    config_type: ConfigType::Level,
+                    entity_type: EntityType::Monster,
+                    state: EntityState::Default,
+                },
+            );
+            s.position = Some(PositionComponent {
+                location: [prologue_pos[0] + (i as f32) * 5.0, prologue_pos[1], prologue_pos[2]],
+                rotation: [0.0; 3],
+            });
+            sc.spawn(s);
+        }
+        assert!(sc.entities.len() >= 240);
+    }
+
+    let mut sc = h.state.scene.take().unwrap();
+    scene_logic::handle_spatial_spawns_check(
+        prologue_pos,
+        &mut events,
+        &mut sc,
+        Some(&mut h.state.player_components.scene),
+        &h.state.fs,
+        &h.state.assets,
+        &mut h.state.conn,
+        &mut h.state.player_components.basic,
+        &mut h.state.player_components.inventory,
+        &mut h.state.player_components.weapon,
+        &mut h.state.player_components.echo,
+        &mut h.state.player_components.map,
+        &mut h.state.player_components.quest,
+        Some(&mut h.state.player_components.guide),
+        Some(&mut h.state.player_components.mail),
+        &mut h.state.player_components.progress,
+        &mut h.state.player_components.role,
+        None,
+    )
+    .expect("handle_spatial_spawns_check");
+    assert!(
+        sc.entity(existing_chest_nid).is_some(),
+        "Existing treasure chest (122000241) > 60m must not be evicted at 240-entity cap"
+    );
+    assert!(
+        sc.find_entity_net_id_by_config_id(122_750_076).is_some(),
+        "Nearby Resonance Beacon Teleport007 (122750076, ~99m, AoiLayer=0) must still spawn"
+    );
+    assert!(
+        sc.find_entity_net_id_by_config_id(122_001_000).is_some(),
+        "Nearby Treasure Chest (122001000, ~109m, +35.7m Z) must still spawn"
+    );
+    h.state.scene = Some(sc);
+}
+
+#[test]
+fn audit_99_prologue_and_level_play_regressions() {
+    use crate::network::handlers::{inst, profile};
+    use sonoro_gamesv_data::asset_indexes::entity_world_pos;
+    use sonoro_gamesv_fs::quest_info::ActiveQuest;
+    use sonoro_gamesv_logic::helpers::condition::EvalContext;
+    use sonoro_gamesv_logic::helpers::quest_engine;
+    use sonoro_gamesv_logic::helpers::trial_roles;
+    use sonoro_proto::enums::ErrorCode;
+    use sonoro_proto::pb::{
+        ChildQuestNodeProgressProgressOneof, EntityInteractRequest, ExchangeRewardInfoNotify,
+        ExchangeRewardInfoRequest, LevelPlayInfoNotify, LevelPlayRewardRequest,
+        PlayerTitleRequest, UpdateGroupFormationNotify,
+    };
+
+    let mut h = TestHarness::new("audit99", Some(8));
+    h.drain_count();
+
+    // 1) KillProgress.MonId starts empty (0/1 and 0/2) and only contains killed IDs.
+    let q_nodes = h
+        .state
+        .assets
+        .quest_nodes
+        .get_owner_nodes(quest_engine::PROLOGUE_QUEST_ID)
+        .expect("139000025 quest nodes")
+        .to_vec();
+    let node_kill1 = q_nodes.iter().find(|n| n.id == 6).expect("139000025 node 6");
+    let node_kill2 = q_nodes.iter().find(|n| n.id == 99).expect("139000025 node 99");
+    let node_reach8 = q_nodes.iter().find(|n| n.id == 8).expect("139000025 node 8");
+
+    h.state
+        .player_components
+        .quest
+        .info
+        .active_quests
+        .push(ActiveQuest {
+            quest_id: quest_engine::PROLOGUE_QUEST_ID,
+            active_nodes: vec![6, 99, 8],
+            finished_nodes: vec![],
+            killed_entities: vec![],
+        });
+
+    let mut events = EventQueue::new();
+    {
+        let qctx = h.state.quest_context(&mut events);
+        let aq = &qctx.quest_comp.info.active_quests[0];
+        let p1 = quest_engine::triggers::build_child_node_progress(&qctx, aq, node_kill1)
+            .expect("node 6 progress");
+        let Some(ChildQuestNodeProgressProgressOneof::Kill(kp1)) = p1.Progress else {
+            panic!("expected KillProgress on node 6");
+        };
+        assert_eq!(kp1.CurrNum, 0);
+        assert_eq!(kp1.TotalNum, 1);
+        assert!(
+            kp1.MonId.is_empty(),
+            "MonId must be empty before enemy is killed (was {:?})",
+            kp1.MonId
+        );
+
+        let p2 = quest_engine::triggers::build_child_node_progress(&qctx, aq, node_kill2)
+            .expect("node 99 progress");
+        let Some(ChildQuestNodeProgressProgressOneof::Kill(kp2)) = p2.Progress else {
+            panic!("expected KillProgress on node 99");
+        };
+        assert_eq!(kp2.CurrNum, 0);
+        assert_eq!(kp2.TotalNum, 2);
+        assert!(kp2.MonId.is_empty());
+    }
+
+    h.state.player_components.quest.info.active_quests[0]
+        .record_killed_entity(310_000_000);
+    {
+        let qctx = h.state.quest_context(&mut events);
+        let aq = &qctx.quest_comp.info.active_quests[0];
+        let p2_partial = quest_engine::triggers::build_child_node_progress(&qctx, aq, node_kill2)
+            .expect("node 99 partial progress");
+        let Some(ChildQuestNodeProgressProgressOneof::Kill(kp2_partial)) = p2_partial.Progress else {
+            panic!("expected KillProgress");
+        };
+        assert_eq!(kp2_partial.CurrNum, 1);
+        assert_eq!(kp2_partial.TotalNum, 2);
+        assert_eq!(kp2_partial.MonId, vec![310_000_000]);
+    }
+
+    // 2) ReachArea node 8 must use Condition.Pos (-128737.73, 62616.8, 10176.38, r=4000)
+    // and NOT fall back to TrackTarget.Locations (-131224, 62578, 10171).
+    {
+        let cond_8 = node_reach8
+            .data
+            .get("Condition")
+            .and_then(|v| v.as_object())
+            .expect("node 8 Condition");
+        let mut qctx = h.state.quest_context(&mut events);
+        assert!(
+            !quest_engine::matches_reach_area_pub(
+                &mut qctx,
+                quest_engine::PROLOGUE_QUEST_ID,
+                &node_reach8.data,
+                cond_8,
+                [-133_620.0, 62_578.0, 10_171.0],
+            ),
+            "ReachArea must not fall back to TrackTarget.Locations when Condition.Pos is present"
+        );
+        assert!(
+            quest_engine::matches_reach_area_pub(
+                &mut qctx,
+                quest_engine::PROLOGUE_QUEST_ID,
+                &node_reach8.data,
+                cond_8,
+                [-128_737.73, 62_616.8, 10_176.38],
+            ),
+            "ReachArea must trigger inside Condition.Pos range"
+        );
+    }
+
+    // 3) Yangyang (1402) joins Formation Slot 2 after Node 9 (on Node 155 / 10) even without
+    // pre-existing RoleInfo or equipped weapon.
+    assert_eq!(trial_roles::PROLOGUE_YANGYANG_ROLE_ID, 1402);
+    h.state
+        .player_components
+        .role
+        .role_map
+        .remove(&trial_roles::PROLOGUE_YANGYANG_ROLE_ID);
+    assert!(!trial_roles::should_prologue_have_yangyang(
+        &h.state.player_components.quest
+    ));
+    h.state.player_components.quest.info.active_quests[0]
+        .active_nodes
+        .push(155);
+    assert!(trial_roles::should_prologue_have_yangyang(
+        &h.state.player_components.quest
+    ));
+    h.drain_count();
+    {
+        let mut sc = h.state.scene.take().unwrap();
+        let rc = &mut h.state.player_components.role;
+        let wc = &mut h.state.player_components.weapon;
+        let ec = &h.state.player_components.echo;
+        let qc = &h.state.player_components.quest;
+        trial_roles::sync_prologue_yangyang_live(
+            &mut sc,
+            &h.state.fs,
+            &h.state.assets,
+            &mut h.state.conn,
+            &mut events,
+            rc,
+            wc,
+            ec,
+            qc,
+        )
+        .expect("sync_prologue_yangyang_live");
+        h.state.scene = Some(sc);
+    }
+    assert!(
+        h.state
+            .player_components
+            .role
+            .role_map
+            .get(&1402)
+            .is_some_and(|r| r.weapon > 0),
+        "sync_prologue_yangyang_live must auto-provision Yangyang 1402 + her weapon"
+    );
+    let formation_roles: Vec<i32> = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .formation_info
+        .formations
+        .first()
+        .map(|f| f.roles.iter().flatten().map(|r| r.role_id).collect())
+        .unwrap_or_default();
+    assert!(
+        formation_roles.contains(&trial_roles::PROLOGUE_YANGYANG_ROLE_ID),
+        "Yangyang 1402 must join active formation: {:?}",
+        formation_roles
+    );
+    let form_notifs: Vec<UpdateGroupFormationNotify> =
+        h.drain_decoded(UpdateGroupFormationNotify::MSG_ID);
+    assert!(
+        form_notifs.iter().any(|n| n.GroupFormation.iter().any(|gf| {
+            gf.FightRoleInfos.iter().any(|group| {
+                group
+                    .FightRoleInfos
+                    .iter()
+                    .any(|fr| fr.RoleId == trial_roles::PROLOGUE_YANGYANG_ROLE_ID)
+            })
+        })),
+        "UpdateGroupFormationNotify must include Yangyang 1402"
+    );
+
+    // Login repair must also re-add Yangyang if missing from formation while on 155/10..131.
+    if let Some(f0) = h
+        .state
+        .scene
+        .as_mut()
+        .unwrap()
+        .formation_info
+        .formations
+        .first_mut()
+    {
+        for slot in &mut f0.roles {
+            if slot
+                .as_ref()
+                .is_some_and(|r| r.role_id == trial_roles::PROLOGUE_YANGYANG_ROLE_ID)
+            {
+                *slot = None;
+            }
+        }
+    }
+    h.state
+        .player_components
+        .role
+        .role_map
+        .remove(&trial_roles::PROLOGUE_YANGYANG_ROLE_ID);
+    {
+        let mut sc = h.state.scene.take().unwrap();
+        trial_roles::ensure_prologue_yangyang_in_formation_login(
+            &h.state.fs,
+            &h.state.assets,
+            &mut sc.formation_info,
+            &mut h.state.player_components.role,
+            &mut h.state.player_components.weapon,
+            &h.state.player_components.quest,
+        );
+        let repaired_roles: Vec<i32> = sc
+            .formation_info
+            .formations
+            .first()
+            .map(|f| f.roles.iter().flatten().map(|r| r.role_id).collect())
+            .unwrap_or_default();
+        assert!(repaired_roles.contains(&1402));
+        h.state.scene = Some(sc);
+    }
+
+    // 3b) Unset world weather (env.weather_id == 0) must NOT be forced on join before a quest trigger fires;
+    // explicit weather already set on quest state (e.g. WeatherId=3) must still sync on join.
+    h.state.player_components.quest.info.env.weather_id = 0;
+    h.drain_count();
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::quest_actions::sync_world_state_on_join(&mut qctx)
+            .expect("sync_world_state_on_join");
+    }
+    assert_eq!(h.state.player_components.quest.info.env.weather_id, 0);
+    let weather_notifs_unset: Vec<sonoro_proto::pb::WeatherNotify> =
+        h.drain_decoded(sonoro_proto::pb::WeatherNotify::MSG_ID);
+    assert!(
+        weather_notifs_unset.is_empty(),
+        "sync_world_state_on_join must not prematurely push WeatherNotify when env.weather_id is unset"
+    );
+
+    h.state.player_components.quest.info.env.weather_id = 3;
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::quest_actions::sync_world_state_on_join(&mut qctx)
+            .expect("sync_world_state_on_join explicit");
+    }
+    assert_eq!(h.state.player_components.quest.info.env.weather_id, 3);
+    let weather_notifs: Vec<sonoro_proto::pb::WeatherNotify> =
+        h.drain_decoded(sonoro_proto::pb::WeatherNotify::MSG_ID);
+    assert!(
+        weather_notifs.iter().any(|w| w.WeatherId == 3),
+        "sync_world_state_on_join must sync explicit WeatherId=3 when already set"
+    );
+    h.state.player_components.quest.info.env.weather_id = 0;
+
+    // 4) LevelPlay 110000000 (RebornBoss), its map marker 5021, and arena entities (110000595, 110001071)
+    // must stay hidden/blocked during unfinished 139000025 or ExploreLevel < 10.
+    h.state.player_components.basic.info.attributes.level = 1;
+    {
+        let lp_init = misc_logic::build_level_play_info_notify(
+            &h.state.assets,
+            &h.state.player_components.basic,
+            &h.state.player_components.quest,
+        );
+        assert!(
+            !lp_init.LevelPlayInfo.iter().any(|lp| lp.Id == 110_000_000),
+            "110000000 must not be pushed at login during prologue"
+        );
+        let mm_init = misc_logic::build_map_mark_info_notify(
+            &h.state.assets,
+            &h.state.player_components.map,
+            &h.state.player_components.basic,
+            &h.state.player_components.quest,
+        );
+        assert!(
+            !mm_init.ShowMarkIds.iter().any(|m| m.MarkId == 5021)
+                && !mm_init.UnlockMarkIds.contains(&5021),
+            "Boss MarkId 5021 must be hidden and locked at game start"
+        );
+        let eval_ctx = h.state.eval_context();
+        assert!(
+            misc_logic::is_entity_blocked_by_locked_level_play(&eval_ctx, 8, 110_000_595)
+                && misc_logic::is_entity_blocked_by_locked_level_play(&eval_ctx, 8, 110_001_071),
+            "Challenge chord 110000595 and Tacet Field atmosphere 110001071 must be hidden while 110000000 is locked"
+        );
+    }
+    let open_blocked = inst::handle_level_play_open_request(
+        &mut h.state,
+        sonoro_proto::pb::LevelPlayOpenRequest {
+            LevelPlayId: 110_000_000,
+            ..Default::default()
+        },
+    )
+    .expect("lp open blocked");
+    assert_ne!(open_blocked.ErrorCode, Some(ErrorCode::Success));
+    let interact_blocked = scene::handle_entity_interact_request(
+        &mut h.state,
+        &mut events,
+        EntityInteractRequest {
+            EntityId: 110_000_595,
+            OptionIndex: 0,
+            ..Default::default()
+        },
+    )
+    .expect("interact blocked");
+    assert_ne!(interact_blocked.ErrorCode, Some(ErrorCode::Success));
+
+    let lp_anchor_pos = entity_world_pos(
+        &h.state
+            .assets
+            .find_level_entity(8, 129_800_000)
+            .expect("entity 129800000"),
+    )
+    .expect("129800000 world pos");
+    h.state.player_components.basic.info.attributes.level = 10;
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut lp_ctx = level_play::LevelPlayContext::from_quest_ctx(&mut qctx).unwrap();
+        level_play::on_player_move(
+            &mut lp_ctx,
+            lp_anchor_pos[0],
+            lp_anchor_pos[1],
+            lp_anchor_pos[2],
+        )
+        .expect("lp move 1");
+    }
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&110_000_000),
+        "RebornBoss LevelPlay 110000000 must stay blocked while prologue 139000025 is active"
+    );
+
+    // Stale entered 110000000 during unfinished prologue must be pruned on login sync.
+    append_unique_int(
+        &mut h.state.player_components.quest.info.progress.entered_level_plays,
+        110_000_000,
+    );
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut lp_ctx = level_play::LevelPlayContext::from_quest_ctx(&mut qctx).unwrap();
+        level_play::sync_on_login(&mut lp_ctx).expect("lp sync_on_login");
+    }
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&110_000_000),
+        "sync_on_login must prune stale RebornBoss entry during prologue"
+    );
+
+    // Finish prologue 139000025, but keep ExploreLevel = 1 (< 10): still blocked by OpenCondition.
+    h.state.player_components.quest.info.active_quests.clear();
+    append_unique_int(
+        &mut h.state.player_components.quest.info.finished_quests,
+        quest_engine::PROLOGUE_QUEST_ID,
+    );
+    h.state.player_components.basic.info.attributes.level = 1;
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut lp_ctx = level_play::LevelPlayContext::from_quest_ctx(&mut qctx).unwrap();
+        level_play::on_player_move(
+            &mut lp_ctx,
+            lp_anchor_pos[0],
+            lp_anchor_pos[1],
+            lp_anchor_pos[2],
+        )
+        .expect("lp move lv1");
+    }
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&110_000_000),
+        "LevelPlay 110000000 must stay blocked when ExploreLevel < 10"
+    );
+
+    // With prologue finished AND ExploreLevel >= 10, 5021/110000000/110000595 unlock and entering 129800000 activates 110000000.
+    h.state.player_components.basic.info.attributes.level = 10;
+    {
+        let lp_unlocked = misc_logic::build_level_play_info_notify(
+            &h.state.assets,
+            &h.state.player_components.basic,
+            &h.state.player_components.quest,
+        );
+        assert!(lp_unlocked.LevelPlayInfo.iter().any(|lp| lp.Id == 110_000_000));
+        let mm_unlocked = misc_logic::build_map_mark_info_notify(
+            &h.state.assets,
+            &h.state.player_components.map,
+            &h.state.player_components.basic,
+            &h.state.player_components.quest,
+        );
+        assert!(
+            mm_unlocked.ShowMarkIds.iter().any(|m| m.MarkId == 5021)
+                && mm_unlocked.UnlockMarkIds.contains(&5021),
+            "Boss MarkId 5021 must appear once prologue finishes and ExploreLevel >= 10"
+        );
+        let eval_ctx = h.state.eval_context();
+        assert!(!misc_logic::is_entity_blocked_by_locked_level_play(&eval_ctx, 8, 110_000_595));
+    }
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut lp_ctx = level_play::LevelPlayContext::from_quest_ctx(&mut qctx).unwrap();
+        level_play::on_player_move(
+            &mut lp_ctx,
+            lp_anchor_pos[0],
+            lp_anchor_pos[1],
+            lp_anchor_pos[2],
+        )
+        .expect("lp move lv10");
+    }
+    assert!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&110_000_000),
+        "LevelPlay 110000000 should activate once prologue is done and ExploreLevel >= 10"
+    );
+
+    // 5) CompareLevelPlayRewardState (no State field), LevelPlayRewardRequest, ExchangeRewardInfoRequest, ResetLevelPlay.
+    append_unique_int(
+        &mut h.state.player_components.quest.info.completed_level_plays,
+        110_000_000,
+    );
+    h.state
+        .player_components
+        .progress
+        .info
+        .set_key_int("lp_state:110000000", 3);
+    let cond_reward_ready = serde_json::json!({
+        "Type": "CompareLevelPlayRewardState",
+        "EntityId": 110_000_089,
+        "Compare": "Ne"
+    });
+    let cond_reward_not_ready = serde_json::json!({
+        "Type": "CompareLevelPlayRewardState",
+        "EntityId": 110_000_089
+    });
+    {
+        let mut ectx = EvalContext::new(
+            &h.state.player_components.basic,
+            &h.state.player_components.echo,
+            &h.state.player_components.inventory,
+            &h.state.player_components.map,
+            &h.state.player_components.quest,
+        );
+        ectx.assets = Some(&h.state.assets);
+        ectx.progress_comp = Some(&h.state.player_components.progress);
+        assert!(
+            eval_single_inline_condition(&ectx, &cond_reward_ready),
+            "CompareLevelPlayRewardState (Ne, no State) must be true when completed and unclaimed"
+        );
+        assert!(
+            !eval_single_inline_condition(&ectx, &cond_reward_not_ready),
+            "CompareLevelPlayRewardState (Eq default, no State) must be false while CanGetReward is true"
+        );
+    }
+
+    h.drain_count();
+    let reward_resp = inst::handle_level_play_reward_request(
+        &mut h.state,
+        LevelPlayRewardRequest {
+            EntityId: 110_000_089,
+            ExchangeCount: 1,
+        },
+    )
+    .expect("handle_level_play_reward_request");
+    assert_eq!(reward_resp.ErrorCode, Some(ErrorCode::Success));
+    assert!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .opened_chests
+            .contains(&110_000_089)
+    );
+    use crate::network::message::Message;
+    use sonoro_proto::PbMessage;
+    let mut lp_notifs = Vec::new();
+    let mut ex_notifs = Vec::new();
+    while let Ok(frame) = h.rx.try_recv() {
+        if frame.len() < 3 {
+            continue;
+        }
+        if let Ok(msg) = Message::decode(&frame[3..]) {
+            if msg.header.message_id() == LevelPlayInfoNotify::MSG_ID
+                && let Ok(n) = LevelPlayInfoNotify::decode(&msg.payload)
+            {
+                lp_notifs.push(n);
+            } else if msg.header.message_id() == ExchangeRewardInfoNotify::MSG_ID
+                && let Ok(n) = ExchangeRewardInfoNotify::decode(&msg.payload)
+            {
+                ex_notifs.push(n);
+            }
+        }
+    }
+    assert!(
+        lp_notifs
+            .iter()
+            .any(|n| n.LevelPlayInfo.iter().any(|i| i.Id == 110_000_000 && i.GetRewardCount == 1))
+    );
+    assert!(
+        ex_notifs
+            .iter()
+            .any(|n| n.ExchangeRewardId > 0 && n.Count >= 1)
+    );
+
+    {
+        let mut ectx = EvalContext::new(
+            &h.state.player_components.basic,
+            &h.state.player_components.echo,
+            &h.state.player_components.inventory,
+            &h.state.player_components.map,
+            &h.state.player_components.quest,
+        );
+        ectx.assets = Some(&h.state.assets);
+        ectx.progress_comp = Some(&h.state.player_components.progress);
+        assert!(
+            !eval_single_inline_condition(&ectx, &cond_reward_ready),
+            "CompareLevelPlayRewardState (Ne) must become false after claiming"
+        );
+        assert!(
+            eval_single_inline_condition(&ectx, &cond_reward_not_ready),
+            "CompareLevelPlayRewardState (Eq default) must become true after claiming"
+        );
+    }
+
+    let ex_info = inst::handle_exchange_reward_info_request(
+        &mut h.state,
+        ExchangeRewardInfoRequest::default(),
+    )
+    .expect("handle_exchange_reward_info_request");
+    assert_eq!(ex_info.ExchangeRewardDict.get(&110_000_089).copied(), Some(1));
+
+    // ResetLevelPlay clears claim, opened chest, and pushes State: 1.
+    h.drain_count();
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let reset_act = serde_json::json!({
+            "Name": "ResetLevelPlay",
+            "Params": { "ResetLevelPlayList": [110_000_000] }
+        });
+        execute_action(&mut qctx, &mut ActionCallbacks::default(), 0, 0, &reset_act)
+            .expect("ResetLevelPlay");
+    }
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .opened_chests
+            .contains(&110_000_089)
+    );
+    assert_eq!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int("lp_reward_claimed:110000000"),
+        0
+    );
+    let reset_notifs: Vec<LevelPlayInfoNotify> = h.drain_decoded(LevelPlayInfoNotify::MSG_ID);
+    assert!(
+        reset_notifs
+            .iter()
+            .any(|n| n.LevelPlayInfo.iter().any(|i| i.Id == 110_000_000 && i.State == 1))
+    );
+
+    // 6) PlayerTitleRequest returns unlocked title list.
+    let title_resp = profile::handle_player_title_request(
+        &mut h.state,
+        PlayerTitleRequest::default(),
+    )
+    .expect("handle_player_title_request");
+    assert_eq!(title_resp.ErrorCode, Some(ErrorCode::Success));
+    assert!(!title_resp.PlayerTitleInfo.is_empty());
+}
+
+#[test]
+fn audit_142_boss_hp_does_not_refill_on_lifemax_buff_or_fsm_reset() {
+    use sonoro_gamesv_logic::events::{BuffAdditionEntry, FsmServerActionKind};
+    use sonoro_gamesv_logic::helpers::attributes::{
+        self, AttributeChangeType, AttributeValueType,
+    };
+
+    // 1) Direct LifeMax delta must NOT scale current HP upward, and only clamps down when LifeMax shrinks below Life.
+    let mut direct_props = vec![0i32; 144];
+    direct_props[EAttributeType::LifeMax.to_i32() as usize] = 100_000;
+    direct_props[EAttributeType::Life.to_i32() as usize] = 40_000;
+    let mut direct_attr = AttributeComponent::create(&direct_props);
+
+    let changed_up = attributes::change_attr(
+        &mut direct_attr,
+        EAttributeType::LifeMax,
+        AttributeChangeType::Delta,
+        AttributeValueType::Current,
+        100_000,
+    );
+    assert!(changed_up.contains(&EAttributeType::LifeMax));
+    assert!(!changed_up.contains(&EAttributeType::Life));
+    assert_eq!(
+        attributes::get_attr_value(&direct_attr, EAttributeType::LifeMax),
+        200_000
+    );
+    assert_eq!(
+        attributes::get_attr_value(&direct_attr, EAttributeType::Life),
+        40_000,
+        "increasing LifeMax must not scale current Life upward"
+    );
+
+    // Raise Life to 120_000 (healed while buffed), then shrink LifeMax back to 100_000 -> Life clamps down to 100_000 and is reported.
+    attributes::change_attr(
+        &mut direct_attr,
+        EAttributeType::Life,
+        AttributeChangeType::Override,
+        AttributeValueType::Current,
+        120_000,
+    );
+    let changed_down = attributes::change_attr(
+        &mut direct_attr,
+        EAttributeType::LifeMax,
+        AttributeChangeType::Delta,
+        AttributeValueType::Current,
+        -100_000,
+    );
+    assert!(changed_down.contains(&EAttributeType::LifeMax));
+    assert!(changed_down.contains(&EAttributeType::Life));
+    assert_eq!(
+        attributes::get_attr_value(&direct_attr, EAttributeType::Life),
+        100_000
+    );
+
+    // 2) Live scene boss entity: Crownless Phase-3 +100% LifeMax buff (80004034) and FSM ResetStatus must NOT refill HP.
+    let mut h = TestHarness::new("audit_142_boss_hp", Some(8));
+    let mut events = EventQueue::default();
+
+    let boss_nid = {
+        let graph = h
+            .state
+            .assets
+            .fsm_graphs
+            .get("SM_MB1DaniyaMd00101")
+            .expect("SM_MB1DaniyaMd00101 graph");
+        let mut s = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: 2,
+                config_id: 900_142,
+                config_type: ConfigType::Level,
+                entity_type: EntityType::Monster,
+                state: EntityState::Default,
+            },
+        );
+        let mut props = vec![0i32; 144];
+        props[EAttributeType::LifeMax.to_i32() as usize] = 100_000;
+        props[EAttributeType::Life.to_i32() as usize] = 35_000;
+        props[EAttributeType::ToughMax.to_i32() as usize] = 1_000;
+        props[EAttributeType::Tough.to_i32() as usize] = 1_000;
+        let mut attr = AttributeComponent::create(&props);
+        attributes::change_attr(
+            &mut attr,
+            EAttributeType::Tough,
+            AttributeChangeType::Override,
+            AttributeValueType::Current,
+            200,
+        );
+        s.attribute = Some(attr);
+        s.buffs = Some(FightBuffComponent::default());
+        s.tag = Some(TagComponent::default());
+        s.logic_state = Some(LogicStateComponent::default());
+        s.part = Some(PartComponent::default());
+        s.fsm = Some(FsmComponent::from_graph(graph, 0).expect("fsm graph"));
+        h.state.scene.as_mut().unwrap().spawn(s).net_id
+    };
+    let boss_handle = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .entity_handle(boss_nid)
+        .expect("boss handle");
+
+    // Apply Buff 80004034 (+100% LifeMax) via event queue.
+    events.enqueue(Event::BuffAddition {
+        target: boss_handle,
+        instigator: boss_handle,
+        buffs: vec![BuffAdditionEntry {
+            id: 80_004_034,
+            is_active: true,
+            duration_seconds: Some(10.0),
+            ..Default::default()
+        }],
+    });
+    crate::network::connection::drain_event_queue_best_effort(&mut events, &mut h.state);
+    h.drain_count();
+
+    {
+        let sc = h.state.scene.as_ref().unwrap();
+        let attr = sc.entity(boss_nid).unwrap().attribute.as_ref().unwrap();
+        assert_eq!(attributes::get_attr_value(attr, EAttributeType::LifeMax), 200_000);
+        assert_eq!(
+            attributes::get_attr_value(attr, EAttributeType::Life),
+            35_000,
+            "Buff 80004034 (+100% LifeMax) must leave boss current Life unchanged"
+        );
+    }
+
+    // Trigger FSM ResetStatus: must clear Tough back to 1000 and remove buffs without refilling Life to 100_000.
+    events.enqueue(Event::FsmServerAction {
+        entity: boss_handle,
+        kind: FsmServerActionKind::ResetStatus,
+    });
+    crate::network::connection::drain_event_queue_best_effort(&mut events, &mut h.state);
+    h.drain_count();
+
+    {
+        let sc = h.state.scene.as_ref().unwrap();
+        let attr = sc.entity(boss_nid).unwrap().attribute.as_ref().unwrap();
+        assert_eq!(
+            attributes::get_attr_value(attr, EAttributeType::Life),
+            35_000,
+            "FsmServerActionKind::ResetStatus must not refill boss Life"
+        );
+        assert_eq!(
+            attributes::get_attr_value(attr, EAttributeType::Tough),
+            1_000
+        );
+    }
+}
+
+#[test]
+fn audit_143_weather_not_forced_prematurely_and_deferred_past_flow_or_wait() {
+    let mut h = TestHarness::new("audit_143_weather", Some(8));
+    let mut events = EventQueue::default();
+
+    // 1) World join + entering 139000025 Node 19 must NOT force WeatherId=1 when env.weather_id is unset.
+    h.state.player_components.quest.info.env.weather_id = 0;
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::quest_actions::sync_world_state_on_join(&mut qctx)
+            .expect("sync_world_state_on_join");
+    }
+    assert_eq!(h.state.player_components.quest.info.env.weather_id, 0);
+    assert!(
+        h.drain_decoded::<sonoro_proto::pb::WeatherNotify>(sonoro_proto::pb::WeatherNotify::MSG_ID)
+            .is_empty()
+    );
+
+    quest_engine::tree::activate_quest(&mut h.state.quest_context(&mut events), 139_000_025, true)
+        .expect("activate prologue");
+    assert_eq!(
+        h.state.player_components.quest.info.env.weather_id, 0,
+        "entering prologue node 19 must not force weather before quest SetWeather trigger"
+    );
+    assert!(
+        h.drain_decoded::<sonoro_proto::pb::WeatherNotify>(sonoro_proto::pb::WeatherNotify::MSG_ID)
+            .is_empty()
+    );
+    let _ = events.drain_all().count();
+
+    // 2) Normal quest SetWeather emits WeatherNotify cleanly WITHOUT injecting tweentime=0 JSPatchNotify snap.
+    let mut cbs = quest_engine::action_callbacks();
+    let set_w2 = serde_json::json!({
+        "Name": "SetWeather",
+        "Params": { "WeatherId": 2 }
+    });
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::quest_actions::execute_action(
+            &mut qctx,
+            &mut cbs,
+            139_000_025,
+            35,
+            &set_w2,
+        )
+        .expect("apply weather 2");
+    }
+    assert_eq!(h.state.player_components.quest.info.env.weather_id, 2);
+    let w2_notifs: Vec<sonoro_proto::pb::WeatherNotify> =
+        h.drain_decoded(sonoro_proto::pb::WeatherNotify::MSG_ID);
+    assert_eq!(w2_notifs.len(), 1);
+    assert_eq!(w2_notifs[0].WeatherId, 2);
+    let js_notifs: Vec<sonoro_proto::pb::JSPatchNotify> =
+        h.drain_decoded(sonoro_proto::pb::JSPatchNotify::MSG_ID);
+    assert!(
+        !js_notifs.iter().any(|p| String::from_utf8_lossy(&p.Content).contains("ChangeCurrentWeather")),
+        "quest weather change must not inject instant-snap ChangeCurrentWeather JS patch"
+    );
+    let _ = events.drain_all().count();
+
+    // 3) In an action list with sync PlayFlow followed by SetWeather, SetWeather must NOT fire until that Flow ends
+    // (including across multi-state next_state_id transitions).
+    if let Some(sc) = h.state.scene.as_mut() {
+        sc.clear_active_flow();
+        sc.clear_pending_flows();
+    }
+    let flow_then_weather = vec![
+        serde_json::json!({
+            "Name": "PlayFlow",
+            "Params": { "FlowListName": "剧情_新主线_CE版_序章", "FlowId": 1, "StateId": 18 }
+        }),
+        serde_json::json!({
+            "Name": "SetWeather",
+            "Params": { "WeatherId": 3 }
+        }),
+    ];
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::quest_actions::execute_action_list(
+            &mut qctx,
+            &mut cbs,
+            189_000_005,
+            18,
+            &flow_then_weather,
+        )
+        .expect("execute PlayFlow + SetWeather");
+    }
+    let started_inc = h.state.scene.as_ref().unwrap().active_flow_inc_id;
+    assert_ne!(started_inc, 0);
+    assert_eq!(
+        h.state.player_components.quest.info.env.weather_id, 2,
+        "SetWeather after sync PlayFlow must NOT apply before the flow ends"
+    );
+    h.drain_count();
+
+    // Ending flow transitions through any intermediate FlowStates (or completes immediately if terminal).
+    let mut safety = 0usize;
+    loop {
+        let cur_inc = h.state.scene.as_ref().unwrap().active_flow_inc_id;
+        if cur_inc == 0 {
+            break;
+        }
+        assert!(safety < 16, "flow chain exceeded expected length");
+        safety += 1;
+        let _ = crate::network::handlers::flow::handle_flow_end_request(
+            &mut h.state,
+            &mut events,
+            sonoro_proto::pb::FlowEndRequest {
+                FlowIncId: cur_inc,
+                OptionInfos: BTreeMap::new(),
+                IsSkip: true,
+                ..Default::default()
+            },
+        )
+        .expect("end flow");
+        let _ = events.drain_all().count();
+    }
+    assert_eq!(
+        h.state.player_components.quest.info.env.weather_id, 3,
+        "deferred SetWeather must apply once the preceding PlayFlow finishes"
+    );
+    let w3_notifs: Vec<sonoro_proto::pb::WeatherNotify> =
+        h.drain_decoded(sonoro_proto::pb::WeatherNotify::MSG_ID);
+    assert!(w3_notifs.iter().any(|w| w.WeatherId == 3));
+
+    // 4) Action list with Wait(0.25s) followed by SetWeather(4) must defer until timer fires.
+    let wait_then_weather = vec![
+        serde_json::json!({
+            "Name": "Wait",
+            "Params": { "Time": 0.25 }
+        }),
+        serde_json::json!({
+            "Name": "SetWeather",
+            "Params": { "WeatherId": 4 }
+        }),
+    ];
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::quest_actions::execute_action_list(
+            &mut qctx,
+            &mut cbs,
+            151_000_024,
+            82,
+            &wait_then_weather,
+        )
+        .expect("execute Wait + SetWeather");
+    }
+    assert_eq!(
+        h.state.player_components.quest.info.env.weather_id, 3,
+        "SetWeather after Wait must not apply immediately"
+    );
+    {
+        let future_ms = sonoro_gamesv_logic::scene::now_millis() + 1_000;
+        let mut qctx = h.state.quest_context(&mut events);
+        quest_engine::tree::on_timers_due(&mut qctx, future_ms).expect("on_timers_due");
+    }
+    assert_eq!(h.state.player_components.quest.info.env.weather_id, 4);
+}
+
+#[test]
+fn audit_144_explore_teleporter_index_and_udp_kcp_burst_reconnect() {
+    use sonoro_proto::PbMessage;
+    use std::time::Instant;
+
+    let mut h = TestHarness::new("audit_144_net", Some(8));
+    let mut events = EventQueue::default();
+
+    // 1) teleporters_by_area matches full teleporter scan across all 524 areas and runs fast (< 50ms even unoptimized debug).
+    let all_areas: Vec<i32> = h.state.assets.tables.area.items.iter().map(|a| a.AreaId).collect();
+    let mut area_tp_counts_expected = std::collections::HashMap::<i32, usize>::new();
+    for tp in &h.state.assets.tables.teleporter.items {
+        if let Some(lcfg) = h.state.assets.find_level_entity(tp.MapId, tp.TeleportEntityConfigId)
+            && lcfg.AreaId > 0
+        {
+            *area_tp_counts_expected.entry(lcfg.AreaId).or_insert(0) += 1;
+        }
+    }
+    for &aid in &all_areas {
+        let exp = area_tp_counts_expected.get(&aid).copied().unwrap_or(0);
+        assert_eq!(
+            h.state.assets.indexes.teleporter_indices_for_area(aid).len(),
+            exp,
+            "teleporters_by_area count mismatch for area {aid}"
+        );
+    }
+    let t_exp = Instant::now();
+    let exp_resp = map::handle_explore_progress_request(
+        &mut h.state,
+        sonoro_proto::pb::ExploreProgressRequest { AreaIds: all_areas },
+    )
+    .expect("explore progress");
+    assert!(!exp_resp.AreaProgress.is_empty());
+    assert!(
+        t_exp.elapsed() < std::time::Duration::from_millis(50),
+        "ExploreProgressRequest took {:?}, expected < 50ms",
+        t_exp.elapsed()
+    );
+
+    // 2) LazyNodeStore cached owner lookup parity.
+    assert!(h.state.assets.quest_nodes.has_owner(139_000_025));
+    assert!(!h.state.assets.quest_nodes.has_owner(-999_999));
+
+    // 3) Real UDP bind_and_serve handles concurrent/unacked client traffic + immediate KRKCP_SYN reconnect.
+    let _ = events.drain_all().count();
+    let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind probe");
+    let bind_addr = probe.local_addr().expect("probe addr");
+    drop(probe);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .expect("tokio rt");
+    let assets = h.state.assets.clone();
+    let fs = h.state.fs.clone();
+    let sm = std::sync::Arc::new(crate::network::SessionManager::new());
+    let (tx_shut, rx_shut) = tokio::sync::watch::channel(false);
+    let srv_handle = rt.spawn(crate::network::bind_and_serve(
+        bind_addr, fs, assets, sm, rx_shut,
+    ));
+
+    let kcp_req_frame = |seq: u32, rpc: u16, msg_id: u16, payload: &[u8]| -> Vec<u8> {
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(payload);
+        let crc = hasher.finalize();
+        let mut app = Vec::with_capacity(13 + payload.len());
+        app.push(1);
+        app.extend_from_slice(&seq.to_le_bytes());
+        app.extend_from_slice(&rpc.to_le_bytes());
+        app.extend_from_slice(&msg_id.to_le_bytes());
+        app.extend_from_slice(&crc.to_le_bytes());
+        app.extend_from_slice(payload);
+        let len_b = (app.len() as u32).to_le_bytes();
+        let mut frame = vec![len_b[0], len_b[1], len_b[2]];
+        frame.extend_from_slice(&app);
+        frame
+    };
+
+    rt.block_on(async {
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let mut syn = [0u8; 35];
+        syn[0] = 0xED;
+        let mut buf = [0u8; 4096];
+
+        let cli1 = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli1.connect(bind_addr).await.unwrap();
+        cli1.send(&syn).await.unwrap();
+        let n1 = tokio::time::timeout(std::time::Duration::from_secs(2), cli1.recv(&mut buf))
+            .await
+            .expect("cli1 syn ack timeout")
+            .unwrap();
+        assert_eq!(n1, 5);
+        assert_eq!(buf[0], 0xEE);
+        let conv1 = u32::from_le_bytes(buf[1..5].try_into().unwrap());
+
+        let mut kcp1 = crate::network::kcp::Kcp::new(conv1);
+        kcp1.set_mtu(1400).unwrap();
+        kcp1.set_nodelay(1, 10, 2, true);
+        kcp1.set_wnd_size(512, 512);
+        let hb_bytes = sonoro_proto::pb::HeartbeatRequest::default().encode_to_vec();
+        // Send a burst of un-ACKed requests and drop cli1 without draining responses.
+        for i in 1..=32u32 {
+            kcp1.send(&kcp_req_frame(
+                i,
+                i as u16,
+                sonoro_proto::pb::HeartbeatRequest::MSG_ID,
+                &hb_bytes,
+            ))
+            .unwrap();
+        }
+        let mut pkts = Vec::new();
+        kcp1.update(10, &mut |p| pkts.push(p.to_vec()));
+        for p in pkts.drain(..) {
+            let _ = cli1.send(&p).await;
+        }
+        drop(cli1);
+
+        // Immediately reconnect with cli2 -> KRKCP_ACK and HeartbeatResponse must arrive promptly.
+        let cli2 = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli2.connect(bind_addr).await.unwrap();
+        let tsyn2 = Instant::now();
+        cli2.send(&syn).await.unwrap();
+        let n2 = tokio::time::timeout(std::time::Duration::from_secs(2), cli2.recv(&mut buf))
+            .await
+            .expect("cli2 syn ack timeout")
+            .unwrap();
+        assert_eq!(n2, 5);
+        assert_eq!(buf[0], 0xEE);
+        assert!(tsyn2.elapsed() < std::time::Duration::from_secs(1));
+        let conv2 = u32::from_le_bytes(buf[1..5].try_into().unwrap());
+
+        let mut kcp2 = crate::network::kcp::Kcp::new(conv2);
+        kcp2.set_mtu(1400).unwrap();
+        kcp2.set_nodelay(1, 10, 2, true);
+        kcp2.set_wnd_size(512, 512);
+        kcp2.send(&kcp_req_frame(
+            1,
+            1,
+            sonoro_proto::pb::HeartbeatRequest::MSG_ID,
+            &hb_bytes,
+        ))
+        .unwrap();
+        kcp2.update(10, &mut |p| pkts.push(p.to_vec()));
+        for p in pkts.drain(..) {
+            cli2.send(&p).await.unwrap();
+        }
+        let mut got_hb2 = false;
+        for tick in 1..100u32 {
+            if let Ok(Ok(rlen)) =
+                tokio::time::timeout(std::time::Duration::from_millis(10), cli2.recv(&mut buf))
+                    .await
+            {
+                let _ = kcp2.input(&buf[..rlen]);
+                while let Ok(pkt) = kcp2.recv_vec() {
+                    if pkt.len() > 3 {
+                        got_hb2 = true;
+                    }
+                }
+                kcp2.update(10 + tick * 10, &mut |p| pkts.push(p.to_vec()));
+                for p in pkts.drain(..) {
+                    let _ = cli2.send(&p).await;
+                }
+                if got_hb2 {
+                    break;
+                }
+            }
+        }
+        assert!(got_hb2, "cli2 heartbeat after unacked burst must succeed");
+    });
+
+    let _ = tx_shut.send(true);
+    srv_handle.abort();
+}
+

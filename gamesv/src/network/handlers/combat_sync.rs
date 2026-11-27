@@ -899,6 +899,7 @@ pub fn handle_buff_item_request(
                         continue;
                     };
                     if b.ExtraEffectID == 101 {
+                        let mut revived_ent = false;
                         if let Some(attr) = scene.entities[idx].attribute.as_mut() {
                             let life_max =
                                 attributes::get_attr_value(attr, EAttributeType::LifeMax).max(1);
@@ -919,6 +920,7 @@ pub fn handle_buff_item_request(
                             if cur_life <= 0 {
                                 let _ = attributes::revive_entity(attr, Some(heal_amt));
                                 any_revived = true;
+                                revived_ent = true;
                                 pack_data.push(CombatReceiveData {
                                     Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
                                         CombatNotifyData {
@@ -962,6 +964,9 @@ pub fn handle_buff_item_request(
                             let final_hp =
                                 attributes::get_attr_value(attr, EAttributeType::Life).max(0);
                             modified_role = Some((target_role, final_hp));
+                        }
+                        if revived_ent {
+                            scene.entities[idx].dead_notified = false;
                         }
                         scene.mark_fsm_dirty(net_id, wake_reason::ATTRIBUTE);
                     } else if (b.ExtraEffectID == 33 || b.ExtraEffectID == 34)

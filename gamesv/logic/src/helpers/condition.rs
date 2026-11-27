@@ -1275,7 +1275,7 @@ fn eval_system_state_provide_condition(ctx: &EvalContext<'_>, obj: &Map<String, 
     }
 }
 
-fn eval_single_provide_condition(ctx: &EvalContext<'_>, cond_item: &Value) -> bool {
+pub fn eval_single_provide_condition(ctx: &EvalContext<'_>, cond_item: &Value) -> bool {
     let Some(obj) = cond_item.as_object() else {
         return true;
     };
@@ -1829,6 +1829,25 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
         }
         "ReadMail" => json_int(obj.get("MailId"))
             .is_some_and(|mid| ctx.quest_comp.info.progress.read_mails.contains(&mid)),
+        "GetSkill" => json_int(obj.get("SkillId"))
+            .filter(|&id| id > 0)
+            .is_none_or(|sid| {
+                ctx.progress_comp
+                    .is_some_and(|pc| pc.info.has_claim(&format!("skill_unlocked:{sid}")))
+                    || ctx.scene.is_some_and(|s| {
+                        s.explore_tools_info.active_explore_skill == sid
+                            || s.explore_tools_info.unlocked_explore_skills.contains(&sid)
+                    })
+                    || ctx.echo_comp.echo_map.values().any(|echo| {
+                        ctx.assets.is_some_and(|assets| {
+                            assets
+                                .tables
+                                .phantom_item
+                                .get_data_by_id(&echo.id)
+                                .is_some_and(|pi| pi.SkillId == sid)
+                        })
+                    })
+            }),
         "ReadPhoneMessage" => json_int(obj.get("PhoneMessageId"))
             .is_some_and(|pmid| ctx.quest_comp.info.progress.read_phone_messages.contains(&pmid)),
         "ReceiveTelecom" => json_int(obj.get("TelecomId"))
@@ -1907,8 +1926,10 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
             };
             if is_ne { !in_span } else { in_span }
         }
-        "CheckLevel" => {
-            let req = json_int(obj.get("Level")).unwrap_or(1);
+        "CheckLevel" | "ExploreLevel" => {
+            let req = json_int(obj.get("ExploreLevel"))
+                .or_else(|| json_int(obj.get("Level")))
+                .unwrap_or(1);
             ctx.basic_comp.info.attributes.level >= req
         }
         "CompareExploreLevel" => {
@@ -2693,12 +2714,11 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
         }
         "CompareLevelPlayRewardState" => {
             let cfg_id = json_int(obj.get("EntityId")).unwrap_or(ctx.self_entity_config_id);
-            let want_state = json_int(obj.get("State")).unwrap_or(3);
+            let explicit_want = json_int(obj.get("State"));
             let cmp = get_param_str(obj, "Compare").unwrap_or("Eq");
             let mut cur_state = 0;
-            if cfg_id > 0 && ctx.quest_comp.info.has_opened_chest(cfg_id) {
-                cur_state = 3;
-            } else if cfg_id > 0
+            let mut matched_lp_id = 0;
+            if cfg_id > 0
                 && let Some(assets) = ctx.assets
             {
                 let map_id = ctx.scene.map_or(8, |sc| sc.instance_id);
@@ -2716,6 +2736,7 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
                     {
                         continue;
                     }
+                    matched_lp_id = lp.LevelPlayId;
                     cur_state = if ctx.quest_comp.info.completed_level_plays.contains(&lp.LevelPlayId) {
                         3
                     } else if ctx
@@ -2732,7 +2753,25 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
                     break;
                 }
             }
-            compare_ints(cur_state, want_state, cmp)
+            if let Some(want_state) = explicit_want {
+                if cfg_id > 0 && ctx.quest_comp.info.has_opened_chest(cfg_id) {
+                    cur_state = 3;
+                }
+                compare_ints(cur_state, want_state, cmp)
+            } else {
+                // C# LevelConditionCheckLevelPlayRewardState checks `CanGetReward == false` (Compare=Ne => CanGetReward == true).
+                let reward_claimed = cfg_id > 0 && ctx.quest_comp.info.has_opened_chest(cfg_id)
+                    || (matched_lp_id > 0
+                        && ctx
+                            .progress_comp
+                            .is_some_and(|pc| pc.info.get_key_int(&format!("lp_reward_claimed:{matched_lp_id}")) > 0));
+                let can_get_reward = cur_state == 3 && !reward_claimed;
+                if cmp == "Ne" {
+                    can_get_reward
+                } else {
+                    !can_get_reward
+                }
+            }
         }
         "TargetEntityInvisible" => {
             let Some(eid) = json_int(obj.get("EntityId")) else {
@@ -4798,16 +4837,27 @@ pub fn eval_condition_group_list(ctx: &EvalContext<'_>, list_val: &Value) -> boo
     items.iter().any(|grp| eval_inline_condition_block(ctx, grp))
 }
 
-pub fn eval_entity_visible_component(ctx: &EvalContext<'_>, components: &Components) -> bool {
-    let extra_ev = components.extra.iter().find_map(|entry| match entry {
-        ExtraEntry::EntityVisibleComponent(ev) => Some(ev.as_ref()),
-        _ => None,
-    });
-    let tpl_ev = components.template_extra.iter().find_map(|entry| match entry {
-        ExtraEntry::EntityVisibleComponent(ev) => Some(ev.as_ref()),
-        _ => None,
-    });
-    let Some(ev) = extra_ev.or(tpl_ev) else {
+fn find_entity_visible_component<'a>(
+    components: &'a Components,
+) -> Option<&'a sonoro_gamesv_data::tables::entity_components::extra::EntityVisibleComponent> {
+    components
+        .extra
+        .iter()
+        .chain(components.template_extra.iter())
+        .find_map(|entry| match entry {
+            ExtraEntry::EntityVisibleComponent(ev) => Some(ev.as_ref()),
+            _ => None,
+        })
+}
+
+pub fn eval_entity_visible_components(
+    ctx: &EvalContext<'_>,
+    components: &Components,
+    template_components: Option<&Components>,
+) -> bool {
+    let Some(ev) = find_entity_visible_component(components)
+        .or_else(|| template_components.and_then(find_entity_visible_component))
+    else {
         return true;
     };
     if ev.Disabled.unwrap_or(false) {
@@ -4817,6 +4867,10 @@ pub fn eval_entity_visible_component(ctx: &EvalContext<'_>, components: &Compone
         Some(vc) => eval_condition_group_list(ctx, vc),
         None => true,
     }
+}
+
+pub fn eval_entity_visible_component(ctx: &EvalContext<'_>, components: &Components) -> bool {
+    eval_entity_visible_components(ctx, components, None)
 }
 
 fn is_neg_compare(cmp: &str) -> bool {

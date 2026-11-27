@@ -9,6 +9,8 @@ pub struct RewardConfig {
     #[serde(default, deserialize_with = "super::de_null_default")]
     pub RewardId: i32,
     #[serde(default, deserialize_with = "super::de_null_default")]
+    pub FirstRewardId: i32,
+    #[serde(default, deserialize_with = "super::de_null_default")]
     pub RewardEntityId: i32,
 }
 
@@ -33,6 +35,8 @@ pub struct DataEntry {
     pub ExploratoryDegree: i32,
     #[serde(default)]
     pub LevelPlayRewardConfig: Option<RewardConfig>,
+    #[serde(default)]
+    pub LevelPlayOpenCondition: Option<serde_json::Value>,
     #[serde(default, deserialize_with = "super::de_null_default")]
     pub Children: Vec<String>,
     #[serde(default, deserialize_with = "super::de_null_default")]

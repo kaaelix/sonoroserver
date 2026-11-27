@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::path::Path;
@@ -39,6 +40,9 @@ pub struct LevelEntityIndexRow {
     pub cell_x: i32,
     pub cell_y: i32,
     pub spawnable: bool,
+    pub area_id: i32,
+    pub in_sleep: bool,
+    pub is_hidden: bool,
 }
 
 /// 4-bucket rotating cache storing `Arc<V>` values so evicted handles stay valid for existing callers.
@@ -60,6 +64,14 @@ impl<K: Eq + Hash + Clone, V> RingCache<K, V> {
     }
 
     pub fn get(&self, key: &K) -> Option<Arc<V>> {
+        self.map.get(key).cloned()
+    }
+
+    pub fn get_borrowed<Q>(&self, key: &Q) -> Option<Arc<V>>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
         self.map.get(key).cloned()
     }
 
@@ -96,7 +108,7 @@ struct DbInner {
     flow_cache: RingCache<String, Flow>,
     ai_fsm_cache: RingCache<String, AiStateMachineConfig>,
     miss_int: HashMap<(&'static str, i64), ()>,
-    miss_str: HashMap<(&'static str, String), ()>,
+    miss_str: HashMap<&'static str, HashSet<String>>,
 }
 
 pub struct AssetsDb {
@@ -250,12 +262,13 @@ impl AssetsDb {
 
     pub fn find_template_by_blueprint(&self, bp: &str) -> Option<Arc<TemplateConfig>> {
         let mut guard = self.inner.lock().ok()?;
-        if let Some(hit) = guard.tpl_bp_cache.get(&bp.to_string()) {
+        if let Some(hit) = guard.tpl_bp_cache.get_borrowed(bp) {
             return Some(hit);
         }
         if guard
             .miss_str
-            .contains_key(&("TemplateBp", bp.to_string()))
+            .get("TemplateBp")
+            .is_some_and(|set| set.contains(bp))
         {
             return None;
         }
@@ -267,7 +280,11 @@ impl AssetsDb {
             .optional()
             .ok()?;
         let Some(json) = json else {
-            guard.miss_str.insert(("TemplateBp", bp.to_string()), ());
+            guard
+                .miss_str
+                .entry("TemplateBp")
+                .or_default()
+                .insert(bp.to_string());
             return None;
         };
         let parsed: TemplateConfig = serde_json::from_str(&json).ok()?;
@@ -416,7 +433,7 @@ impl AssetsDb {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut stmt = guard.conn.prepare_cached(
-            "SELECT idx, entity_id, map_id, COALESCE(cell_x, 0), COALESCE(cell_y, 0), spawnable FROM level_entities ORDER BY idx",
+            "SELECT idx, entity_id, map_id, COALESCE(cell_x, 0), COALESCE(cell_y, 0), spawnable, area_id, in_sleep, is_hidden FROM level_entities ORDER BY idx",
         )?;
         let mut rows = stmt.query([])?;
         let mut out = Vec::with_capacity(220_000);
@@ -428,6 +445,9 @@ impl AssetsDb {
                 cell_x: row.get(3)?,
                 cell_y: row.get(4)?,
                 spawnable: row.get::<_, i32>(5)? != 0,
+                area_id: row.get(6)?,
+                in_sleep: row.get::<_, i32>(7)? != 0,
+                is_hidden: row.get::<_, i32>(8)? != 0,
             });
         }
         Ok(out)
@@ -490,15 +510,14 @@ impl AssetsDb {
     fn query_kv_str<T: DeserializeOwned>(
         cache: &mut RingCache<String, T>,
         conn: &Connection,
-        miss_str: &mut HashMap<(&'static str, String), ()>,
+        miss_str: &mut HashMap<&'static str, HashSet<String>>,
         tbl: &'static str,
         key: &str,
     ) -> Option<Arc<T>> {
-        let key_owned = key.to_string();
-        if let Some(hit) = cache.get(&key_owned) {
+        if let Some(hit) = cache.get_borrowed(key) {
             return Some(hit);
         }
-        if miss_str.contains_key(&(tbl, key_owned.clone())) {
+        if miss_str.get(tbl).is_some_and(|set| set.contains(key)) {
             return None;
         }
         let json: Option<String> = conn
@@ -508,11 +527,14 @@ impl AssetsDb {
             .optional()
             .ok()?;
         let Some(json) = json else {
-            miss_str.insert((tbl, key_owned), ());
+            miss_str
+                .entry(tbl)
+                .or_default()
+                .insert(key.to_string());
             return None;
         };
         let parsed: T = serde_json::from_str(&json).ok()?;
-        Some(cache.insert(key_owned, parsed))
+        Some(cache.insert(key.to_string(), parsed))
     }
 
     pub fn get_damage(&self, id: i64) -> Option<Arc<crate::tables::damage::Damage>> {
@@ -644,6 +666,22 @@ impl AssetsDb {
             .query_row(params![name], |row| row.get(0))
             .optional()
             .ok()?
+    }
+
+    pub fn query_node_tree_owners(&self, kind: i32) -> Result<Vec<i32>, SqliteError> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stmt = guard
+            .conn
+            .prepare_cached("SELECT DISTINCT owner_id FROM node_trees WHERE kind = ?1")?;
+        let mut rows = stmt.query(params![kind])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(row.get(0)?);
+        }
+        Ok(out)
     }
 
     pub fn has_node_tree_owner(&self, kind: i32, owner_id: i32) -> bool {

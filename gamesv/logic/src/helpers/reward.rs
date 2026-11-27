@@ -225,13 +225,21 @@ fn grant_drop_package_internal<S: PushSink + ?Sized>(
     grant_items(ctx, drop_id, force_popup.unwrap_or(show_bg), &grants, reason)
 }
 
+/// Non-modal overworld chest reward reason (intentionally absent from `RewardViewFromSource`
+/// so opening chests displays HUD item toast instead of fullscreen `CommonRewardView`).
+pub const CHEST_REWARD_REASON: i32 = 1000;
+
 pub fn grant_treasure_box_reward<S: PushSink + ?Sized>(
     ctx: &mut RewardContext<'_, S>,
     _chest_type_id: i32,
     drop_id: i32,
     reason: i32,
 ) -> io::Result<GrantResult> {
-    let effective_reason = if reason <= 2 { 7000 } else { reason };
+    let effective_reason = if reason <= 2 || reason == 7000 {
+        CHEST_REWARD_REASON
+    } else {
+        reason
+    };
     if drop_id > 0 {
         let pkg_res = grant_drop_package_popup(ctx, drop_id, effective_reason)?;
         if pkg_res.granted_count > 0 {
@@ -416,6 +424,7 @@ pub fn grant_items<S: PushSink + ?Sized>(
     let effective_reason = if reason > 2 { reason } else { 19_500 };
     let mut show_plan_id = match effective_reason {
         7000 | 19_500 | 6003 | 18_500 | 15_008 | 20_200 => 1,
+        CHEST_REWARD_REASON => 2,
         _ => 3,
     };
     if ctx.assets.tables.drop_show_plan.get_data_by_id(&show_plan_id).is_none() {

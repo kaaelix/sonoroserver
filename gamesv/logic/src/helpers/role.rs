@@ -922,6 +922,7 @@ pub fn revive_and_heal_formation<S: PushSink + ?Sized>(
             let was_dead = cur_life <= 0;
             if was_dead || cur_life < life_max {
                 let _ = attributes::revive_entity(attr, None);
+                e.dead_notified = false;
                 if was_dead {
                     any_revived = true;
                     pack_data.push(CombatReceiveData {

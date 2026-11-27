@@ -81,16 +81,8 @@ fn compute_area_explore_percent(state: &State, area_id: i32) -> i32 {
 
     let mut total_tp = 0i32;
     let mut unlocked_tp = 0i32;
-    for tp in &state.assets.tables.teleporter.items {
-        let Some(lcfg) = state
-            .assets
-            .find_level_entity(tp.MapId, tp.TeleportEntityConfigId)
-        else {
-            continue;
-        };
-        if lcfg.AreaId != area_id {
-            continue;
-        }
+    for &tp_idx in state.assets.indexes.teleporter_indices_for_area(area_id) {
+        let tp = &state.assets.tables.teleporter.items[tp_idx as usize];
         total_tp += 1;
         if state
             .player_components

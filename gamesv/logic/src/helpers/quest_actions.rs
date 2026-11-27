@@ -17,11 +17,12 @@ use sonoro_proto::enums::{
 use sonoro_proto::pb::{
     AddGuestNotify, AlertArea, AlertAreaNotify, AudioStatePb, AudioStateUpdateNotify,
     BehaviorTreeCtxPb, BtSuspendNotify, BtVarUpdateNotify, CommonTagData, ElevatorMoveNotify,
-    EntityAddBubbleNotify, EntityAddDynamicInteractNotify, EntityCommonTagNotify, EntityCtxPb,
+    EnableNearbyTrackingNotify, EntityAddBubbleNotify, EntityAddDynamicInteractNotify,
+    EntityCommonTagNotify, EntityCtxPb,
     EntityPosResetNotify, EntityRemoveBubbleNotify, EntityRemoveDynamicInteractNotify,
     EntityRemoveInfo, EntityRemoveNotify, EntityStateReadyNotify, FlowActionCtxPb,
     FlowShowEntityNotify, GameCtxPb, GameCtxPbCtxInfoOneof, GameplayCueNotify,
-    GravityFlipUpdateTypeNotify, IllustratedEntry, IllustratedUnlockNotify, InstanceTimer,
+    GravityFlipUpdateTypeNotify, GuideCondDoneNotify, IllustratedEntry, IllustratedUnlockNotify, InstanceTimer,
     InstanceTimerNotify, InstResultNotify, InstSettleNotify, LeaveSceneNotify,
     LevelPlayStateNotify, MailInfosNotify, MapMarkShowIdInfoUpdateNotify, ModifyEntityCampNotify,
     MovePackageNotify, MoveReplaySample, MoveSplineConfig, MoveSplineConfigEndPointOneof,
@@ -31,14 +32,14 @@ use sonoro_proto::pb::{
     RoleTrialCloseNotify, RoleTrialOpenNotify, Rotator, RoverRogueRoomInfoNotify, SceneAreaState,
     SceneAreaStateNotify, SceneChangeDataLayerNotify, SceneItemMoveTargetInfo,
     SceneItemMoveTargetNotify, SceneItemSplineRuntimeData, SceneSubLevelsChangedNotify,
-    SceneTimeInfo, ShortMessageInfo, ShortMessageUpdateNotify, SummonEntityNotify,
+    SceneTimeInfo, ShortMessageInfo, ShortMessageUpdateNotify, StateChangeActionCtxPb,
+    SummonEntityNotify,
     SyncSceneTimeNotify, TeleportNotify, TeleportUpdateNotify, TemporaryTeleportAllInfoNotify,
     TimeLockInfoNotify, TrialRoleItem, VarDefinePb, VarDefinePbValueOneof, Vector,
     VehicleUpdateEntityNotify, VehicleUpdateNotify, WeatherNotify,
 };
 use sonoro_proto::wire::PbEnum;
 
-use crate::commands::js_patches;
 use crate::component::comp_util;
 use crate::component::entity::small::{EntityState, EntityType, LiftComponent, MoveSplineComponent};
 use crate::component::entity::tag::TagComponent;
@@ -65,6 +66,22 @@ fn now_unix_secs() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
+fn is_deferred_weather_action(act: &Value) -> bool {
+    let Some(obj) = act.as_object() else {
+        return false;
+    };
+    matches!(
+        json_str(obj.get("Name")),
+        Some("SetWeather" | "SetWeatherLockState")
+    )
+}
+
+#[derive(Clone, Copy)]
+enum WeatherDeferTarget {
+    Flow(Option<i64>),
+    Wait(i64),
+}
+
 pub fn execute_action_list<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     callbacks: &mut ActionCallbacks<'_, S>,
@@ -72,8 +89,64 @@ pub fn execute_action_list<S: PushSink + ?Sized>(
     node_id: i32,
     actions: &[Value],
 ) -> io::Result<()> {
+    let mut weather_defer: Option<WeatherDeferTarget> = None;
+    let mut cumulative_wait_ms = 0i64;
+
     for act in actions {
+        let can_defer = !callbacks.defer_flow_transition && ctx.scene.is_some();
+        if can_defer
+            && is_deferred_weather_action(act)
+            && let Some(target) = weather_defer
+            && let Some(scene) = ctx.scene.as_deref_mut()
+        {
+            match target {
+                WeatherDeferTarget::Flow(flow_inc) => {
+                    scene.enqueue_post_flow_actions(
+                        flow_inc,
+                        callbacks.bt_type,
+                        quest_id,
+                        node_id,
+                        vec![act.clone()],
+                    );
+                }
+                WeatherDeferTarget::Wait(due_ms) => {
+                    scene.enqueue_wait_actions(
+                        due_ms,
+                        callbacks.bt_type,
+                        quest_id,
+                        node_id,
+                        vec![act.clone()],
+                    );
+                }
+            }
+            continue;
+        }
+
+        let is_sync_flow =
+            can_defer && crate::helpers::quest_engine::triggers::is_sync_play_flow_action(act);
+        let wait_ms = if can_defer && !is_sync_flow {
+            crate::helpers::quest_types::wait_action_delay_ms(act)
+        } else {
+            0
+        };
+
         execute_action(ctx, callbacks, quest_id, node_id, act)?;
+
+        if is_sync_flow && let Some(scene) = ctx.scene.as_deref() {
+            if scene.active_flow_inc_id != 0
+                && scene.active_flow_quest_id == quest_id
+                && scene.active_flow_node_id == node_id
+            {
+                weather_defer = Some(WeatherDeferTarget::Flow(Some(scene.active_flow_inc_id)));
+            } else if scene.has_pending_flow_for_node(quest_id, node_id) {
+                weather_defer = Some(WeatherDeferTarget::Flow(None));
+            }
+        } else if wait_ms > 0 {
+            cumulative_wait_ms += wait_ms;
+            if !matches!(weather_defer, Some(WeatherDeferTarget::Flow(_))) {
+                weather_defer = Some(WeatherDeferTarget::Wait(now_millis() + cumulative_wait_ms));
+            }
+        }
     }
     Ok(())
 }
@@ -509,10 +582,14 @@ pub fn execute_action<S: PushSink + ?Sized>(
         }
         "ExecResurrection" => apply_exec_resurrection(ctx, params)?,
         "ChangePhantomFormation" => {
-            let fid = i64::from(json_int(params.get("FormationId")).unwrap_or(0));
-            record_progress_int(ctx, "phantom:formation_id", fid, false)?;
+            let fid = json_int(params.get("FormationId")).unwrap_or(0);
+            record_progress_int(ctx, "phantom:formation_id", i64::from(fid), false)?;
+            apply_change_phantom_formation(ctx, fid, params);
         }
-        "RestorePhantomFormation" => record_progress_int(ctx, "phantom:formation_id", 0, false)?,
+        "RestorePhantomFormation" => {
+            record_progress_int(ctx, "phantom:formation_id", 0, false)?;
+            apply_restore_phantom_formation(ctx);
+        }
         "SetReviveRegion" => {
             if let Some(rid) = json_int(params.get("ReviveId")) {
                 record_progress_int(ctx, "region:revive_id", i64::from(rid), false)?;
@@ -717,10 +794,7 @@ pub fn execute_action<S: PushSink + ?Sized>(
                 record_progress_int(ctx, &format!("spline_move:{sid}"), i64::from(on), false)?;
             }
         }
-        "EnableNearbyTracking" => {
-            let on = json_bool(params.get("IsEnable")).unwrap_or(true);
-            record_progress_int(ctx, "nearby_tracking:enabled", i64::from(on), false)?;
-        }
+        "EnableNearbyTracking" => apply_enable_nearby_tracking(ctx, quest_id, params),
         "FocusOnMapMark" => {
             if let Some(mt) = params.get("MapMarkType").and_then(Value::as_object) {
                 let qid = json_int(mt.get("QuestId")).unwrap_or(0);
@@ -1285,9 +1359,6 @@ pub fn apply_weather_change<S: PushSink + ?Sized>(
             IsClient: false,
         },
     );
-    if weather_id > 0 {
-        let _ = js_patches::weather::push(ctx.sink, weather_id);
-    }
     if let Some(cb) = callbacks.on_weather_changed {
         cb(ctx, weather_id)?;
     }
@@ -2072,8 +2143,16 @@ fn execute_entity_state_change_behaviors<S: PushSink + ?Sized>(
         return Ok(());
     }
 
+    let entity_ctx = ctx
+        .scene
+        .as_deref()
+        .and_then(|s| s.find_entity_net_id_by_config_id(entity_cfg_id))
+        .map(|net_id| EntityCtxPb {
+            ConfigId: entity_cfg_id,
+            IncId: net_id,
+        });
     let mut matched_actions = Vec::new();
-    for beh in &esc.StateChangeBehaviors {
+    for (idx, beh) in esc.StateChangeBehaviors.iter().enumerate() {
         let Some(obj) = beh.as_object() else {
             continue;
         };
@@ -2094,6 +2173,17 @@ fn execute_entity_state_change_behaviors<S: PushSink + ?Sized>(
             .or_else(|| obj.get("Actions"))
             .and_then(|v| v.as_array())
         {
+            if let Some(entity_ctx) = &entity_ctx {
+                crate::helpers::quest_engine::triggers::push_entity_level_events(
+                    ctx,
+                    GameCtxType::EntityStateChangeAction,
+                    GameCtxPbCtxInfoOneof::StateChangeAction(StateChangeActionCtxPb {
+                        EntityCtx: Some(entity_ctx.clone()),
+                        StateIndex: idx as i32,
+                    }),
+                    acts,
+                );
+            }
             matched_actions.extend(acts.iter().cloned());
         }
     }
@@ -2111,6 +2201,8 @@ fn execute_entity_state_change_behaviors<S: PushSink + ?Sized>(
 pub fn sync_world_state_on_join<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
 ) -> io::Result<()> {
+    // Only push WeatherNotify when a quest or player action has explicitly set a weather;
+    // otherwise leave weather unset so quest weather triggers apply at their proper step.
     if ctx.quest_comp.info.env.weather_id > 0 {
         ctx.sink.push(
             WeatherNotify::MSG_ID,
@@ -2970,6 +3062,51 @@ fn apply_remove_trial_character<S: PushSink + ?Sized>(
         ids.push(cid);
     }
     remove_trial_roles(ctx, &ids)
+}
+
+fn apply_change_phantom_formation<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    formation_id: i32,
+    params: &Map<String, Value>,
+) {
+    let (Some(scene), Some(role_comp)) = (ctx.scene.as_deref_mut(), ctx.role_comp.as_deref_mut())
+    else {
+        return;
+    };
+    let buff_ids: Vec<i64> = match params.get("AppendBuffIds") {
+        Some(Value::Array(ids)) => ids.iter().filter_map(|v| json_i64(Some(v))).collect(),
+        _ => Vec::new(),
+    };
+    if let Err(err) = crate::helpers::trial_roles::change_phantom_formation(
+        scene,
+        ctx.fs,
+        ctx.assets,
+        ctx.sink,
+        ctx.events,
+        role_comp,
+        ctx.weapon_comp,
+        ctx.echo_comp,
+        formation_id,
+        &buff_ids,
+    ) {
+        tracing::warn!("ChangePhantomFormation {formation_id}: {err}");
+    }
+}
+
+fn apply_restore_phantom_formation<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>) {
+    let (Some(scene), Some(role_comp)) = (ctx.scene.as_deref_mut(), ctx.role_comp.as_deref_mut())
+    else {
+        return;
+    };
+    crate::helpers::trial_roles::restore_phantom_formation(
+        scene,
+        ctx.fs,
+        ctx.sink,
+        role_comp,
+        ctx.weapon_comp,
+        ctx.echo_comp,
+        &ctx.quest_comp.info.env.trial_roles,
+    );
 }
 
 fn apply_area_time_state<S: PushSink + ?Sized>(
@@ -4007,6 +4144,58 @@ fn resolve_action_entity_cfg_id(scene_opt: Option<&Scene>, params: &Map<String, 
     if param_eid > 0 { Some(param_eid) } else { None }
 }
 
+/// The client has no LevelEvent for EnableNearbyTracking; it only sets
+/// SceneItemNearbyTrackingComponent.EnableTracking from EnableNearbyTrackingNotify.
+fn apply_enable_nearby_tracking<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    owner_id: i32,
+    params: &Map<String, Value>,
+) {
+    let Some(scene) = ctx.scene.as_deref_mut() else {
+        return;
+    };
+    let is_enable = json_bool(params.get("IsEnable")).unwrap_or(true);
+    let control = params.get("ControlType").and_then(Value::as_object);
+    let net_ids: Vec<i64> = match control.and_then(|c| json_str(c.get("Type"))) {
+        None | Some("Self") => nearby_tracking_self_net_id(scene, owner_id).into_iter().collect(),
+        Some("Other") => parse_int_list(control.and_then(|c| c.get("Entities")))
+            .into_iter()
+            .filter_map(|cfg_id| scene.find_entity_net_id_by_config_id(cfg_id))
+            .collect(),
+        Some(_) => Vec::new(),
+    };
+    if net_ids.is_empty() {
+        return;
+    }
+    for &nid in &net_ids {
+        if let Some(storage) = scene.entity_mut(nid)
+            && storage.world_item.nearby_tracking_enable.is_some()
+        {
+            storage.world_item.nearby_tracking_enable = Some(is_enable);
+        }
+    }
+    ctx.sink.push(
+        EnableNearbyTrackingNotify::MSG_ID,
+        &EnableNearbyTrackingNotify {
+            EntityIds: net_ids,
+            IsEnable: is_enable,
+        },
+    );
+}
+
+fn nearby_tracking_self_net_id(scene: &Scene, owner_id: i32) -> Option<i64> {
+    let flow_owner = scene.active_flow_owner_entity_id;
+    if owner_id > 0 {
+        if flow_owner != 0 && scene.find_config_id_by_net_id(flow_owner) == Some(owner_id) {
+            return Some(flow_owner);
+        }
+        if let Some(nid) = scene.find_entity_net_id_by_config_id(owner_id) {
+            return Some(nid);
+        }
+    }
+    (flow_owner != 0 && scene.entity(flow_owner).is_some()).then_some(flow_owner)
+}
+
 fn apply_toggle_elemental_ability<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     params: &Map<String, Value>,
@@ -4113,7 +4302,12 @@ fn apply_interact_collect_or_reward<S: PushSink + ?Sized>(
     if !already_taken {
         if is_lp_reward || tb_type > 0 {
             let mut rctx = ctx.make_reward_context();
-            let _ = reward::grant_treasure_box_reward(&mut rctx, tb_type, reward_id, 7000)?;
+            let _ = reward::grant_treasure_box_reward(
+                &mut rctx,
+                tb_type,
+                reward_id,
+                crate::helpers::reward::CHEST_REWARD_REASON,
+            )?;
         } else if reward_id > 0 {
             let mut rctx = ctx.make_reward_context();
             let res = reward::grant_drop_package(&mut rctx, reward_id, 1)?;
@@ -4265,6 +4459,7 @@ fn apply_reset_level_play_action<S: PushSink + ?Sized>(
     params: &Map<String, Value>,
 ) -> io::Result<()> {
     let mut dirty_q = false;
+    let mut dirty_p = false;
     for lpid in parse_int_list(params.get("ResetLevelPlayList")) {
         if lpid <= 0 {
             continue;
@@ -4276,6 +4471,51 @@ fn apply_reset_level_play_action<S: PushSink + ?Sized>(
             dirty_q = true;
         }
         record_progress_int(ctx, &format!("lp_state:{lpid}"), 0, false)?;
+        if let Some(pc) = ctx.progress_comp.as_deref_mut() {
+            let prefix_kill = format!("lp_kill:{lpid}:");
+            let prefix_node = format!("lp_node:{lpid}:");
+            let prefix_active = format!("lp_node_active:{lpid}:");
+            let bt_key = format!("lp_bt:{lpid}");
+            let claim_key = format!("lp_reward_claimed:{lpid}");
+            let before = pc.info.dynamic.claims.len();
+            pc.info.dynamic.claims.retain(|k| {
+                !k.starts_with(&prefix_kill)
+                    && !k.starts_with(&prefix_node)
+                    && !k.starts_with(&prefix_active)
+                    && k != &bt_key
+                    && k != &claim_key
+            });
+            if pc.info.dynamic.claims.len() != before {
+                dirty_p = true;
+            }
+            let before_ints = pc.info.dynamic.ints.len();
+            pc.info.dynamic.ints.retain(|kv| kv.key != claim_key);
+            if pc.info.dynamic.ints.len() != before_ints {
+                dirty_p = true;
+            }
+        }
+        if let Some(lp) = ctx.assets.tables.level_play_data.get_data_by_id(&lpid)
+            && let Some(rc) = &lp.Data.LevelPlayRewardConfig
+            && rc.RewardEntityId > 0
+        {
+            remove_int_value(&mut ctx.quest_comp.info.opened_chests, rc.RewardEntityId);
+            dirty_q = true;
+        }
+        ctx.sink.push(
+            sonoro_proto::pb::LevelPlayInfoNotify::MSG_ID,
+            &sonoro_proto::pb::LevelPlayInfoNotify {
+                LevelPlayInfo: vec![sonoro_proto::pb::LevelPlayInfo {
+                    Id: lpid,
+                    IsFirst: false,
+                    State: 1,
+                    UpdateTime: 0,
+                    GetRewardCount: 0,
+                }],
+            },
+        );
+    }
+    if dirty_p && let Some(pc) = ctx.progress_comp.as_deref_mut() {
+        pc.save(ctx.fs)?;
     }
     if dirty_q {
         ctx.quest_comp.save(ctx.fs)?;
@@ -5034,12 +5274,37 @@ fn apply_guide_trigger<S: PushSink + ?Sized>(
     if gid <= 0 {
         return Ok(());
     }
-    if let Some(cb) = callbacks.complete_guide {
-        return cb(ctx, gid);
+    if sonoro_gamesv_data::GameConfig::embedded().autocomplete_guides {
+        if let Some(cb) = callbacks.complete_guide {
+            return cb(ctx, gid);
+        }
+        if let Some(gc) = ctx.guide_comp.as_deref_mut() {
+            gc.info.add_finished(gid);
+        }
+        return Ok(());
     }
-    if let Some(gc) = ctx.guide_comp.as_deref_mut() {
-        gc.info.add_finished(gid);
+    if ctx
+        .guide_comp
+        .as_deref()
+        .is_some_and(|gc| gc.info.has_finished(gid))
+    {
+        return Ok(());
     }
+    if let Some(Value::Array(conds)) = params.get("Conditions")
+        && !conds.is_empty()
+    {
+        let block = Value::Object(Map::from_iter([
+            ("Type".to_owned(), Value::from(0)),
+            ("Conditions".to_owned(), Value::Array(conds.clone())),
+        ]));
+        if !crate::helpers::condition::eval_inline_condition_block(&ctx.make_eval_context(), &block) {
+            return Ok(());
+        }
+    }
+    ctx.sink.push(
+        GuideCondDoneNotify::MSG_ID,
+        &GuideCondDoneNotify { GroupId: gid },
+    );
     Ok(())
 }
 
@@ -6013,18 +6278,6 @@ fn apply_server_move_action<S: PushSink + ?Sized>(
         "ChangeLiftTarget" => {
             if let Some(cfg_id) = resolve_action_entity_cfg_id(ctx.scene.as_deref(), params) {
                 let loc = json_int(params.get("Location")).unwrap_or(0);
-                let prev_loc = ctx
-                    .scene
-                    .as_deref()
-                    .and_then(|scene| {
-                        let net_id = scene.find_entity_net_id_by_config_id(cfg_id)?;
-                        scene.entity(net_id)?.world_item.lift.map(|l| l.location)
-                    })
-                    .or_else(|| {
-                        let pc = ctx.progress_comp.as_deref()?;
-                        let v = pc.info.get_key_int(&format!("lift_target:{cfg_id}"));
-                        (v > 0).then(|| i32::try_from(v).ok()).flatten()
-                    });
                 record_progress_int(ctx, &format!("lift_target:{cfg_id}"), i64::from(loc), false)?;
                 record_progress_int(ctx, &format!("elevator:{cfg_id}"), i64::from(loc), false)?;
                 ensure_quest_entity_spawned(ctx, cfg_id);
@@ -6032,6 +6285,7 @@ fn apply_server_move_action<S: PushSink + ?Sized>(
                     && let Some(net_id) = scene.find_entity_net_id_by_config_id(cfg_id)
                     && let Some(storage) = scene.entity_mut(net_id)
                 {
+                    let prev_loc = storage.world_item.lift.map(|l| l.location);
                     storage.world_item.lift = Some(LiftComponent { location: loc });
                     if loc > 0 && prev_loc != Some(loc) {
                         ctx.sink.push(

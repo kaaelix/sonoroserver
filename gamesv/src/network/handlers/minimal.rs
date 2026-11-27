@@ -23,8 +23,8 @@ use sonoro_proto::pb::{
     DrownEndTeleportResponse, DrownRequest, DrownResponse, EnterViewDirectionRequest,
     EnterViewDirectionResponse, EntityFollowTrackRequest, EntityFollowTrackResponse,
     EntityLivingStatusNotify, EntityOnLandedRequest, EntityOnLandedResponse,
-    EntityPatrolStopRequest, EntityPatrolStopResponse, ExchangeRewardRequest,
-    ExchangeRewardResponse, ExitViewDirectionRequest, ExitViewDirectionResponse,
+    EntityPatrolStopRequest, EntityPatrolStopResponse,
+    ExitViewDirectionRequest, ExitViewDirectionResponse,
     FlowServerSkipNotify, FormationAttrNotify, FormationAttrRequest, FormationAttrResponse,
     FragmentMemoryItem, GetDetectionLabelInfoRequest, GetDetectionLabelInfoResponse,
     GivebackInfoRequest, GivebackInfoResponse, ItemExchangeInfo, ItemExchangeInfoRequest,
@@ -668,34 +668,6 @@ pub fn handle_valid_time_item_request(
     Ok(ValidTimeItemResponse::default())
 }
 
-pub fn handle_exchange_reward_request(
-    state: &mut State,
-    _req: ExchangeRewardRequest,
-) -> Result<ExchangeRewardResponse, String> {
-    let mut data = BTreeMap::new();
-    let mut share_counts: BTreeMap<i32, i32> = BTreeMap::new();
-    for c in &state.player_components.progress.info.dynamic.claims {
-        if let Some(rest) = c.strip_prefix("exchange:") {
-            if let Ok(cid) = rest.parse::<i32>() {
-                data.insert(cid, 1);
-                if let Some(cfg) = state.assets.tables.exchange_reward.get_data_by_id(&cid)
-                    && cfg.SharedId > 0
-                {
-                    *share_counts.entry(cfg.SharedId).or_insert(0) += 1;
-                }
-            }
-        } else if let Some(rest) = c.strip_prefix("exchange_share:")
-            && let Ok(sid) = rest.parse::<i32>()
-        {
-            *share_counts.entry(sid).or_insert(0) += 1;
-        }
-    }
-    Ok(ExchangeRewardResponse {
-        ExchangeRewardData: data,
-        ExchangeShareData: share_counts,
-    })
-}
-
 pub fn handle_update_play_station_block_account_request(
     _state: &mut State,
     _req: UpdatePlayStationBlockAccountRequest,
@@ -1315,6 +1287,10 @@ pub fn handle_character_death_push(
             }
         }
         if let Some(&idx) = scene.net_id_map.get(&target_nid) {
+            if scene.entities[idx].dead_notified {
+                return Ok(());
+            }
+            scene.entities[idx].dead_notified = true;
             let cfg_id = scene.entities[idx].config.config_id;
             let is_char =
                 scene.entities[idx].config.config_type == ConfigType::Character;

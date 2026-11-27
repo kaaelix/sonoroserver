@@ -126,6 +126,36 @@ pub(crate) fn deliver_aki_response(
     Ok(())
 }
 
+fn spatial_defer_delay_ms(msg_id: u16) -> Option<i64> {
+    if msg_id == pb::SceneLoadingFinishRequest::MSG_ID {
+        Some(350)
+    } else if msg_id == pb::FlowEndRequest::MSG_ID {
+        Some(80)
+    } else {
+        None
+    }
+}
+
+fn drain_events_for_request(msg_id: u16, events: &mut EventQueue, state: &mut State) {
+    if let Some(delay_ms) = spatial_defer_delay_ms(msg_id) {
+        let mut deferred_spatial = false;
+        let mut immediate = EventQueue::new();
+        while let Some(ev) = events.dequeue() {
+            if matches!(ev, sonoro_gamesv_logic::events::Event::SpatialSpawnsCheck { .. }) {
+                deferred_spatial = true;
+            } else {
+                immediate.enqueue(ev);
+            }
+        }
+        drain_event_queue_best_effort(&mut immediate, state);
+        if deferred_spatial && let Some(scene) = state.scene.as_mut() {
+            scene.schedule_deferred_spatial_spawns(sonoro_gamesv_logic::scene::now_millis() + delay_ms);
+        }
+    } else {
+        drain_event_queue_best_effort(events, state);
+    }
+}
+
 fn run_req_respond_first<Req, Resp, F>(
     state: &mut State,
     rpc_id: u16,
@@ -163,23 +193,7 @@ where
     if let Err(err) = f(state, &mut events, req) {
         tracing::error!("handler failed for msg_id={msg_id}: {err}");
     }
-    if msg_id == pb::SceneLoadingFinishRequest::MSG_ID {
-        let mut deferred_spatial = false;
-        let mut immediate = EventQueue::new();
-        while let Some(ev) = events.dequeue() {
-            if matches!(ev, sonoro_gamesv_logic::events::Event::SpatialSpawnsCheck { .. }) {
-                deferred_spatial = true;
-            } else {
-                immediate.enqueue(ev);
-            }
-        }
-        drain_event_queue_best_effort(&mut immediate, state);
-        if deferred_spatial && let Some(scene) = state.scene.as_mut() {
-            scene.schedule_deferred_spatial_spawns(sonoro_gamesv_logic::scene::now_millis() + 350);
-        }
-    } else {
-        drain_event_queue_best_effort(&mut events, state);
-    }
+    drain_events_for_request(msg_id, &mut events, state);
     Ok(())
 }
 
@@ -211,7 +225,7 @@ where
 
     let mut events = EventQueue::new();
     let res = f(state, &mut events, req);
-    drain_event_queue_best_effort(&mut events, state);
+    drain_events_for_request(msg_id, &mut events, state);
 
     let resp = match res {
         Ok(r) => r,
@@ -865,14 +879,14 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::PlayerHeadDataResponse,
             profile::handle_player_head_data_request
         ),
-        pb::PlayerTitleDataRequest::MSG_ID => req_noev!(
+        pb::PlayerTitleRequest::MSG_ID => req_noev!(
             state,
             rpc_id,
             msg_id,
             payload,
-            pb::PlayerTitleDataRequest,
-            pb::PlayerTitleDataResponse,
-            profile::handle_player_title_data_request
+            pb::PlayerTitleRequest,
+            pb::PlayerTitleResponse,
+            profile::handle_player_title_request
         ),
         pb::RoleShowListUpdateRequest::MSG_ID => req_noev!(
             state,
@@ -1136,6 +1150,15 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::LevelPlayRewardRequest,
             pb::LevelPlayRewardResponse,
             inst::handle_level_play_reward_request
+        ),
+        pb::ExchangeRewardInfoRequest::MSG_ID => req_noev!(
+            state,
+            rpc_id,
+            msg_id,
+            payload,
+            pb::ExchangeRewardInfoRequest,
+            pb::ExchangeRewardInfoResponse,
+            inst::handle_exchange_reward_info_request
         ),
         pb::GetLevelPlayRewardsRequest::MSG_ID => req_noev!(
             state,
@@ -7681,15 +7704,6 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::ValidTimeItemRequest,
             pb::ValidTimeItemResponse,
             minimal::handle_valid_time_item_request
-        ),
-        pb::ExchangeRewardRequest::MSG_ID => req_noev!(
-            state,
-            rpc_id,
-            msg_id,
-            payload,
-            pb::ExchangeRewardRequest,
-            pb::ExchangeRewardResponse,
-            minimal::handle_exchange_reward_request
         ),
         pb::UpdatePlayStationBlockAccountRequest::MSG_ID => req_noev!(
             state,

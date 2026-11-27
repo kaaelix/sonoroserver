@@ -638,8 +638,11 @@ fn audit_91d_inst_level_play_activity_direct_train_and_scene_loading_finish() {
     assert_eq!(inst_notify.EnterInfos.len(), 1);
     assert_eq!(inst_notify.EnterInfos[0].Id, 2021);
 
-    let lp_notify =
-        misc_logic::build_level_play_info_notify(&h.state.assets, &h.state.player_components.quest);
+    let lp_notify = misc_logic::build_level_play_info_notify(
+        &h.state.assets,
+        &h.state.player_components.basic,
+        &h.state.player_components.quest,
+    );
     for lp in &lp_notify.LevelPlayInfo {
         assert_ne!(lp.Id, 169750008);
     }

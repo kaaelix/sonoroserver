@@ -180,6 +180,63 @@ impl Assets {
         self.indexes.find_template_config(&self.tables, blueprint_type)
     }
 
+    pub fn spawn_monster_configs(
+        &self,
+        map_id: i32,
+        entity_id: i64,
+    ) -> Vec<crate::tables::entity_components::extra::SpawnMonsterConfig> {
+        let cfg = self
+            .find_level_entity(map_id, entity_id)
+            .or_else(|| self.find_level_entity_any_map(entity_id));
+        let Some(cfg) = cfg else {
+            return Vec::new();
+        };
+        let mut merged = cfg.ComponentsData.clone();
+        if let Some(tpl) = self.find_template_config(&cfg.BlueprintType) {
+            tpl.ComponentsData.merge_into(&mut merged);
+        }
+        for entry in merged.extra.iter().chain(merged.template_extra.iter()) {
+            if let crate::tables::entity_components::extra::ExtraEntry::SpawnMonsterComponent(sm) =
+                entry
+                && !sm.SpawnMonsterConfigs.is_empty()
+            {
+                return sm.SpawnMonsterConfigs.clone();
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn spawn_monster_targets(&self, map_id: i32, entity_id: i64) -> Vec<i32> {
+        let mut out = Vec::new();
+        for wave in self.spawn_monster_configs(map_id, entity_id) {
+            for tid in wave.TargetsToAwake {
+                if tid > 0 && !out.contains(&tid) {
+                    out.push(tid);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn has_spawn_monster_component(&self, map_id: i32, entity_id: i64) -> bool {
+        let cfg = self
+            .find_level_entity(map_id, entity_id)
+            .or_else(|| self.find_level_entity_any_map(entity_id));
+        let Some(cfg) = cfg else {
+            return false;
+        };
+        let mut merged = cfg.ComponentsData.clone();
+        if let Some(tpl) = self.find_template_config(&cfg.BlueprintType) {
+            tpl.ComponentsData.merge_into(&mut merged);
+        }
+        merged.extra.iter().chain(merged.template_extra.iter()).any(|e| {
+            matches!(
+                e,
+                crate::tables::entity_components::extra::ExtraEntry::SpawnMonsterComponent(_)
+            )
+        })
+    }
+
     pub fn quest_requires_resource(&self, quest_id: i32) -> bool {
         if self.tables.quest_resource_white.get_data_by_id(&quest_id).is_some() {
             return false;

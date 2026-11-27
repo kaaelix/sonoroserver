@@ -145,6 +145,16 @@ pub struct ScenePendingFlow {
 }
 
 #[derive(Debug, Clone)]
+pub struct PendingDeferredAction {
+    pub flow_inc_id: Option<i64>,
+    pub wait_due_ms: Option<i64>,
+    pub bt_type: BtType,
+    pub quest_id: i32,
+    pub node_id: i32,
+    pub actions: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
 pub struct BtOccupation {
     pub bt_type: BtType,
     pub owner_id: i32,
@@ -253,7 +263,12 @@ pub struct Scene {
     pub plot_saved_cur_role: i32,
     pub plot_saved_slot_role_id: i32,
     pub plot_saved_slot_entity_id: i64,
+    /// Role entities of the Echo (Phantom) group while ChangePhantomFormation is in effect.
+    pub phantom_role_entity_ids: Vec<i64>,
+    /// Role of the Echo group the client switched to (SwitchRoleRequest); 0 = the battle role.
+    pub phantom_cur_role: i32,
     pub pending_flows: Vec<ScenePendingFlow>,
+    pub pending_deferred_actions: Vec<PendingDeferredAction>,
     pub quest_timers: QuestTimerQueue,
     pub lp_timers: QuestTimerQueue,
     pub fail_timers: QuestTimerQueue,
@@ -343,7 +358,10 @@ impl Scene {
             plot_saved_cur_role: 0,
             plot_saved_slot_role_id: 0,
             plot_saved_slot_entity_id: -1,
+            phantom_role_entity_ids: Vec::new(),
+            phantom_cur_role: 0,
             pending_flows: Vec::new(),
+            pending_deferred_actions: Vec::new(),
             quest_timers: QuestTimerQueue::new(),
             lp_timers: QuestTimerQueue::new(),
             fail_timers: QuestTimerQueue::new(),
@@ -442,6 +460,15 @@ impl Scene {
         self.active_flow_list_name = name;
         self.active_flow_id = flow_id;
         self.active_flow_state_id = state_id;
+        for entry in &mut self.pending_deferred_actions {
+            if entry.wait_due_ms.is_none()
+                && entry.flow_inc_id.is_none()
+                && entry.quest_id == quest_id
+                && entry.node_id == node_id
+            {
+                entry.flow_inc_id = Some(inc_id);
+            }
+        }
     }
 
     pub fn clear_active_flow(&mut self) {
@@ -570,6 +597,104 @@ impl Scene {
 
     pub fn clear_pending_flows(&mut self) {
         self.pending_flows.clear();
+    }
+
+    pub fn enqueue_post_flow_actions(
+        &mut self,
+        flow_inc_id: Option<i64>,
+        bt_type: BtType,
+        quest_id: i32,
+        node_id: i32,
+        actions: Vec<serde_json::Value>,
+    ) {
+        if actions.is_empty() {
+            return;
+        }
+        self.pending_deferred_actions.push(PendingDeferredAction {
+            flow_inc_id,
+            wait_due_ms: None,
+            bt_type,
+            quest_id,
+            node_id,
+            actions,
+        });
+    }
+
+    pub fn enqueue_wait_actions(
+        &mut self,
+        due_ms: i64,
+        bt_type: BtType,
+        quest_id: i32,
+        node_id: i32,
+        actions: Vec<serde_json::Value>,
+    ) {
+        if actions.is_empty() {
+            return;
+        }
+        self.pending_deferred_actions.push(PendingDeferredAction {
+            flow_inc_id: None,
+            wait_due_ms: Some(due_ms),
+            bt_type,
+            quest_id,
+            node_id,
+            actions,
+        });
+    }
+
+    pub fn rebind_post_flow_actions(&mut self, old_inc_id: i64, new_inc_id: i64) {
+        if old_inc_id == 0 || new_inc_id == 0 {
+            return;
+        }
+        for entry in &mut self.pending_deferred_actions {
+            if entry.wait_due_ms.is_none() && entry.flow_inc_id == Some(old_inc_id) {
+                entry.flow_inc_id = Some(new_inc_id);
+            }
+        }
+    }
+
+    pub fn take_post_flow_actions(&mut self, flow_inc_id: i64) -> Vec<PendingDeferredAction> {
+        if flow_inc_id == 0 || self.pending_deferred_actions.is_empty() {
+            return Vec::new();
+        }
+        let mut taken = Vec::new();
+        let mut i = 0;
+        while i < self.pending_deferred_actions.len() {
+            let entry = &self.pending_deferred_actions[i];
+            if entry.wait_due_ms.is_none() && entry.flow_inc_id == Some(flow_inc_id) {
+                taken.push(self.pending_deferred_actions.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        taken
+    }
+
+    pub fn pop_due_wait_actions(&mut self, now_ms: i64) -> Vec<PendingDeferredAction> {
+        let mut due = Vec::new();
+        let mut i = 0;
+        while i < self.pending_deferred_actions.len() {
+            if self.pending_deferred_actions[i]
+                .wait_due_ms
+                .is_some_and(|t| t <= now_ms)
+            {
+                due.push(self.pending_deferred_actions.remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        due
+    }
+
+    pub fn next_deferred_wait_delay_ms(&self, now_ms: i64) -> Option<i64> {
+        self.pending_deferred_actions
+            .iter()
+            .filter_map(|e| e.wait_due_ms.map(|due| (due - now_ms).max(0)))
+            .min()
+    }
+
+    pub fn clear_deferred_actions_for_owner(&mut self, owner_id: i32) {
+        self.pending_deferred_actions
+            .retain(|e| e.quest_id != owner_id);
     }
 
     pub fn set_deferred_join_flow(
@@ -1306,6 +1431,7 @@ impl Scene {
             self.lp_timers.next_wake_delay_ms(now_ms),
             self.fail_timers.next_wake_delay_ms(now_ms),
             self.lp_fail_timers.next_wake_delay_ms(now_ms),
+            self.next_deferred_wait_delay_ms(now_ms),
         ]
         .into_iter()
         .flatten()
@@ -1667,7 +1793,20 @@ impl Scene {
         true
     }
 
+    /// Echo (Phantom) group role entity of `role_id`, while ChangePhantomFormation is in effect.
+    pub fn phantom_role_entity_id(&self, role_id: i32) -> Option<i64> {
+        self.phantom_role_entity_ids
+            .iter()
+            .copied()
+            .find(|&eid| self.entity(eid).is_some_and(|s| s.config.config_id == role_id))
+    }
+
     pub fn current_role_entity_id(&self) -> i64 {
+        if self.phantom_cur_role > 0
+            && let Some(eid) = self.phantom_role_entity_id(self.phantom_cur_role)
+        {
+            return eid;
+        }
         let Ok(idx) = usize::try_from(self.formation_info.cur_formation) else {
             return -1;
         };

@@ -149,11 +149,11 @@ pub fn push_data<S: PushSink + ?Sized>(
 
     sink.push(
         LevelPlayInfoNotify::MSG_ID,
-        &build_level_play_info_notify(assets, quest_comp),
+        &build_level_play_info_notify(assets, basic_comp, quest_comp),
     );
     sink.push(
         MapMarkInfoNotify::MSG_ID,
-        &build_map_mark_info_notify(assets, map_comp),
+        &build_map_mark_info_notify(assets, map_comp, basic_comp, quest_comp),
     );
     sink.push(PlayerVarNotify::MSG_ID, &PlayerVarNotify::default());
     sink.push(
@@ -178,10 +178,161 @@ pub fn push_data<S: PushSink + ?Sized>(
     Ok(())
 }
 
+fn build_unlock_eval_context<'a>(
+    assets: &'a Assets,
+    basic_comp: &'a PlayerBasicComponent,
+    quest_comp: &'a PlayerQuestComponent,
+    map_comp: &'a PlayerMapComponent,
+) -> condition::EvalContext<'a> {
+    static EMPTY_ECHO: std::sync::OnceLock<PlayerEchoComponent> = std::sync::OnceLock::new();
+    static EMPTY_INV: std::sync::OnceLock<PlayerInventoryComponent> = std::sync::OnceLock::new();
+    let echo = EMPTY_ECHO.get_or_init(|| PlayerEchoComponent {
+        player_id: basic_comp.player_id,
+        echo_map: Default::default(),
+        preset_info: Default::default(),
+        calabash_info: Default::default(),
+    });
+    let inv = EMPTY_INV.get_or_init(|| PlayerInventoryComponent {
+        player_id: basic_comp.player_id,
+        info: Default::default(),
+    });
+    let mut eval_ctx = condition::EvalContext::new(basic_comp, echo, inv, map_comp, quest_comp);
+    eval_ctx.assets = Some(assets);
+    eval_ctx
+}
+
+pub fn is_level_play_open_globally(
+    eval_ctx: &condition::EvalContext<'_>,
+    lp: &sonoro_gamesv_data::tables::level_play_data::LevelPlayData,
+) -> bool {
+    let lp_id = lp.LevelPlayId;
+    if lp_id <= 0 {
+        return false;
+    }
+    if eval_ctx.quest_comp.info.completed_level_plays.contains(&lp_id)
+        || eval_ctx
+            .quest_comp
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&lp_id)
+    {
+        return true;
+    }
+    if lp.Data.Type == "Quest" {
+        return true;
+    }
+    let lp_inst_or_level = if lp.Data.InstanceId != 0 {
+        lp.Data.InstanceId
+    } else {
+        lp.Data.LevelId
+    };
+    let lp_map = eval_ctx
+        .assets
+        .map_or(lp_inst_or_level, |a| a.resolve_map_config_id(lp_inst_or_level));
+    if (lp.Data.Type == "RebornBoss" || lp_map == 8)
+        && !eval_ctx
+            .quest_comp
+            .info
+            .has_finished_quest(quest_engine::PROLOGUE_QUEST_ID)
+    {
+        return false;
+    }
+    let Some(open_val) = lp.Data.LevelPlayOpenCondition.as_ref() else {
+        return true;
+    };
+    let Some(obj) = open_val.as_object() else {
+        return true;
+    };
+    let Some(conds) = obj
+        .get("Conditions")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return true;
+    };
+    let non_spatial: Vec<&serde_json::Value> = conds
+        .iter()
+        .filter(|c| c.get("Type").and_then(|v| v.as_str()) != Some("ReachArea"))
+        .collect();
+    if non_spatial.is_empty() {
+        return true;
+    }
+    let is_or = obj.get("Type").and_then(|v| v.as_i64()) == Some(1);
+    for cond in non_spatial {
+        let passed = condition::eval_single_provide_condition(eval_ctx, cond);
+        if is_or && passed {
+            return true;
+        }
+        if !is_or && !passed {
+            return false;
+        }
+    }
+    !is_or
+}
+
+pub fn is_entity_blocked_by_locked_level_play(
+    eval_ctx: &condition::EvalContext<'_>,
+    instance_id: i32,
+    cfg_id32: i32,
+) -> bool {
+    let Some(assets) = eval_ctx.assets else {
+        return false;
+    };
+    if cfg_id32 <= 0 {
+        return false;
+    }
+    let scene_map = assets.resolve_map_config_id(instance_id);
+    let check_indices = [
+        assets.indexes.level_play_indices_for_ref_entity(cfg_id32),
+        assets.indexes.level_play_indices_for_reward_entity(cfg_id32),
+    ];
+    for indices in check_indices {
+        for &lp_idx in indices {
+            let lp = &assets.tables.level_play_data.items[lp_idx as usize];
+            if lp.Data.Type == "Quest" {
+                continue;
+            }
+            let lp_map = assets.resolve_map_config_id(if lp.Data.InstanceId != 0 {
+                lp.Data.InstanceId
+            } else {
+                lp.Data.LevelId
+            });
+            if lp.Data.InstanceId != instance_id && lp.Data.LevelId != instance_id && lp_map != scene_map
+            {
+                continue;
+            }
+            if !is_level_play_open_globally(eval_ctx, lp) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn push_level_play_and_map_mark_sync<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+) {
+    let lp_notify = build_level_play_info_notify(ctx.assets, ctx.basic_comp, ctx.quest_comp);
+    let mm_notify = build_map_mark_info_notify(
+        ctx.assets,
+        ctx.map_comp,
+        ctx.basic_comp,
+        ctx.quest_comp,
+    );
+    ctx.sink.push(LevelPlayInfoNotify::MSG_ID, &lp_notify);
+    ctx.sink.push(MapMarkInfoNotify::MSG_ID, &mm_notify);
+}
+
 pub fn build_level_play_info_notify(
     assets: &Assets,
+    basic_comp: &PlayerBasicComponent,
     quest_comp: &PlayerQuestComponent,
 ) -> LevelPlayInfoNotify {
+    let empty_map = PlayerMapComponent {
+        player_id: basic_comp.player_id,
+        info: Default::default(),
+    };
+    let eval_ctx = build_unlock_eval_context(assets, basic_comp, quest_comp, &empty_map);
     let mut seen = HashSet::new();
     let mut infos = Vec::new();
     for mark in &assets.tables.map_mark.items {
@@ -191,12 +342,14 @@ pub fn build_level_play_info_notify(
         if mark.ObjectType != 19 && mark.ObjectType != 28 && mark.ObjectType != 29 {
             continue;
         }
-        if assets
+        let Some(lp) = assets
             .tables
             .level_play_data
             .get_data_by_id(&mark.RelativeId)
-            .is_none()
-        {
+        else {
+            continue;
+        };
+        if !is_level_play_open_globally(&eval_ctx, &lp) {
             continue;
         }
         if !seen.insert(mark.RelativeId) {
@@ -219,7 +372,13 @@ pub fn build_level_play_info_notify(
     }
 }
 
-pub fn build_map_mark_info_notify(assets: &Assets, map_comp: &PlayerMapComponent) -> MapMarkInfoNotify {
+pub fn build_map_mark_info_notify(
+    assets: &Assets,
+    map_comp: &PlayerMapComponent,
+    basic_comp: &PlayerBasicComponent,
+    quest_comp: &PlayerQuestComponent,
+) -> MapMarkInfoNotify {
+    let eval_ctx = build_unlock_eval_context(assets, basic_comp, quest_comp, map_comp);
     let mut show_marks = Vec::new();
     let mut unlock_marks = Vec::new();
     let mut seen_show = HashSet::new();
@@ -243,6 +402,19 @@ pub fn build_map_mark_info_notify(assets: &Assets, map_comp: &PlayerMapComponent
         let is_teleporter = mark.ObjectType == 5 || mark.ObjectType == 6;
 
         if is_boss_or_challenge {
+            if mark.ShowCondition > 0 && !condition::eval_condition_group(&eval_ctx, mark.ShowCondition) {
+                continue;
+            }
+            if mark.RelativeType == 1
+                && mark.RelativeId > 0
+                && let Some(lp) = assets
+                    .tables
+                    .level_play_data
+                    .get_data_by_id(&mark.RelativeId)
+                && !is_level_play_open_globally(&eval_ctx, &lp)
+            {
+                continue;
+            }
             if seen_show.insert(mark.MarkId) {
                 show_marks.push(MapMarkShowInfo {
                     MarkId: mark.MarkId,

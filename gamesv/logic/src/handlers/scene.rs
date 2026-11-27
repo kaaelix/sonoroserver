@@ -33,10 +33,11 @@ use sonoro_proto::pb::{
 use sonoro_proto::wire::PbEnum;
 
 use crate::commands::entity as entity_cmd;
-use crate::component::entity::InteractStateComponent;
 use crate::component::entity::small::{
-    EntityType, LiftComponent, MoveSplineComponent, MoveToPointComponent, SceneItemComponent,
+    ConfigType, EntityType, LiftComponent, MoveSplineComponent, MoveToPointComponent,
+    SceneItemComponent,
 };
+use crate::component::entity::{EntityComponentStorage, InteractStateComponent};
 use crate::component::player::{
     PlayerBasicComponent, PlayerEchoComponent, PlayerGuideComponent, PlayerInventoryComponent,
     PlayerMailComponent, PlayerMapComponent, PlayerMotorComponent, PlayerProgressComponent,
@@ -58,6 +59,10 @@ use crate::templates::{player_entity_templates, role_entity_templates};
 
 const LAHAI_ROI_DUNGEON_ID: i32 = 906;
 const ROULETTE_SLOT_COUNT: usize = 8;
+/// Most entities the world spawner keeps in a scene.
+const SCENE_ENTITY_CAP: usize = 240;
+/// Headroom reserved above `SCENE_ENTITY_CAP` for priority world entities (beacons, chests, NPCs, puzzles).
+const SCENE_PRIORITY_CAP: usize = 320;
 
 fn ensure_valid_formation(
     formation_info: &mut sonoro_gamesv_fs::formation_info::FormationInfo,
@@ -850,6 +855,14 @@ pub fn on_initial_scene_join(
         basic_comp,
         &quest_comp.info.env.trial_roles,
     );
+    trial_roles::ensure_prologue_yangyang_in_formation_login(
+        fs,
+        assets,
+        &mut scene.formation_info,
+        role_comp,
+        weapon_comp,
+        quest_comp,
+    );
     ensure_valid_formation(&mut scene.formation_info, basic_comp);
 
     let new_now_ms = now_millis();
@@ -1163,6 +1176,7 @@ pub fn notify_join_scene<S: PushSink + ?Sized>(
                     assets,
                     &join_eval_ctx,
                     &lcfg,
+                    None,
                     is_quest_target,
                     explicitly_shown,
                 ))
@@ -1624,53 +1638,16 @@ fn evict_distant_ambient_entities<S: PushSink + ?Sized>(
     let evict_r2 = evict_radius * evict_radius;
     let mut victim_ids = Vec::new();
     for s in &scene.entities {
-        if s.player_id.is_some()
-            || s.follower.is_some()
-            || s.vehicle.is_some()
-            || s.summoner.is_some()
-            || s.concomitant.is_some()
+        if is_kept_world_entity(s, scene, assets, quest_info, active_quest_targets) {
+            continue;
+        }
+        if skip_priority
+            && s.config.config_id > 0
+            && let Some(raw_cfg) =
+                assets.find_level_entity(scene.instance_id, i64::from(s.config.config_id))
+            && is_priority_world_entity(assets, &raw_cfg)
         {
             continue;
-        }
-        if !matches!(
-            s.config.entity_type,
-            EntityType::Monster
-                | EntityType::Animal
-                | EntityType::Npc
-                | EntityType::SceneItem
-                | EntityType::Vision
-        ) {
-            continue;
-        }
-        if scene.active_battle_entities.contains(&s.net_id)
-            || active_quest_targets.contains(&s.config.config_id)
-        {
-            continue;
-        }
-        if s.config.config_id > 0 {
-            if quest_info.world.shown_entities.contains(&s.config.config_id)
-                || quest_info.get_entity_state(i64::from(s.config.config_id)).is_some()
-            {
-                continue;
-            }
-            let keep_lp = assets
-                .indexes
-                .level_play_indices_for_ref_entity(s.config.config_id)
-                .iter()
-                .any(|&lp_idx| {
-                    let lpid = assets.tables.level_play_data.items[lp_idx as usize].LevelPlayId;
-                    quest_info.progress.entered_level_plays.contains(&lpid)
-                });
-            if keep_lp {
-                continue;
-            }
-            if skip_priority
-                && let Some(raw_cfg) =
-                    assets.find_level_entity(scene.instance_id, i64::from(s.config.config_id))
-                && is_priority_world_entity(assets, &raw_cfg)
-            {
-                continue;
-            }
         }
 
         let Some(pos) = s.position else {
@@ -1684,9 +1661,63 @@ fn evict_distant_ambient_entities<S: PushSink + ?Sized>(
         }
         victim_ids.push(s.net_id);
     }
+    remove_evicted_entities(scene, fs, sink, victim_ids);
+}
 
+/// Entities that eviction never removes: players, followers, vehicles, summons, battle and quest
+/// targets, and level entities that are shown, have a saved state or belong to an entered level
+/// play.
+fn is_kept_world_entity(
+    s: &EntityComponentStorage,
+    scene: &Scene,
+    assets: &Assets,
+    quest_info: &QuestInfo,
+    active_quest_targets: &HashSet<i32>,
+) -> bool {
+    if s.player_id.is_some()
+        || s.follower.is_some()
+        || s.vehicle.is_some()
+        || s.summoner.is_some()
+        || s.concomitant.is_some()
+    {
+        return true;
+    }
+    if !matches!(
+        s.config.entity_type,
+        EntityType::Monster
+            | EntityType::Animal
+            | EntityType::Npc
+            | EntityType::SceneItem
+            | EntityType::Vision
+    ) {
+        return true;
+    }
+    if scene.active_battle_entities.contains(&s.net_id)
+        || active_quest_targets.contains(&s.config.config_id)
+    {
+        return true;
+    }
+    s.config.config_id > 0
+        && (quest_info.world.shown_entities.contains(&s.config.config_id)
+            || quest_info.get_entity_state(i64::from(s.config.config_id)).is_some()
+            || assets
+                .indexes
+                .level_play_indices_for_ref_entity(s.config.config_id)
+                .iter()
+                .any(|&lp_idx| {
+                    let lpid = assets.tables.level_play_data.items[lp_idx as usize].LevelPlayId;
+                    quest_info.progress.entered_level_plays.contains(&lpid)
+                }))
+}
+
+fn remove_evicted_entities<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    fs: &FileSystem,
+    sink: &mut S,
+    net_ids: Vec<i64>,
+) {
     let mut remove_infos = Vec::new();
-    for net_id in victim_ids {
+    for net_id in net_ids {
         if scene.remove(fs, net_id).is_ok() {
             remove_infos.push(EntityRemoveInfo {
                 EntityId: net_id,
@@ -1703,6 +1734,149 @@ fn evict_distant_ambient_entities<S: PushSink + ?Sized>(
             },
         );
     }
+}
+
+/// Client `IComponentDefine.AoiXyLayerValues`, keyed by BaseInfoComponent.AoiLayer
+/// (Aki.TdInterface.dll, `IComponentDefine..cctor`). No BinData or assets.db table has them.
+const AOI_XY_LAYER_VALUES: [(i32, f32); 8] = [
+    (0, 6000.0),
+    (1, 24000.0),
+    (2, 99000.0),
+    (3, 11000.0),
+    (6, 3000.0),
+    (7, 9000.0),
+    (8, 14000.0),
+    (9, 49000.0),
+];
+/// Client `IComponentDefine.AoizLayerValues`, keyed by BaseInfoComponent.AoiZRadius (same
+/// source); -1 means no Z limit.
+const AOI_Z_LAYER_VALUES: [(i32, f32); 5] = [
+    (0, -1.0),
+    (1, 24000.0),
+    (2, 6000.0),
+    (3, 3000.0),
+    (4, 50000.0),
+];
+
+/// Value of an AOI layer key; a missing or unknown key uses the Default (0) entry.
+fn aoi_layer_value(table: &[(i32, f32)], key: Option<i32>) -> f32 {
+    let key = key.unwrap_or(0);
+    table
+        .iter()
+        .find(|e| e.0 == key)
+        .or_else(|| table.first())
+        .map_or(0.0, |e| e.1)
+}
+
+/// A level entity's client AOI radii: (XY, Z), from its own BaseInfoComponent or its template's.
+/// Z is `None` when the client has no Z limit.
+fn client_aoi_radii(assets: &Assets, cfg: &LevelEntityConfig) -> (f32, Option<f32>) {
+    let own_info = cfg.ComponentsData.BaseInfoComponent.as_ref();
+    let mut layer = own_info.and_then(|bi| bi.AoiLayer);
+    let mut z_layer = own_info.and_then(|bi| bi.AoiZRadius);
+    if (layer.is_none() || z_layer.is_none())
+        && let Some(tpl) = assets.find_template_config(&cfg.BlueprintType)
+        && let Some(tpl_info) = tpl.ComponentsData.BaseInfoComponent.as_ref()
+    {
+        layer = layer.or(tpl_info.AoiLayer);
+        z_layer = z_layer.or(tpl_info.AoiZRadius);
+    }
+    let z = aoi_layer_value(&AOI_Z_LAYER_VALUES, z_layer);
+    (
+        aoi_layer_value(&AOI_XY_LAYER_VALUES, layer),
+        (z >= 0.0).then_some(z),
+    )
+}
+
+/// The Z half of the client's AOI test: no limit, or |dz| below it.
+fn within_client_aoi_z(z_radius: Option<f32>, dz: f32) -> bool {
+    z_radius.is_none_or(|z| dz.abs() < z)
+}
+
+fn in_client_aoi(
+    assets: &Assets,
+    cfg: &LevelEntityConfig,
+    pos: [f32; 3],
+    player_loc: [f32; 3],
+) -> bool {
+    let (xy, z) = client_aoi_radii(assets, cfg);
+    let dx = pos[0] - player_loc[0];
+    let dy = pos[1] - player_loc[1];
+    dx * dx + dy * dy < xy * xy && within_client_aoi_z(z, pos[2] - player_loc[2])
+}
+
+/// Full ambient scene: in spawn order, an ambient candidate inside its client AOI takes the slot
+/// of an evictable non-priority level entity outside its own AOI (farthest first) or, when none is
+/// left, of a farther one. Priority world entities (beacons, chests, NPCs, puzzles) are never
+/// evicted by ambient churn.
+#[allow(clippy::too_many_arguments)]
+fn make_room_for_candidates<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    fs: &FileSystem,
+    assets: &Assets,
+    sink: &mut S,
+    quest_info: &QuestInfo,
+    active_quest_targets: &HashSet<i32>,
+    player_loc: [f32; 3],
+    target_cap: usize,
+    require_client_aoi: bool,
+    pool: &mut Vec<SpawnCandidate>,
+) {
+    let mut free = target_cap.saturating_sub(scene.entities.len());
+    let mut excess = scene.entities.len().saturating_sub(target_cap);
+    let mut victims = Vec::new();
+    for s in &scene.entities {
+        if s.config.config_type != ConfigType::Level
+            || s.config.config_id <= 0
+            || is_kept_world_entity(s, scene, assets, quest_info, active_quest_targets)
+        {
+            continue;
+        }
+        let Some(pos) = s.position else {
+            continue;
+        };
+        let Some(cfg) = assets.find_level_entity(scene.instance_id, i64::from(s.config.config_id))
+        else {
+            continue;
+        };
+        if is_priority_world_entity(assets, &cfg) {
+            continue;
+        }
+        let in_aoi = in_client_aoi(assets, &cfg, pos.location, player_loc);
+        let dx = pos.location[0] - player_loc[0];
+        let dy = pos.location[1] - player_loc[1];
+        let dz = pos.location[2] - player_loc[2];
+        victims.push((s.net_id, dx * dx + dy * dy + dz * dz, in_aoi));
+    }
+    // Outside the AOI first, then farthest first.
+    victims.sort_by(|a, b| a.2.cmp(&b.2).then(b.1.total_cmp(&a.1)));
+
+    let mut evicted = Vec::new();
+    pool.retain(|cand| {
+        if free > 0 {
+            free -= 1;
+            return true;
+        }
+        let need = excess + 1;
+        if victims
+            .get(need - 1)
+            .is_none_or(|&(_, dist2, in_aoi)| in_aoi && dist2 <= cand.dist2)
+        {
+            return false;
+        }
+        if require_client_aoi {
+            let Some(cfg) = assets.get_level_entity_by_idx(cand.cfg_idx) else {
+                return false;
+            };
+            if !in_client_aoi(assets, &cfg, [cand.x, cand.y, cand.z], player_loc) {
+                return false;
+            }
+        }
+        evicted.extend(victims.drain(..need).map(|(net_id, ..)| net_id));
+        excess = 0;
+        true
+    });
+    remove_evicted_entities(scene, fs, sink, evicted);
 }
 
 #[derive(Clone, Copy)]
@@ -1798,19 +1972,39 @@ fn passes_entity_visible_conditions(
     assets: &Assets,
     eval_ctx: &EvalContext<'_>,
     cfg: &LevelEntityConfig,
+    tpl_opt: Option<&sonoro_gamesv_data::tables::template_config::TemplateConfig>,
     is_quest_target: bool,
     explicitly_shown: bool,
 ) -> bool {
     if is_quest_target || explicitly_shown {
         return true;
     }
-    let mut comps = cfg.ComponentsData.clone();
-    if let Some(tpl) = assets.find_template_config(&cfg.BlueprintType) {
-        tpl.ComponentsData.merge_into(&mut comps);
+    if let Ok(cfg_id32) = i32::try_from(cfg.EntityId)
+        && cfg_id32 > 0
+    {
+        let inst_id = eval_ctx.scene.map_or(8, |s| s.instance_id);
+        if crate::handlers::misc::is_entity_blocked_by_locked_level_play(eval_ctx, inst_id, cfg_id32)
+        {
+            return false;
+        }
     }
     let mut vis_ctx = eval_ctx.clone();
     vis_ctx.self_entity_config_id = i32::try_from(cfg.EntityId).unwrap_or(0);
-    condition::eval_entity_visible_component(&vis_ctx, &comps)
+    if tpl_opt.is_some() {
+        condition::eval_entity_visible_components(
+            &vis_ctx,
+            &cfg.ComponentsData,
+            tpl_opt.map(|t| &t.ComponentsData),
+        )
+    } else if let Some(tpl) = assets.find_template_config(&cfg.BlueprintType) {
+        condition::eval_entity_visible_components(
+            &vis_ctx,
+            &cfg.ComponentsData,
+            Some(&tpl.ComponentsData),
+        )
+    } else {
+        condition::eval_entity_visible_components(&vis_ctx, &cfg.ComponentsData, None)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1829,6 +2023,29 @@ fn consider_spawn_candidates(
     cap: usize,
 ) {
     for &cfg_idx in indices {
+        if let Some(meta) = assets.indexes.quick_entity_meta(cfg_idx) {
+            let cfg_id32 = i32::try_from(meta.entity_id).unwrap_or(0);
+            let is_quest_target = cfg_id32 > 0 && active_quest_targets.contains(&cfg_id32);
+            let explicitly_shown =
+                cfg_id32 > 0 && quest_info.world.shown_entities.contains(&cfg_id32);
+            if (meta.in_sleep || meta.is_hidden) && !explicitly_shown && !is_quest_target {
+                continue;
+            }
+            if scene.debug_spawn_route(meta.entity_id).is_some() {
+                continue;
+            }
+            if cfg_id32 > 0
+                && (scene.find_entity_net_id_by_config_id(cfg_id32).is_some()
+                    || (!is_quest_target
+                        && (quest_info.has_opened_chest(cfg_id32)
+                            || scene.instance.is_on_respawn_cooldown(cfg_id32, now_ms))))
+            {
+                continue;
+            }
+            if quest_engine::should_hide_world_entity(quest_info, active_quest_targets, cfg_id32) {
+                continue;
+            }
+        }
         let Some(cfg) = assets.get_level_entity_by_idx(cfg_idx) else {
             continue;
         };
@@ -1849,20 +2066,13 @@ fn consider_spawn_candidates(
         let is_quest_target = cfg_id32 > 0 && active_quest_targets.contains(&cfg_id32);
         let explicitly_shown =
             cfg_id32 > 0 && quest_info.world.shown_entities.contains(&cfg_id32);
-        if !is_quest_target
+        let is_priority = is_quest_target || is_priority_world_entity(assets, &cfg);
+        if !is_priority
             && !explicitly_shown
-            && let Some(az) = cfg
-                .ComponentsData
-                .BaseInfoComponent
-                .as_ref()
-                .and_then(|bi| bi.AoiZRadius)
-            && az > 0
-            && dz.abs() > (az as f32)
+            && !within_client_aoi_z(client_aoi_radii(assets, &cfg).1, dz)
         {
             continue;
         }
-
-        let is_priority = is_quest_target || is_priority_world_entity(assets, &cfg);
         if is_priority {
             if priority_buf.len() >= 96 && priority_buf.last().is_some_and(|l| dist2 >= l.dist2) {
                 continue;
@@ -1884,18 +2094,26 @@ fn consider_spawn_candidates(
         {
             continue;
         }
-        if is_blocked_world_entity_config(
+        let tpl_opt = assets.find_template_config(&cfg.BlueprintType);
+        if is_blocked_world_entity_config_with_tpl(
             assets,
             quest_info,
             scene.instance_id,
             &cfg,
+            tpl_opt.as_deref(),
             is_quest_target,
             explicitly_shown,
         ) {
             continue;
         }
-        if !passes_entity_visible_conditions(assets, eval_ctx, &cfg, is_quest_target, explicitly_shown)
-        {
+        if !passes_entity_visible_conditions(
+            assets,
+            eval_ctx,
+            &cfg,
+            tpl_opt.as_deref(),
+            is_quest_target,
+            explicitly_shown,
+        ) {
             continue;
         }
         if (cfg.InSleep || cfg.IsHidden) && !explicitly_shown && !is_quest_target {
@@ -1928,6 +2146,27 @@ pub fn is_blocked_world_entity_config(
     is_quest_target: bool,
     explicitly_shown: bool,
 ) -> bool {
+    let tpl_opt = assets.find_template_config(&lcfg.BlueprintType);
+    is_blocked_world_entity_config_with_tpl(
+        assets,
+        quest_info,
+        instance_id,
+        lcfg,
+        tpl_opt.as_deref(),
+        is_quest_target,
+        explicitly_shown,
+    )
+}
+
+fn is_blocked_world_entity_config_with_tpl(
+    assets: &Assets,
+    quest_info: &QuestInfo,
+    instance_id: i32,
+    lcfg: &LevelEntityConfig,
+    tpl_opt: Option<&sonoro_gamesv_data::tables::template_config::TemplateConfig>,
+    is_quest_target: bool,
+    explicitly_shown: bool,
+) -> bool {
     if !quest_actions::entity_data_layers_active(assets, quest_info, instance_id, lcfg) {
         return true;
     }
@@ -1938,12 +2177,11 @@ pub fn is_blocked_world_entity_config(
         return true;
     }
 
-    let tpl_opt = assets.find_template_config(&lcfg.BlueprintType);
     if let Some(bp) = assets
         .indexes
         .find_blueprint_config(&assets.tables, &lcfg.BlueprintType)
     {
-        if !is_spawnable_blueprint_and_template(lcfg, bp, tpl_opt.as_deref()) {
+        if !is_spawnable_blueprint_and_template(lcfg, bp, tpl_opt) {
             return true;
         }
         if matches!(
@@ -1960,7 +2198,6 @@ pub fn is_blocked_world_entity_config(
                 .and_then(|cl| cl.Disabled)
                 .or_else(|| {
                     tpl_opt
-                        .as_ref()
                         .and_then(|tpl| tpl.ComponentsData.ConditionListenerComponent.as_ref())
                         .and_then(|tcl| tcl.Disabled)
                 });
@@ -2122,9 +2359,6 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
     now_ms: i64,
 ) -> io::Result<()> {
     let need_evict = scene.entities.len() >= 200;
-    if !need_evict && scene.entities.len() >= 240 {
-        return Ok(());
-    }
 
     let mut active_quest_targets = HashSet::new();
     collect_active_target_entity_ids(assets, quest_comp, Some(progress_comp), &mut active_quest_targets);
@@ -2167,9 +2401,6 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
                 false,
             );
         }
-    }
-    if scene.entities.len() >= 240 {
-        return Ok(());
     }
 
     let cap = max_count.min(40);
@@ -2232,10 +2463,42 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
         );
     }
 
+    if priority_buf.len() > SCENE_PRIORITY_CAP.saturating_sub(scene.entities.len()) {
+        make_room_for_candidates(
+            scene,
+            fs,
+            assets,
+            sink,
+            &quest_comp.info,
+            &active_quest_targets,
+            player_loc,
+            SCENE_PRIORITY_CAP,
+            false,
+            &mut priority_buf,
+        );
+    }
+    if best_buf.len() > SCENE_ENTITY_CAP.saturating_sub(scene.entities.len()) {
+        make_room_for_candidates(
+            scene,
+            fs,
+            assets,
+            sink,
+            &quest_comp.info,
+            &active_quest_targets,
+            player_loc,
+            SCENE_ENTITY_CAP,
+            true,
+            &mut best_buf,
+        );
+    }
+
     let mut pending = Vec::new();
-    for pool in [priority_buf, best_buf] {
+    for (pool, pool_cap) in [
+        (priority_buf, SCENE_PRIORITY_CAP),
+        (best_buf, SCENE_ENTITY_CAP),
+    ] {
         for cand in pool {
-            if scene.entities.len() >= 240 {
+            if scene.entities.len() >= pool_cap {
                 break;
             }
             let Some(cfg) = assets.get_level_entity_by_idx(cand.cfg_idx) else {

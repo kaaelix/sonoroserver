@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::events::Event;
 use sonoro_gamesv_logic::helpers::{quest_actions, quest_engine, reward, role as role_helper};
@@ -5,15 +7,16 @@ use sonoro_proto::enums::{ErrorCode, TeleportReason};
 use sonoro_proto::pb::{
     ApplyRechallengeRequest, ApplyRechallengeResponse, ChangeDataLayerFinishRequest,
     ChangeDataLayerFinishResponse, EnterBigWorldInstRequest, EnterBigWorldInstResponse,
-    EnterInstRequest, EnterInstResponse, FlowRestartRequest, FlowRestartResponse,
+    EnterInstRequest, EnterInstResponse, ExchangeRewardInfoNotify, ExchangeRewardInfoRequest,
+    ExchangeRewardInfoResponse, FlowRestartRequest, FlowRestartResponse,
     GetLevelPlayRewardsRequest, GetLevelPlayRewardsResponse, InstFightEndPush, LeaveInstRequest,
     LeaveInstResponse, LeaveSceneNotify, LevelPlayFastReturnPosRequest,
-    LevelPlayFastReturnPosResponse, LevelPlayOpenRequest, LevelPlayOpenResponse,
-    LevelPlayRewardRequest, LevelPlayRewardResponse, LevelPlaySwitchSportModeRequest,
-    LevelPlaySwitchSportModeResponse, SceneSubLevelsRequest, SceneSubLevelsResponse,
-    SingleInstRechallengeRequest, SingleInstRechallengeResponse, TeleportDungeonActionRequest,
-    TeleportDungeonActionResponse, TeleportFlowEndRequest, TeleportFlowEndResponse, TeleportNotify,
-    TransitionOptionPb, Vector,
+    LevelPlayFastReturnPosResponse, LevelPlayInfo, LevelPlayInfoNotify, LevelPlayOpenRequest,
+    LevelPlayOpenResponse, LevelPlayRewardRequest, LevelPlayRewardResponse,
+    LevelPlaySwitchSportModeRequest, LevelPlaySwitchSportModeResponse, SceneSubLevelsRequest,
+    SceneSubLevelsResponse, SingleInstRechallengeRequest, SingleInstRechallengeResponse,
+    TeleportDungeonActionRequest, TeleportDungeonActionResponse, TeleportFlowEndRequest,
+    TeleportFlowEndResponse, TeleportNotify, TransitionOptionPb, Vector,
 };
 
 use super::State;
@@ -171,6 +174,20 @@ pub fn handle_level_play_open_request(
     state: &mut State,
     req: LevelPlayOpenRequest,
 ) -> Result<LevelPlayOpenResponse, String> {
+    if let Some(lp) = state
+        .assets
+        .tables
+        .level_play_data
+        .get_data_by_id(&req.LevelPlayId)
+    {
+        let eval_ctx = state.eval_context();
+        if !sonoro_gamesv_logic::handlers::misc::is_level_play_open_globally(&eval_ctx, &lp) {
+            return Ok(LevelPlayOpenResponse {
+                ErrorCode: Some(ErrorCode::ErrPreCondition),
+                LevelPlayId: req.LevelPlayId,
+            });
+        }
+    }
     let key = format!("lp:open:{}", req.LevelPlayId);
     let pc = &mut state.player_components.progress;
     let _ = pc.info.mark_claim(&key);
@@ -193,7 +210,9 @@ pub fn handle_level_play_reward_request(
         resolved_cfg_id = i64::from(cid);
     }
 
+    let mut matched_lp_id = 0i32;
     let mut reward_id = 0i32;
+    let mut first_reward_id = 0i32;
     if let Ok(entity_id32) = i32::try_from(resolved_cfg_id) {
         let reward_indices = state
             .assets
@@ -207,22 +226,37 @@ pub fn handle_level_play_reward_request(
         } else {
             reward_indices
         };
-        if let Some(&idx) = lp_indices.first()
-            && let Some(rc) = state.assets.tables.level_play_data.items[idx as usize]
-                .Data
-                .LevelPlayRewardConfig
-                .as_ref()
-        {
-            reward_id = rc.RewardId;
+        if let Some(&idx) = lp_indices.first() {
+            let lp = &state.assets.tables.level_play_data.items[idx as usize];
+            matched_lp_id = lp.LevelPlayId;
+            if let Some(rc) = lp.Data.LevelPlayRewardConfig.as_ref() {
+                reward_id = rc.RewardId;
+                first_reward_id = rc.FirstRewardId;
+            }
         }
     }
 
     let key = format!("lp:reward_cnt:{resolved_cfg_id}");
-    state
+    let total_reward_cnt = state
         .player_components
         .progress
         .info
-        .add_key_int(&key, i64::from(cnt));
+        .add_key_int(&key, i64::from(cnt))
+        .clamp(0, i64::from(i32::MAX)) as i32;
+    let claim_first = matched_lp_id > 0
+        && state
+            .player_components
+            .progress
+            .info
+            .get_key_int(&format!("lp_reward_claimed:{matched_lp_id}"))
+            == 0;
+    if matched_lp_id > 0 {
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int(&format!("lp_reward_claimed:{matched_lp_id}"), 1);
+    }
     state
         .player_components
         .progress
@@ -230,6 +264,14 @@ pub fn handle_level_play_reward_request(
         .map_err(|e| e.to_string())?;
 
     let mut granted_any = false;
+    if claim_first && first_reward_id > 0 {
+        let mut rctx = state.reward_context();
+        let res = reward::grant_treasure_box_reward(&mut rctx, 0, first_reward_id, 15_008)
+            .map_err(|e| e.to_string())?;
+        if res.granted_count > 0 {
+            granted_any = true;
+        }
+    }
     if reward_id > 0 {
         for _ in 0..cnt {
             let mut rctx = state.reward_context();
@@ -265,8 +307,100 @@ pub fn handle_level_play_reward_request(
         .map_err(|e| e.to_string())?;
     }
 
+    if let Ok(cfg_id32) = i32::try_from(resolved_cfg_id)
+        && cfg_id32 > 0
+    {
+        state.player_components.quest.info.mark_chest_opened(cfg_id32);
+        state
+            .player_components
+            .quest
+            .info
+            .set_entity_state(resolved_cfg_id, "关卡.Common.状态.激活");
+        state
+            .player_components
+            .quest
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        if let Some(scene) = state.scene.as_mut()
+            && let Some(net_id) = scene.find_entity_net_id_by_config_id(cfg_id32)
+            && let Some(upd) = scene.update_entity_state_tag(
+                &state.assets.tables.gameplay_tag_remap,
+                net_id,
+                "关卡.Common.状态.激活",
+            )
+        {
+            quest_actions::emit_entity_state_tag_update_checked(
+                scene,
+                Some(&state.assets),
+                &mut state.conn,
+                net_id,
+                upd,
+            );
+        }
+    }
+
+    if matched_lp_id > 0 {
+        let _ = state.conn.push_msg(
+            LevelPlayInfoNotify::MSG_ID,
+            &LevelPlayInfoNotify {
+                LevelPlayInfo: vec![LevelPlayInfo {
+                    Id: matched_lp_id,
+                    IsFirst: false,
+                    State: 3,
+                    UpdateTime: 0,
+                    GetRewardCount: total_reward_cnt,
+                }],
+            },
+        );
+    }
+    if reward_id > 0 {
+        let _ = state.conn.push_msg(
+            ExchangeRewardInfoNotify::MSG_ID,
+            &ExchangeRewardInfoNotify {
+                ExchangeRewardId: reward_id,
+                Count: total_reward_cnt,
+            },
+        );
+    }
+
     Ok(LevelPlayRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
+    })
+}
+
+pub fn handle_exchange_reward_info_request(
+    state: &mut State,
+    _req: ExchangeRewardInfoRequest,
+) -> Result<ExchangeRewardInfoResponse, String> {
+    let mut exchange_dict = BTreeMap::new();
+    let mut share_counts: BTreeMap<i32, i32> = BTreeMap::new();
+    for c in &state.player_components.progress.info.dynamic.claims {
+        if let Some(rest) = c.strip_prefix("exchange:") {
+            if let Ok(cid) = rest.parse::<i32>() {
+                exchange_dict.insert(cid, 1);
+                if let Some(cfg) = state.assets.tables.exchange_reward.get_data_by_id(&cid)
+                    && cfg.SharedId > 0
+                {
+                    *share_counts.entry(cfg.SharedId).or_insert(0) += 1;
+                }
+            }
+        } else if let Some(rest) = c.strip_prefix("exchange_share:")
+            && let Ok(sid) = rest.parse::<i32>()
+        {
+            *share_counts.entry(sid).or_insert(0) += 1;
+        }
+    }
+    for entry in &state.player_components.progress.info.dynamic.ints {
+        if let Some(id_str) = entry.key.strip_prefix("lp:reward_cnt:")
+            && let Ok(eid) = id_str.parse::<i32>()
+            && entry.val > 0
+        {
+            exchange_dict.insert(eid, entry.val.clamp(0, i64::from(i32::MAX)) as i32);
+        }
+    }
+    Ok(ExchangeRewardInfoResponse {
+        ExchangeRewardDict: exchange_dict,
+        SharedDict: share_counts,
     })
 }
 

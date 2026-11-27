@@ -253,22 +253,7 @@ pub fn change_attr(
         }
     });
 
-    let hp_ratio_before = if attr_type == EAttributeType::LifeMax
-        && life_idx < attr_comp.attributes.len()
-        && life_max_idx < attr_comp.attributes.len()
-    {
-        let life = attr_comp.attributes[life_idx].current;
-        let life_max = attr_comp.attributes[life_max_idx].current;
-        if life_max > 0 {
-            Some((life as f32) / (life_max as f32))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let result = apply_attr_change(
+    let mut result = apply_attr_change(
         attr_comp,
         attr_type,
         change_type,
@@ -277,15 +262,21 @@ pub fn change_attr(
         max_value,
     );
 
-    if let Some(ratio) = hp_ratio_before
+    if attr_type == EAttributeType::LifeMax
         && life_max_idx < attr_comp.attributes.len()
         && life_idx < attr_comp.attributes.len()
     {
-        let new_max = attr_comp.attributes[life_max_idx].current;
-        let new_hp = ((new_max as f32) * ratio).round() as i32;
-        let clamped = new_hp.clamp(0, new_max);
-        attr_comp.attributes[life_idx].base = clamped;
-        attr_comp.attributes[life_idx].current = clamped;
+        let new_max = attr_comp.attributes[life_max_idx].current.max(0);
+        let cur_life = attr_comp.attributes[life_idx].current;
+        if cur_life > new_max {
+            attr_comp.attributes[life_idx].current = new_max;
+            if attr_comp.attributes[life_idx].base > new_max {
+                attr_comp.attributes[life_idx].base = new_max;
+            }
+            result.push(EAttributeType::Life);
+        } else if attr_comp.attributes[life_idx].base > new_max {
+            attr_comp.attributes[life_idx].base = new_max;
+        }
     }
 
     result

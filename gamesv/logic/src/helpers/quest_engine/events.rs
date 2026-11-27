@@ -5,9 +5,12 @@ use std::io;
 use serde_json::{Map, Value};
 use sonoro_gamesv_data::asset_indexes::MapEntityKey;
 use sonoro_gamesv_fs::quest_info::append_unique_int;
-use sonoro_proto::enums::{BtType, ChildQuestNodeStatus, ErrorCode, FailReason, TimerSetType};
+use sonoro_proto::enums::{
+    BtType, ChildQuestNodeStatus, ErrorCode, FailReason, GameCtxType, TimerSetType,
+};
 use sonoro_proto::pb::{
-    BtRollbackStartNotify, FlowEndNotify, FlowOptionInfoList, LordGymLevelPlayResultNotify,
+    BtRollbackStartNotify, FlowEndNotify, FlowOptionInfoList, GameCtxPbCtxInfoOneof,
+    LordGymLevelPlayResultNotify, NormalInteractCtxPb,
     QuestGiveUpNotify, TimerInfoPb, TowerEndNotify, TowerFloorPb, TowerFloorUpdateNotify,
     TowerRolePb, UpdateChildQuestNodeStatusNotify, UpdateTimerInfoNotify,
 };
@@ -25,12 +28,14 @@ use crate::sink::PushSink;
 use super::triggers::{
     action_node_progress_key, build_pre_show_quest_list, consume_hand_in_items,
     count_node_actions, find_node_by_id, get_child_condition, handle_interact_option,
-    is_battle_attr_or_wait_satisfied, is_kill_satisfied, is_level_play_satisfied,
-    is_schedule_time_window_match, mark_and_check_do_interact_complete, match_do_interact,
-    matches_check_ui_game_key, matches_hand_in_entity, matches_quest_interact_starter,
-    matches_reach_area, nested_dungeon_id, push_node_progress_notify, push_ready_quest_list,
+    is_battle_attr_or_wait_satisfied, is_kill_satisfied_in_ctx, is_level_play_satisfied,
+    is_schedule_time_window_match, is_server_auto_interact, mark_and_check_do_interact_complete,
+    match_do_interact, matches_check_ui_game_key, matches_hand_in_entity,
+    matches_quest_interact_starter, matches_reach_area, nested_dungeon_id,
+    push_entity_level_events, push_node_progress_notify, push_ready_quest_list,
     reevaluate_condition_listeners, reevaluate_in_range_triggers, resolve_config_id,
-    snapshot_active_quest_ids, start_flow_from_obj, start_flow_params, start_flow_params_bt,
+    scene_entity_ctx, snapshot_active_quest_ids, start_flow_from_obj, start_flow_params,
+    start_flow_params_bt,
 };
 use super::{
     PROLOGUE_QUEST_ID, interrupt_active_flow_for_quest,
@@ -161,6 +166,35 @@ fn merged_interact_component<S: PushSink + ?Sized>(
     components.InteractComponent
 }
 
+/// Client side of a normal interact option: excludes server-initiated Auto option sweeps.
+fn push_normal_interact_level_events<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    entity_id: i64,
+    cfg_id: i32,
+    option_index: i32,
+    actions: &[sonoro_gamesv_data::tables::entity_components::interact::Action],
+) {
+    if is_server_auto_interact() {
+        return;
+    }
+    let Some(entity_ctx) = scene_entity_ctx(ctx, entity_id, cfg_id) else {
+        return;
+    };
+    let raw: Vec<Value> = actions
+        .iter()
+        .map(|act| act.Raw.clone().unwrap_or_default())
+        .collect();
+    push_entity_level_events(
+        ctx,
+        GameCtxType::NormalInteract,
+        GameCtxPbCtxInfoOneof::NormalInteract(NormalInteractCtxPb {
+            EntityCtx: Some(entity_ctx),
+            OptionIndex: option_index,
+        }),
+        &raw,
+    );
+}
+
 fn execute_normal_interact_actions<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     entity_id: i64,
@@ -169,6 +203,7 @@ fn execute_normal_interact_actions<S: PushSink + ?Sized>(
     actions: &[sonoro_gamesv_data::tables::entity_components::interact::Action],
     no_active_flow: bool,
 ) -> io::Result<()> {
+    push_normal_interact_level_events(ctx, entity_id, cfg_id, option_index, actions);
     let mut cbs = super::action_callbacks();
     cbs.is_flow_action = false;
     let mut state_changed = false;
@@ -551,10 +586,21 @@ pub fn on_player_move<S: PushSink + ?Sized>(
     Ok(())
 }
 
+#[cfg(test)]
 fn is_entity_kill_relevant_to_quest(
     aq: &sonoro_gamesv_fs::quest_info::ActiveQuest,
     nodes: &[sonoro_gamesv_data::lazy_node_store::NodeEntry],
     cfg_id: i32,
+) -> bool {
+    is_entity_kill_relevant_to_quest_with_assets(aq, nodes, cfg_id, None, 8)
+}
+
+fn is_entity_kill_relevant_to_quest_with_assets(
+    aq: &sonoro_gamesv_fs::quest_info::ActiveQuest,
+    nodes: &[sonoro_gamesv_data::lazy_node_store::NodeEntry],
+    cfg_id: i32,
+    assets: Option<&sonoro_gamesv_data::Assets>,
+    map_id: i32,
 ) -> bool {
     for &nid in &aq.active_nodes {
         let Some(node) = find_node_by_id(nodes, nid) else {
@@ -568,6 +614,11 @@ fn is_entity_kill_relevant_to_quest(
         };
         let ctype = json_str(cond.get("Type")).unwrap_or("");
         if ctype == "MonsterCreator" {
+            if let Some(a) = assets
+                && super::resolve_kill_targets_for_condition(a, map_id, cond).contains(&cfg_id)
+            {
+                return true;
+            }
             if let Some(Value::Array(arr)) = cond.get("MonsterCreatorEntityIds")
                 && arr.iter().any(|v| json_int(Some(v)) == Some(cfg_id))
             {
@@ -772,6 +823,7 @@ pub fn on_entity_killed<S: PushSink + ?Sized>(
     let mut progressed = false;
 
     if resolved_cfg_id > 0 {
+        let map_id = ctx.scene.as_deref().map_or(8, |s| s.instance_id);
         let active_snapshot = snapshot_active_quest_ids(ctx);
         for qid in active_snapshot {
             let Ok(nodes) = ctx.assets.quest_nodes.get_owner_nodes(qid) else {
@@ -781,7 +833,15 @@ pub fn on_entity_killed<S: PushSink + ?Sized>(
                 .quest_comp
                 .info
                 .find_active_quest(qid)
-                .is_some_and(|aq| is_entity_kill_relevant_to_quest(aq, &nodes, resolved_cfg_id));
+                .is_some_and(|aq| {
+                    is_entity_kill_relevant_to_quest_with_assets(
+                        aq,
+                        &nodes,
+                        resolved_cfg_id,
+                        Some(ctx.assets),
+                        map_id,
+                    )
+                });
             if relevant && let Some(aq_ptr) = ctx.quest_comp.info.find_active_quest_mut(qid) {
                 aq_ptr.record_killed_entity(resolved_cfg_id);
             }
@@ -811,10 +871,28 @@ pub fn on_entity_killed<S: PushSink + ?Sized>(
                     continue;
                 }
                 if let Some(aq) = ctx.quest_comp.info.find_active_quest(qid).cloned() {
-                    if is_kill_satisfied(&aq, cond, ctype) {
+                    if is_kill_satisfied_in_ctx(ctx, &aq, cond, ctype) {
                         complete_child_quest(ctx, qid, &nodes, &node)?;
                         progressed = true;
                     } else if relevant {
+                        if let Some(Value::Array(creators)) = cond.get("MonsterCreatorEntityIds") {
+                            let mut to_awake = Vec::new();
+                            for v in creators {
+                                if let Some(mc_id) = json_int(Some(v))
+                                    && mc_id > 0
+                                {
+                                    to_awake.extend(super::ready_wave_targets_for_creator(
+                                        ctx.assets,
+                                        map_id,
+                                        mc_id,
+                                        |tid| aq.has_killed_entity(tid),
+                                    ));
+                                }
+                            }
+                            for tid in &to_awake {
+                                quest_actions::ensure_quest_entity_awakened(ctx, *tid);
+                            }
+                        }
                         push_node_progress_notify(ctx, &aq, &node);
                     }
                 }
@@ -2659,6 +2737,8 @@ pub fn on_flow_end_with_options<S: PushSink + ?Sized>(
             )?;
             if let Some(scene) = ctx.scene.as_deref_mut() {
                 scene.active_flow_owner_entity_id = owner_entity_id;
+                let new_inc = scene.active_flow_inc_id;
+                scene.rebind_post_flow_actions(matched_inc, new_inc);
             }
             return Ok(());
         }
@@ -2673,6 +2753,23 @@ pub fn on_flow_end_with_options<S: PushSink + ?Sized>(
             },
         );
         quest_actions::restore_flow_range_hidden_group(ctx)?;
+
+        let deferred_post = ctx
+            .scene
+            .as_deref_mut()
+            .map(|s| s.take_post_flow_actions(matched_inc))
+            .unwrap_or_default();
+        for entry in deferred_post {
+            let mut cbs = super::action_callbacks();
+            cbs.bt_type = entry.bt_type;
+            quest_actions::execute_action_list(
+                ctx,
+                &mut cbs,
+                entry.quest_id,
+                entry.node_id,
+                &entry.actions,
+            )?;
+        }
 
         let interact_blocked_cancel =
             !is_skip && replay.has_finish_do_interact && !replay.finish_do_interact_executed;
@@ -3291,7 +3388,7 @@ pub fn on_bt_timer_end<S: PushSink + ?Sized>(
         } else if ctx.quest_comp.info.progress.entered_level_plays.contains(&owner_id)
             && let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(ctx)
         {
-            let _ = level_play::on_bt_timer_end(&mut lp_ctx, owner_id)?;
+            let _ = level_play::on_bt_timer_end_with_type(&mut lp_ctx, owner_id, timer_type)?;
         }
     }
     Ok(())
@@ -3372,6 +3469,16 @@ pub fn on_player_transfer_or_leave_inst<S: PushSink + ?Sized>(
                 if node.node_type != "QuestFailed" {
                     continue;
                 }
+                if !level_play::is_lp_node_active_pub(lp_ctx.progress_comp.as_deref(), lpid, node.id)
+                    && !level_play::is_lp_subtree_active(
+                        lp_ctx.progress_comp.as_deref(),
+                        lpid,
+                        &nodes,
+                        node.parent_id,
+                    )
+                {
+                    continue;
+                }
                 let Some(Value::Object(fc)) = node.data.get("FailedCondition") else {
                     continue;
                 };
@@ -3431,6 +3538,16 @@ pub fn on_difficulty_changed<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>
             };
             for node in nodes.iter() {
                 if node.node_type != "QuestFailed" {
+                    continue;
+                }
+                if !level_play::is_lp_node_active_pub(lp_ctx.progress_comp.as_deref(), lpid, node.id)
+                    && !level_play::is_lp_subtree_active(
+                        lp_ctx.progress_comp.as_deref(),
+                        lpid,
+                        &nodes,
+                        node.parent_id,
+                    )
+                {
                     continue;
                 }
                 if let Some(Value::Object(fc)) = node.data.get("FailedCondition")
@@ -3511,6 +3628,16 @@ pub fn on_sneak_failed<S: PushSink + ?Sized>(
                 if node.node_type != "QuestFailed" {
                     continue;
                 }
+                if !level_play::is_lp_node_active_pub(lp_ctx.progress_comp.as_deref(), lpid, node.id)
+                    && !level_play::is_lp_subtree_active(
+                        lp_ctx.progress_comp.as_deref(),
+                        lpid,
+                        &nodes,
+                        node.parent_id,
+                    )
+                {
+                    continue;
+                }
                 if let Some(Value::Object(fc)) = node.data.get("FailedCondition")
                     && fc.get("SneakPlayCondition").is_some()
                 {
@@ -3534,6 +3661,7 @@ pub fn on_progression_unlock_changed<S: PushSink + ?Sized>(
 ) -> io::Result<()> {
     on_condition_state_changed(ctx)?;
     quest_actions::push_func_open(ctx);
+    crate::handlers::misc::push_level_play_and_map_mark_sync(ctx);
     let show_list = build_pre_show_quest_list(ctx);
     ctx.sink.push(
         sonoro_proto::pb::QuestShowListNotify::MSG_ID,

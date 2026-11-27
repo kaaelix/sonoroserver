@@ -59,15 +59,13 @@ pub fn handle_guide_info_request(
 }
 
 pub fn handle_guide_trigger_request(
-    state: &mut State,
-    events: &mut EventQueue,
-    req: GuideTriggerRequest,
+    _state: &mut State,
+    _events: &mut EventQueue,
+    _req: GuideTriggerRequest,
 ) -> Result<GuideTriggerResponse, String> {
-    if req.GroupId > 0 {
-        let mut qctx = state.quest_context(events);
-        quest_engine::triggers::on_guide_finish(&mut qctx, req.GroupId)
-            .map_err(|e| e.to_string())?;
-    }
+    // Client sends GuideTriggerRequest on GuideGroupOpening (when a tutorial opens),
+    // not when it finishes. Completing ChildQuest(Guide) here would fire FinishActions
+    // prematurely before GuideFinishRequest arrives.
     Ok(GuideTriggerResponse {
         ErrorCode: Some(ErrorCode::Success),
         ..Default::default()

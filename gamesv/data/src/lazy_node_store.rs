@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -35,6 +35,8 @@ struct CacheState {
 #[derive(Default)]
 pub struct LazyNodeStore {
     db: Option<Arc<AssetsDb>>,
+    db_owners: HashSet<i32>,
+    has_db_owners: bool,
     kind: i32,
     file_path: PathBuf,
     owner_spans: HashMap<i32, Vec<ByteSpan>>,
@@ -43,8 +45,14 @@ pub struct LazyNodeStore {
 
 impl LazyNodeStore {
     pub fn with_db(db: Arc<AssetsDb>, kind: i32, file_path: impl Into<PathBuf>) -> Self {
+        let (db_owners, has_db_owners) = match db.query_node_tree_owners(kind) {
+            Ok(ids) => (ids.into_iter().collect(), true),
+            Err(_) => (HashSet::new(), false),
+        };
         Self {
             db: Some(db),
+            db_owners,
+            has_db_owners,
             kind,
             file_path: file_path.into(),
             owner_spans: HashMap::new(),
@@ -135,6 +143,8 @@ impl LazyNodeStore {
 
         Ok(Self {
             db: None,
+            db_owners: HashSet::new(),
+            has_db_owners: false,
             kind,
             file_path: path,
             owner_spans,
@@ -143,8 +153,13 @@ impl LazyNodeStore {
     }
 
     pub fn has_owner(&self, owner_id: i32) -> bool {
-        if let Some(db) = &self.db {
-            return db.has_node_tree_owner(self.kind, owner_id);
+        if self.db.is_some() {
+            if self.has_db_owners {
+                return self.db_owners.contains(&owner_id);
+            }
+            if let Some(db) = &self.db {
+                return db.has_node_tree_owner(self.kind, owner_id);
+            }
         }
         self.owner_spans.contains_key(&owner_id)
     }

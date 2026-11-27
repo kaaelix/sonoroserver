@@ -508,10 +508,19 @@ fn refresh_available_quests_pass<S: PushSink + ?Sized>(
     }
 
     let mut any_added = false;
+    let batch_mode = eligible_ids.len() > 1;
     for qid in eligible_ids {
-        if activate_quest(ctx, qid, push_updates)? {
+        if activate_quest_with_list_push(ctx, qid, push_updates, !batch_mode)? {
             any_added = true;
         }
+    }
+    if any_added && batch_mode && push_updates {
+        let show_list = build_pre_show_quest_list(ctx);
+        ctx.sink.push(
+            QuestShowListNotify::MSG_ID,
+            &QuestShowListNotify { QuestId: show_list },
+        );
+        push_ready_quest_list(ctx);
     }
     Ok(any_added)
 }
@@ -595,6 +604,15 @@ pub fn activate_quest<S: PushSink + ?Sized>(
     quest_id: i32,
     push_updates: bool,
 ) -> io::Result<bool> {
+    activate_quest_with_list_push(ctx, quest_id, push_updates, true)
+}
+
+fn activate_quest_with_list_push<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    quest_id: i32,
+    push_updates: bool,
+    push_global_lists: bool,
+) -> io::Result<bool> {
     let Some(_guard) = TransitionDepthGuard::try_enter() else {
         return Ok(false);
     };
@@ -616,12 +634,14 @@ pub fn activate_quest<S: PushSink + ?Sized>(
                 }],
             },
         );
-        let show_list = build_pre_show_quest_list(ctx);
-        ctx.sink.push(
-            QuestShowListNotify::MSG_ID,
-            &QuestShowListNotify { QuestId: show_list },
-        );
-        push_ready_quest_list(ctx);
+        if push_global_lists {
+            let show_list = build_pre_show_quest_list(ctx);
+            ctx.sink.push(
+                QuestShowListNotify::MSG_ID,
+                &QuestShowListNotify { QuestId: show_list },
+            );
+            push_ready_quest_list(ctx);
+        }
         ctx.sink.push(
             BehaviorTreeInfoNotify::MSG_ID,
             &BehaviorTreeInfoNotify {
@@ -1190,6 +1210,24 @@ pub fn on_timers_due<S: PushSink + ?Sized>(
         }
     }
 
+    let due_wait_actions = ctx
+        .scene
+        .as_deref_mut()
+        .map(|s| s.pop_due_wait_actions(now_ms))
+        .unwrap_or_default();
+    for entry in due_wait_actions {
+        let mut cbs = super::action_callbacks::<S>();
+        cbs.bt_type = entry.bt_type;
+        quest_actions::execute_action_list(
+            ctx,
+            &mut cbs,
+            entry.quest_id,
+            entry.node_id,
+            &entry.actions,
+        )?;
+        progressed = true;
+    }
+
     if progressed {
         finalize_progression(ctx)?;
     }
@@ -1201,6 +1239,23 @@ fn on_enter_child_quest_special<S: PushSink + ?Sized>(
     quest_id: i32,
     node: &NodeEntry,
 ) -> io::Result<()> {
+    if quest_id == PROLOGUE_QUEST_ID && matches!(node.id, 155 | 10 | 14 | 91 | 182 | 131) {
+        let mut sc = ctx.scene.as_deref_mut();
+        let mut rc = ctx.role_comp.as_deref_mut();
+        if let (Some(scene), Some(role_comp)) = (sc.as_deref_mut(), rc.as_deref_mut()) {
+            let _ = crate::helpers::trial_roles::sync_prologue_yangyang_live(
+                scene,
+                ctx.fs,
+                ctx.assets,
+                ctx.sink,
+                ctx.events,
+                role_comp,
+                ctx.weapon_comp,
+                ctx.echo_comp,
+                ctx.quest_comp,
+            );
+        }
+    }
     if !should_auto_complete_child_quest(ctx, quest_id, node) {
         spawn_node_target_entities(ctx, quest_id, node);
         if let Some(scene) = ctx.scene.as_deref_mut() {
@@ -2025,6 +2080,7 @@ pub fn rollback_quest_to_node<S: PushSink + ?Sized>(
         scene.release_occupations_for_tree(quest_id, i64::from(quest_id));
         scene.clear_save_nodes_for_owner(quest_id);
         scene.clear_action_node_progress_for_owner(quest_id);
+        scene.clear_deferred_actions_for_owner(quest_id);
         if !client_initiated && reason != FailReason::GiveUpFail {
             scene.last_server_rollback_quest_id = quest_id;
             scene.last_server_rollback_ms = now_millis();
@@ -2079,6 +2135,17 @@ pub fn rollback_quest_to_node<S: PushSink + ?Sized>(
     }
 
     if let Some(ref fn_entry) = fail_node_opt {
+        if fn_entry.node_type == "QuestFailed"
+            && let Some(Value::Array(acts)) = fn_entry.data.get("FinishActions")
+        {
+            push_bt_level_events(
+                ctx,
+                quest_id,
+                fn_entry.id,
+                GameCtxType::FailedNodeAction,
+                acts,
+            )?;
+        }
         run_node_finish_effects(ctx, quest_id, fn_entry)?;
     }
 
@@ -2194,6 +2261,7 @@ pub fn succeed_quest<S: PushSink + ?Sized>(
         && REFRESH_LOOP_DEPTH.with(|d| d.get()) == 0
     {
         quest_actions::push_func_open(ctx);
+        crate::handlers::misc::push_level_play_and_map_mark_sync(ctx);
     }
     Ok(())
 }

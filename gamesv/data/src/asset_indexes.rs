@@ -5,6 +5,7 @@ use crate::assets_db::AssetsDb;
 use crate::data_tables::{DataTables, TableRef};
 use crate::tables::blueprint_config::{BlueprintConfig, EntityLogic, EntityType};
 use crate::tables::entity_components::extra::{EntityGroupComponent, ExtraEntry, ExtraKind};
+use crate::tables::instance_dungeon::InstanceDungeon;
 use crate::tables::level_entity_config::LevelEntityConfig;
 use crate::tables::level_play_data::LevelPlayData;
 use crate::tables::teleporter::Teleporter;
@@ -96,6 +97,14 @@ pub struct Inputs<'a> {
     pub level_play_data: &'a [LevelPlayData],
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EntityQuickMeta {
+    pub entity_id: i64,
+    pub area_id: i32,
+    pub in_sleep: bool,
+    pub is_hidden: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct EntityGroupSpec {
     pub group_entity_id: i64,
@@ -106,12 +115,15 @@ pub struct EntityGroupSpec {
 pub struct AssetIndexes {
     pub entity_by_map_pair: HashMap<MapEntityKey, u32>,
     pub entity_by_id: SpanTable<i64>,
+    pub entity_meta_by_idx: Vec<EntityQuickMeta>,
     pub spawnables_by_map_cell: SpanTable<SpatialCellKey>,
     pub spawnables_by_map: SpanTable<i32>,
     pub teleporters_by_map: SpanTable<i32>,
+    pub teleporters_by_area: SpanTable<i32>,
     pub level_plays_by_entity: SpanTable<i32>,
     pub level_plays_by_ref_entity: SpanTable<i32>,
     pub level_plays_by_reward_entity: SpanTable<i32>,
+    pub non_spawnable_enter_lps: Vec<u32>,
     pub blueprint_by_type: HashMap<String, u32>,
     pub template_by_type: HashMap<String, u32>,
     pub entity_groups_by_member: HashMap<MapEntityKey, Vec<EntityGroupSpec>>,
@@ -120,13 +132,19 @@ pub struct AssetIndexes {
 
 impl AssetIndexes {
     pub fn from_tables(tables: &DataTables) -> Self {
-        Self::from_slices(Inputs {
+        let mut out = Self::from_slices(Inputs {
             level_entity_configs: tables.level_entity_config.as_slice(),
             blueprint_configs: tables.blueprint_config.as_slice(),
             template_configs: tables.template_config.as_slice(),
             teleporters: tables.teleporter.as_slice(),
             level_play_data: tables.level_play_data.as_slice(),
-        })
+        });
+        build_teleporter_area_index(
+            tables.teleporter.as_slice(),
+            tables.instance_dungeon.as_slice(),
+            &mut out,
+        );
+        out
     }
 
     pub fn from_db(db: &AssetsDb, tables: &DataTables) -> Result<Self, String> {
@@ -135,6 +153,11 @@ impl AssetIndexes {
         build_string_index_tpl(tables.template_config.as_slice(), &mut out.template_by_type);
         build_level_entity_indexes_from_db(db, &mut out).map_err(|e| e.to_string())?;
         build_teleporter_index(tables.teleporter.as_slice(), &mut out);
+        build_teleporter_area_index(
+            tables.teleporter.as_slice(),
+            tables.instance_dungeon.as_slice(),
+            &mut out,
+        );
         build_level_play_indexes(tables.level_play_data.as_slice(), &mut out);
         if let Ok(fids) = db.query_action_opened_function_ids() {
             out.action_opened_functions.extend(fids);
@@ -153,8 +176,14 @@ impl AssetIndexes {
             &mut out,
         );
         build_teleporter_index(inputs.teleporters, &mut out);
+        build_teleporter_area_index(inputs.teleporters, &[], &mut out);
         build_level_play_indexes(inputs.level_play_data, &mut out);
         out
+    }
+
+    pub fn quick_entity_meta(&self, idx: u32) -> Option<EntityQuickMeta> {
+        let meta = *self.entity_meta_by_idx.get(idx as usize)?;
+        (meta.entity_id > 0).then_some(meta)
     }
 
     pub fn find_level_entity<'a>(
@@ -182,6 +211,10 @@ impl AssetIndexes {
 
     pub fn teleporter_indices_for_map(&self, map_id: i32) -> &[u32] {
         self.teleporters_by_map.get(map_id)
+    }
+
+    pub fn teleporter_indices_for_area(&self, area_id: i32) -> &[u32] {
+        self.teleporters_by_area.get(area_id)
     }
 
     pub fn spawnable_indices_for_map_cell(
@@ -490,7 +523,20 @@ fn build_level_entity_indexes_from_db(
     let mut id_pairs = Vec::with_capacity(rows.len());
     let mut cell_pairs = Vec::new();
     let mut map_pairs = Vec::new();
+    let max_idx = rows.iter().map(|r| r.idx as usize).max().unwrap_or(0);
+    if !rows.is_empty() && max_idx <= 2_000_000 {
+        out.entity_meta_by_idx
+            .resize(max_idx + 1, EntityQuickMeta::default());
+    }
     for r in rows {
+        if let Some(slot) = out.entity_meta_by_idx.get_mut(r.idx as usize) {
+            *slot = EntityQuickMeta {
+                entity_id: r.entity_id,
+                area_id: r.area_id,
+                in_sleep: r.in_sleep,
+                is_hidden: r.is_hidden,
+            };
+        }
         out.entity_by_map_pair
             .entry(MapEntityKey {
                 map_id: r.map_id,
@@ -566,11 +612,19 @@ fn build_level_entity_indexes(
     out: &mut AssetIndexes,
 ) {
     out.entity_by_map_pair.reserve(items.len());
+    out.entity_meta_by_idx
+        .resize(items.len(), EntityQuickMeta::default());
     let mut id_pairs = Vec::with_capacity(items.len());
     let mut cell_pairs = Vec::new();
     let mut map_pairs = Vec::new();
     for (idx, cfg) in items.iter().enumerate() {
         let idx_u32 = idx as u32;
+        out.entity_meta_by_idx[idx] = EntityQuickMeta {
+            entity_id: cfg.EntityId,
+            area_id: cfg.AreaId,
+            in_sleep: cfg.InSleep,
+            is_hidden: cfg.IsHidden,
+        };
         out.entity_by_map_pair
             .entry(MapEntityKey {
                 map_id: cfg.MapId,
@@ -612,6 +666,46 @@ fn build_teleporter_index(items: &[Teleporter], out: &mut AssetIndexes) {
     out.teleporters_by_map = SpanTable::from_pairs(pairs);
 }
 
+fn build_teleporter_area_index(
+    items: &[Teleporter],
+    instance_dungeons: &[InstanceDungeon],
+    out: &mut AssetIndexes,
+) {
+    let inst_map: HashMap<i32, i32> = instance_dungeons
+        .iter()
+        .map(|d| (d.Id, d.MapConfigId))
+        .collect();
+    let mut area_pairs = Vec::with_capacity(items.len());
+    for (idx, tp) in items.iter().enumerate() {
+        let mut cfg_idx = out
+            .entity_by_map_pair
+            .get(&MapEntityKey {
+                map_id: tp.MapId,
+                entity_id: tp.TeleportEntityConfigId,
+            })
+            .copied();
+        if cfg_idx.is_none()
+            && let Some(&resolved) = inst_map.get(&tp.MapId)
+            && resolved != tp.MapId
+        {
+            cfg_idx = out
+                .entity_by_map_pair
+                .get(&MapEntityKey {
+                    map_id: resolved,
+                    entity_id: tp.TeleportEntityConfigId,
+                })
+                .copied();
+        }
+        if let Some(cidx) = cfg_idx
+            && let Some(meta) = out.quick_entity_meta(cidx)
+            && meta.area_id > 0
+        {
+            area_pairs.push((meta.area_id, idx as u32));
+        }
+    }
+    out.teleporters_by_area = SpanTable::from_pairs(area_pairs);
+}
+
 pub fn parse_ref_suffix_id(r: &str) -> Option<i32> {
     let idx = r.rfind('_')?;
     let digits = &r[idx + 1..];
@@ -649,6 +743,7 @@ fn build_level_play_indexes(items: &[LevelPlayData], out: &mut AssetIndexes) {
     let mut entity_pairs = Vec::new();
     let mut ref_pairs = Vec::new();
     let mut reward_pairs = Vec::new();
+    let mut non_spawnable_enter = Vec::new();
     let mut refs = Vec::new();
     for (idx, lp) in items.iter().enumerate() {
         let idx_u32 = idx as u32;
@@ -664,10 +759,19 @@ fn build_level_play_indexes(items: &[LevelPlayData], out: &mut AssetIndexes) {
         {
             reward_pairs.push((rc.RewardEntityId, idx_u32));
         }
+        if lp.Data.EnterRadius > 0
+            && lp.Data.LevelPlayEntityId > 0
+            && lp.Data.Type != "Quest"
+            && lp.Data.Type != "Dungeon"
+            && lp.Data.Type != "LordGym"
+        {
+            non_spawnable_enter.push(idx_u32);
+        }
     }
     out.level_plays_by_entity = SpanTable::from_pairs(entity_pairs);
     out.level_plays_by_ref_entity = SpanTable::from_pairs(ref_pairs);
     out.level_plays_by_reward_entity = SpanTable::from_pairs(reward_pairs);
+    out.non_spawnable_enter_lps = non_spawnable_enter;
 }
 
 #[cfg(test)]

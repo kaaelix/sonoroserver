@@ -835,7 +835,9 @@ pub fn damage_entity(
         return base_notify;
     }
 
-    if damage.CalculateType == 0 && damage.ImmuneType != 0 {
+    let lock_floor = buff_helper::lock_hp_floor(&scene.entities[target_idx], assets);
+
+    if damage.CalculateType == 0 && damage.ImmuneType == 0 {
         let invincible_tag_id =
             gameplay_tags::id_from_name(&assets.tables.gameplay_tag_remap, "功能.逻辑状态标识.无敌")
                 .unwrap_or(1_918_148_596);
@@ -928,8 +930,9 @@ pub fn damage_entity(
         }
     } else if damage.CalculateType == 2 {
         let drain = ((base_val * fluct).ceil() as i32).max(0);
-        if drain > 0 && before_hp > 1 {
-            let actual_drain = drain.min(before_hp - 1);
+        let min_hp = lock_floor.unwrap_or(1).max(1);
+        if drain > 0 && before_hp > min_hp {
+            let actual_drain = drain.min(before_hp - min_hp);
             if actual_drain > 0 {
                 let target_attr = scene.entities[target_idx].attribute.as_mut().unwrap();
                 let target_change = attributes::change_attr(
@@ -994,14 +997,19 @@ pub fn damage_entity(
             }
 
             if hp_damage > 0 {
-                let (after_hp, changed) = {
+                let actual_hp_damage = if let Some(floor) = lock_floor {
+                    hp_damage.min((before_hp - floor).max(0))
+                } else {
+                    hp_damage
+                };
+                let (after_hp, changed) = if actual_hp_damage > 0 {
                     let target_attr = scene.entities[target_idx].attribute.as_mut().unwrap();
                     let target_change = attributes::change_attr(
                         target_attr,
                         EAttributeType::Life,
                         AttributeChangeType::Delta,
                         AttributeValueType::Current,
-                        -hp_damage,
+                        -actual_hp_damage,
                     );
                     let after_hp = attributes::get_attr_value(target_attr, EAttributeType::Life);
                     change_life = after_hp - before_hp;
@@ -1014,6 +1022,8 @@ pub fn damage_entity(
                         );
                     }
                     (after_hp, !target_change.is_empty())
+                } else {
+                    (before_hp, false)
                 };
                 if changed && after_hp > 0 {
                     scene.mark_fsm_dirty(request.TargetEntityId, wake_reason::ATTRIBUTE);

@@ -12,7 +12,8 @@ use sonoro_gamesv_fs::quest_info::{QuestInfo, append_unique_int, remove_int_valu
 use sonoro_proto::enums::{BtType, ErrorCode, QuestFocusReason, QuestLockType, QuestState};
 use sonoro_proto::pb::{
     BehaviorTreeCtxPb, ConditionGroupFinishInfo, DailyQuestReward, DestroyQuestsNotify,
-    FlowEndNotify, FlowStartNotify, FocusQuestSetNotify, GameCtxPb, GameCtxPbCtxInfoOneof,
+    FlowEndNotify, FlowServerSkipNotify, FlowStartNotify, FocusQuestSetNotify, GameCtxPb,
+    GameCtxPbCtxInfoOneof,
     OneQuestBranchPageInfo, QuestBranchInfo, QuestBranchUpdateNotify, QuestListNotify,
     QuestLockInfo, QuestLockInfoNotify, RemoveGuestNotify, TraceQuestNotify,
     WaitQuestConfirmResourceNotify,
@@ -535,15 +536,20 @@ pub fn interrupt_active_flow_for_quest<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     quest_id: i32,
 ) -> Option<i64> {
-    let ended_inc = {
+    let (ended_inc, flow_name, flow_id, state_id, clear_black_screen) = {
         let scene = ctx.scene.as_deref_mut()?;
         if scene.active_flow_inc_id == 0 || scene.active_flow_quest_id != quest_id {
             return None;
         }
         let ended_inc = scene.active_flow_inc_id;
+        let flow_name = scene.active_flow_list_name.clone();
+        let flow_id = scene.active_flow_id;
+        let state_id = scene.active_flow_state_id;
+        let clear_black_screen = scene.client_black_screen_open || !flow_name.is_empty();
         scene.clear_active_flow();
+        scene.client_black_screen_open = false;
         scene.prologue_flow_started = false;
-        ended_inc
+        (ended_inc, flow_name, flow_id, state_id, clear_black_screen)
     };
     triggers::restore_plot_main_role(ctx);
     ctx.sink.push(
@@ -554,6 +560,17 @@ pub fn interrupt_active_flow_for_quest<S: PushSink + ?Sized>(
             IsFinished: false,
         },
     );
+    if clear_black_screen {
+        ctx.sink.push(
+            FlowServerSkipNotify::MSG_ID,
+            &FlowServerSkipNotify {
+                FlowListName: flow_name.into_bytes(),
+                FlowId: flow_id,
+                StateId: state_id,
+                FadeOutScreen: true,
+            },
+        );
+    }
     Some(ended_inc)
 }
 
@@ -612,7 +629,30 @@ pub fn spawn_node_target_entities<S: PushSink + ?Sized>(
     quest_id: i32,
     node: &NodeEntry,
 ) {
-    let ids = extract_node_target_entity_ids(node);
+    let mut ids = extract_node_target_entity_ids(node);
+    if let Some(cond) = triggers::get_child_condition(&node.data) {
+        let map_id = ctx.scene.as_deref().map_or(8, |s| s.instance_id);
+        let ctype = json_str(cond.get("Type")).unwrap_or("");
+        if ctype == "Kill" || ctype == "MonsterCreator" {
+            let aq_snap = ctx.quest_comp.info.find_active_quest(quest_id).cloned();
+            if let Some(Value::Array(creators)) = cond.get("MonsterCreatorEntityIds") {
+                for v in creators {
+                    let Some(mc_id) = json_int(Some(v)) else {
+                        continue;
+                    };
+                    if mc_id <= 0 {
+                        continue;
+                    }
+                    let ready = ready_wave_targets_for_creator(ctx.assets, map_id, mc_id, |tid| {
+                        aq_snap.as_ref().is_some_and(|aq| aq.has_killed_entity(tid))
+                    });
+                    for tid in ready {
+                        push_unique_target(&mut ids, tid);
+                    }
+                }
+            }
+        }
+    }
     for cfg_id in ids {
         if let Some(aq) = ctx.quest_comp.info.find_active_quest(quest_id)
             && aq.has_killed_entity(cfg_id)
@@ -624,6 +664,82 @@ pub fn spawn_node_target_entities<S: PushSink + ?Sized>(
         }
         quest_actions::ensure_quest_entity_spawned(ctx, cfg_id);
     }
+}
+
+pub fn resolve_kill_targets_for_condition(
+    assets: &sonoro_gamesv_data::Assets,
+    map_id: i32,
+    cond: &serde_json::Map<String, Value>,
+) -> Vec<i32> {
+    let mut out = Vec::new();
+    if let Some(eid) = json_int(cond.get("EntityId")) {
+        push_unique_target(&mut out, eid);
+    }
+    for field in ["TargetsToAwake", "ExistTargets"] {
+        if let Some(Value::Array(arr)) = cond.get(field) {
+            for v in arr {
+                if let Some(eid) = json_int(Some(v)) {
+                    push_unique_target(&mut out, eid);
+                }
+            }
+        }
+    }
+    if let Some(Value::Array(arr)) = cond.get("MonsterCreatorEntityIds") {
+        for v in arr {
+            let Some(mc_id) = json_int(Some(v)) else {
+                continue;
+            };
+            if mc_id <= 0 {
+                continue;
+            }
+            let wave_targets = assets.spawn_monster_targets(map_id, i64::from(mc_id));
+            if !wave_targets.is_empty() {
+                for tid in wave_targets {
+                    push_unique_target(&mut out, tid);
+                }
+            } else if !assets.has_spawn_monster_component(map_id, i64::from(mc_id)) {
+                push_unique_target(&mut out, mc_id);
+            }
+        }
+    }
+    out
+}
+
+pub fn ready_wave_targets_for_creator<F>(
+    assets: &sonoro_gamesv_data::Assets,
+    map_id: i32,
+    creator_id: i32,
+    is_killed: F,
+) -> Vec<i32>
+where
+    F: Fn(i32) -> bool,
+{
+    let waves = assets.spawn_monster_configs(map_id, i64::from(creator_id));
+    if waves.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for wave in &waves {
+        let prereqs_met = wave
+            .PreCondition
+            .as_ref()
+            .is_none_or(|pre| {
+                pre.Ids.iter().all(|&pid| {
+                    waves
+                        .iter()
+                        .filter(|w| w.Id == pid)
+                        .all(|pw| pw.TargetsToAwake.iter().all(|&tid| tid <= 0 || is_killed(tid)))
+                })
+            });
+        if prereqs_met {
+            for &tid in &wave.TargetsToAwake {
+                if tid > 0 && !is_killed(tid) && !out.contains(&tid) {
+                    out.push(tid);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn push_unique_target(out: &mut Vec<i32>, eid: i32) {
@@ -874,6 +990,7 @@ pub fn destroy_quest<S: PushSink + ?Sized>(
         scene.release_occupations_for_tree(quest_id, i64::from(quest_id));
         scene.clear_save_nodes_for_owner(quest_id);
         scene.clear_action_node_progress_for_owner(quest_id);
+        scene.clear_deferred_actions_for_owner(quest_id);
         interrupt_active_flow_for_quest(ctx, quest_id);
     }
     if !ctx.quest_comp.info.has_active_quest(quest_id) {

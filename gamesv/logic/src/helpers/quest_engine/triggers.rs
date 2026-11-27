@@ -25,8 +25,10 @@ use sonoro_proto::pb::{
     ChildQuestNodeEnterActionCtxPb, ChildQuestNodeFinishActionCtxPb, ChildQuestNodeInfo,
     ChildQuestNodeProgress, ChildQuestNodeProgressProgressOneof, CompleteInstProgress,
     DailyQuestStateNotify, DailyQuestUnlockAreaNotify, EntityAddDynamicInteractNotify,
-    EntityAddNotify, EntityRemoveDynamicInteractNotify, EntityRemoveInfo, EntityRemoveNotify,
-    EntityStateProgress, FightRoleInfo, FightRoleInfos, FlowStartNotify, FocusQuestSetNotify,
+    EntityAddNotify, EntityConditionListeningActionCtxPb, EntityCtxPb,
+    EntityLeaveTriggerCtxPb, EntityRemoveDynamicInteractNotify, EntityRemoveInfo,
+    EntityRemoveNotify, EntityStateProgress, EntityTriggerCtxPb, FailedNodeActionCtxPb,
+    FightRoleInfo, FightRoleInfos, FlowStartNotify, FocusQuestSetNotify,
     GameCtxPb, GameCtxPbCtxInfoOneof, GetItemCount, GetItemProgress, GroupFormation,
     InteractProgress, KillProgress, LevelEventNotify, NodeInfo, NodeInfoExtraInfoOneof,
     QuestBranchUpdateNotify, QuestFinishListNotify, QuestInfo as PbQuestInfo,
@@ -152,6 +154,18 @@ pub fn handle_entity_range_trigger<S: PushSink + ?Sized>(
                     can_fire = false;
                 }
             }
+            if can_fire {
+                if let Value::Array(items) = &trig.Actions
+                    && !items.is_empty()
+                    && (!trig.Condition.is_object() || {
+                        let mut eval_ctx = ctx.make_eval_context();
+                        eval_ctx.self_entity_config_id = cfg_id;
+                        condition::eval_inline_condition_block(&eval_ctx, &trig.Condition)
+                    })
+                {
+                    push_trigger_level_events(ctx, entity_id, cfg_id, true, items);
+                }
+            }
             if can_fire
                 && execute_trigger_actions(
                     ctx,
@@ -182,6 +196,16 @@ pub fn handle_entity_range_trigger<S: PushSink + ?Sized>(
         if was_in_range && let Value::Object(exit_obj) = &trig.ExitConfig {
             let exit_cond = exit_obj.get("Condition").unwrap_or(&Value::Null);
             let exit_acts = exit_obj.get("Actions").unwrap_or(&Value::Null);
+            if let Value::Array(items) = exit_acts
+                && !items.is_empty()
+                && (!exit_cond.is_object() || {
+                    let mut eval_ctx = ctx.make_eval_context();
+                    eval_ctx.self_entity_config_id = cfg_id;
+                    condition::eval_inline_condition_block(&eval_ctx, exit_cond)
+                })
+            {
+                push_trigger_level_events(ctx, entity_id, cfg_id, false, items);
+            }
             let _ = execute_trigger_actions(ctx, entity_id, cfg_id, exit_cond, exit_acts)?;
         }
     }
@@ -294,6 +318,43 @@ pub fn handle_client_trigger_actions<S: PushSink + ?Sized>(
     execute_entity_actions(ctx, entity_id, cfg_id, items)
 }
 
+fn push_trigger_level_events<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    entity_id: i64,
+    cfg_id: i32,
+    is_enter: bool,
+    actions: &[Value],
+) {
+    let Some(entity_ctx) = scene_entity_ctx(ctx, entity_id, cfg_id) else {
+        return;
+    };
+    let role_id = ctx.scene.as_deref().map_or(0, Scene::current_role_entity_id);
+    let (ctx_type, ctx_info) = if is_enter {
+        (
+            GameCtxType::EntityTrigger,
+            GameCtxPbCtxInfoOneof::EntityTrigger(EntityTriggerCtxPb {
+                EntityCtx: Some(entity_ctx),
+                TriggerEntityIncId: role_id,
+            }),
+        )
+    } else {
+        (
+            GameCtxType::EntityLeaveTrigger,
+            GameCtxPbCtxInfoOneof::EntityLeaveTriggerCtx(EntityLeaveTriggerCtxPb {
+                EntityCtx: Some(entity_ctx),
+                TriggerEntityIncId: role_id,
+            }),
+        )
+    };
+    push_entity_level_events(ctx, ctx_type, ctx_info, actions);
+}
+
+/// True while `check_auto_interact_triggers` runs an Auto option for the player. The client
+/// interacts with Auto options itself and sends its own EntityInteractRequest.
+pub fn is_server_auto_interact() -> bool {
+    CHECKING_AUTO_INTERACTS.with(Cell::get)
+}
+
 pub fn reevaluate_condition_listeners<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
 ) -> io::Result<()> {
@@ -360,6 +421,20 @@ pub fn reevaluate_condition_listeners<S: PushSink + ?Sized>(
                 if already_fired {
                     continue;
                 }
+                push_entity_level_events(
+                    ctx,
+                    GameCtxType::EntityConditionListeningAction,
+                    GameCtxPbCtxInfoOneof::EntityConditionListeningAction(
+                        EntityConditionListeningActionCtxPb {
+                            EntityCtx: Some(EntityCtxPb {
+                                ConfigId: cfg_id,
+                                IncId: net_id,
+                            }),
+                            EntityConditionListeningIndex: idx as i32,
+                        },
+                    ),
+                    acts,
+                );
                 execute_entity_actions(ctx, net_id, cfg_id, acts)?;
             } else if let Some(sc) = ctx.scene.as_deref_mut() {
                 sc.fired_condition_listeners.remove(&dedupe_key);
@@ -1014,11 +1089,17 @@ pub fn build_child_node_progress<S: PushSink + ?Sized>(
     let ctype = json_str(cond.get("Type"))?;
 
     if ctype == "Kill" || ctype == "MonsterCreator" {
-        let target_ids = extract_node_target_entity_ids(node);
-        let killed_count = target_ids
+        let map_id = ctx.scene.as_deref().map_or(8, |s| s.instance_id);
+        let mut target_ids = super::resolve_kill_targets_for_condition(ctx.assets, map_id, cond);
+        if target_ids.is_empty() {
+            target_ids = extract_node_target_entity_ids(node);
+        }
+        let killed_ids: Vec<i32> = target_ids
             .iter()
-            .filter(|&&tid| aq.has_killed_entity(tid))
-            .count() as i32;
+            .copied()
+            .filter(|&tid| aq.has_killed_entity(tid))
+            .collect();
+        let killed_count = killed_ids.len() as i32;
         let total_count = if target_ids.is_empty() {
             1
         } else {
@@ -1026,7 +1107,7 @@ pub fn build_child_node_progress<S: PushSink + ?Sized>(
         };
         return Some(ChildQuestNodeProgress {
             Progress: Some(ChildQuestNodeProgressProgressOneof::Kill(KillProgress {
-                MonId: target_ids,
+                MonId: killed_ids,
                 PrefabNum: total_count,
                 CurrNum: killed_count,
                 TotalNum: total_count,
@@ -1568,6 +1649,7 @@ const CLIENT_EXECUTABLE_BT_ACTIONS: &[&str] = &[
     "CameraLookAt",
     "ChangeEntityState",
     "ChangeNpcPerformState",
+    "ChangePhantomFormation",
     "CharacterLookAt",
     "CharacterMoveToPoint",
     "ClientChangeTeamPosition",
@@ -1636,6 +1718,7 @@ const CLIENT_EXECUTABLE_BT_ACTIONS: &[&str] = &[
     "RemoveNpcGroupPerform",
     "ResetPlayerCameraFocus",
     "RestoreAiBehaviorTree",
+    "RestorePhantomFormation",
     "RestorePlayerCameraAdjustment",
     "RunActions",
     "SetBattleState",
@@ -1785,22 +1868,97 @@ pub fn push_bt_level_events_for_type<S: PushSink + ?Sized>(
                 BehaviorTreeCtx: Some(bt_ctx),
             })
         }
+        GameCtxType::FailedNodeAction => {
+            GameCtxPbCtxInfoOneof::FailedNodeAction(FailedNodeActionCtxPb {
+                BehaviorTreeCtx: Some(bt_ctx),
+            })
+        }
         _ => return Ok(()),
     };
     let game_ctx = GameCtxPb {
         CtxType: Some(ctx_type),
         CtxInfo: Some(ctx_info),
     };
+    push_level_event_ranges_with(ctx, owner_id, &game_ctx, actions, is_client_executable_bt_action);
+    Ok(())
+}
+
+/// Entity-owned lists leave `PlayFlow` to the server: interaction and trigger lists already
+/// start their flows with FlowStartNotify, and no StateChangeBehaviors entry plays a client flow.
+fn is_client_executable_entity_action<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    act: &Value,
+) -> bool {
+    json_str(act.get("Name")) != Some("PlayFlow") && is_client_executable_bt_action(ctx, act)
+}
+
+/// `EntityCtx` of the scene entity `entity_id`, or of the one spawned from `cfg_id` when
+/// `entity_id` is not a net id.
+pub fn scene_entity_ctx<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    entity_id: i64,
+    cfg_id: i32,
+) -> Option<EntityCtxPb> {
+    let scene = ctx.scene.as_deref()?;
+    let net_id = if scene.entity(entity_id).is_some() {
+        entity_id
+    } else if cfg_id > 0 {
+        scene.find_entity_net_id_by_config_id(cfg_id)?
+    } else {
+        return None;
+    };
+    Some(EntityCtxPb {
+        ConfigId: cfg_id,
+        IncId: net_id,
+    })
+}
+
+/// Client side of an entity-owned action list.
+pub fn push_entity_level_events<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    ctx_type: GameCtxType,
+    ctx_info: GameCtxPbCtxInfoOneof,
+    actions: &[Value],
+) {
+    if !actions
+        .iter()
+        .any(|act| is_client_executable_entity_action(ctx, act))
+    {
+        return;
+    }
+    let Some(inc_id) = ctx.scene.as_deref_mut().map(Scene::alloc_action_inc_id) else {
+        return;
+    };
+    let game_ctx = GameCtxPb {
+        CtxType: Some(ctx_type),
+        CtxInfo: Some(ctx_info),
+    };
+    push_level_event_ranges_with(
+        ctx,
+        inc_id,
+        &game_ctx,
+        actions,
+        is_client_executable_entity_action,
+    );
+}
+
+fn push_level_event_ranges_with<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    inc_id: i32,
+    game_ctx: &GameCtxPb,
+    actions: &[Value],
+    is_forwarded: fn(&QuestContext<'_, S>, &Value) -> bool,
+) {
     let total_count = actions.len() as i32;
     let player_id = ctx.basic_comp.player_id;
     let mut i = 0usize;
     while i < actions.len() {
-        if !is_client_executable_bt_action(ctx, &actions[i]) {
+        if !is_forwarded(ctx, &actions[i]) {
             i += 1;
             continue;
         }
         let start_idx = i;
-        while i < actions.len() && is_client_executable_bt_action(ctx, &actions[i]) {
+        while i < actions.len() && is_forwarded(ctx, &actions[i]) {
             i += 1;
         }
         let end_idx = i - 1;
@@ -1808,7 +1966,7 @@ pub fn push_bt_level_events_for_type<S: PushSink + ?Sized>(
             LevelEventNotify::MSG_ID,
             &LevelEventNotify {
                 PlayerId: player_id,
-                IncId: owner_id,
+                IncId: inc_id,
                 GameCtx: Some(game_ctx.clone()),
                 TotalCount: total_count,
                 StartIndex: start_idx as i32,
@@ -1817,7 +1975,6 @@ pub fn push_bt_level_events_for_type<S: PushSink + ?Sized>(
             },
         );
     }
-    Ok(())
 }
 
 pub fn push_bt_level_events<S: PushSink + ?Sized>(
@@ -2999,20 +3156,29 @@ pub fn matches_reach_area<S: PushSink + ?Sized>(
     {
         return check_reach_entity_range(ctx, reid, check_pos, range);
     }
-    if let Some(Value::Object(pv)) = cond.get("Pos")
-        && check_point(pv, check_pos, range)
+    let mut has_explicit_target = false;
+    if let Some(Value::Object(pv)) = cond.get("Pos") {
+        has_explicit_target = true;
+        if check_point(pv, check_pos, range) {
+            return true;
+        }
+    }
+    if let Some(Value::Object(cv)) = cond.get("Center") {
+        has_explicit_target = true;
+        if check_point(cv, check_pos, range) {
+            return true;
+        }
+    }
+    if let Some(Value::Array(items)) = cond.get("Locations")
+        && !items.is_empty()
     {
-        return true;
+        has_explicit_target = true;
+        if check_point_array(Some(&Value::Array(items.clone())), check_pos, range) {
+            return true;
+        }
     }
-    if let Some(Value::Object(cv)) = cond.get("Center")
-        && check_point(cv, check_pos, range)
-    {
-        return true;
-    }
-    if check_point_array(cond.get("Locations"), check_pos, range) {
-        return true;
-    }
-    if let Some(Value::Object(tt)) = node_data.get("TrackTarget")
+    if !has_explicit_target
+        && let Some(Value::Object(tt)) = node_data.get("TrackTarget")
         && let Some(Value::Object(track_type)) = tt.get("TrackType")
         && check_point_array(track_type.get("Locations"), check_pos, range)
     {
@@ -3119,6 +3285,37 @@ pub fn matches_hand_in_entity(cond: &Map<String, Value>, entity_id: i64, cfg_id:
         return false;
     };
     eid == cfg_id || i64::from(eid) == entity_id
+}
+
+pub fn is_kill_satisfied_in_ctx<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    aq: &ActiveQuest,
+    cond: &Map<String, Value>,
+    ctype: &str,
+) -> bool {
+    let map_id = ctx.scene.as_deref().map_or(8, |s| s.instance_id);
+    let targets = super::resolve_kill_targets_for_condition(ctx.assets, map_id, cond);
+    if !targets.is_empty() {
+        let all_killed = targets.iter().all(|&eid| aq.has_killed_entity(eid));
+        if !all_killed {
+            return false;
+        }
+        if let Some(scene) = ctx.scene.as_deref() {
+            let any_alive = scene.entities.iter().any(|s| {
+                !s.dead_notified
+                    && !scene.rewarded_kills.contains(&s.net_id)
+                    && targets.contains(&s.config.config_id)
+                    && s.attribute.as_ref().is_none_or(|a| {
+                        crate::helpers::attributes::get_attr_value(a, EAttributeType::Life) > 0
+                    })
+            });
+            if any_alive {
+                return false;
+            }
+        }
+        return true;
+    }
+    is_kill_satisfied(aq, cond, ctype)
 }
 
 pub fn is_kill_satisfied(aq: &ActiveQuest, cond: &Map<String, Value>, ctype: &str) -> bool {
@@ -3532,7 +3729,7 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
             .quest_comp
             .info
             .find_active_quest(quest_id)
-            .is_some_and(|aq| is_kill_satisfied(aq, cond, ctype)),
+            .is_some_and(|aq| is_kill_satisfied_in_ctx(ctx, aq, cond, ctype)),
         "Guide" => {
             if GameConfig::embedded().autocomplete_guides {
                 return true;
@@ -3695,6 +3892,13 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
                     || ctx.scene.as_deref().is_some_and(|s| {
                         s.explore_tools_info.active_explore_skill == sid
                             || s.explore_tools_info.unlocked_explore_skills.contains(&sid)
+                    })
+                    || ctx.echo_comp.echo_map.values().any(|echo| {
+                        ctx.assets
+                            .tables
+                            .phantom_item
+                            .get_data_by_id(&echo.id)
+                            .is_some_and(|pi| pi.SkillId == sid)
                     })
             }),
         "FinishBvbChallenge" => json_int(cond.get("BvbChallengeId"))

@@ -7,11 +7,12 @@ use sonoro_gamesv_fs::formation_info::FormationRole;
 use sonoro_gamesv_fs::role_info::{Reson, RoleInfo, SkillNode};
 use sonoro_gamesv_fs::special_item_incr::TRIAL_INCR_MIN;
 use sonoro_gamesv_fs::weapon_item::WeaponItem;
-use sonoro_proto::enums::EAttributeType;
+use sonoro_proto::enums::{EAttributeType, ESceneRolesGroup, LivingStatus};
 use sonoro_proto::pb::{
     EntityAddNotify, EntityRemoveInfo, EntityRemoveNotify, FightRoleInfo, FightRoleInfos,
-    GroupFormation, PbGetRoleListNotify, UpdateGroupFormationNotify,
+    GroupFormation, PbGetRoleListNotify, SwitchSceneGroupNotify, UpdateGroupFormationNotify,
 };
+use sonoro_proto::wire::PbEnum;
 
 use crate::component::entity::small::{ConfigType, EntityType};
 use crate::component::player::{
@@ -19,7 +20,7 @@ use crate::component::player::{
     PlayerWeaponComponent,
 };
 use crate::event_queue::EventQueue;
-use crate::events::Event;
+use crate::events::{BuffAdditionEntry, Event};
 use crate::helpers::{entity_proto, role as role_helper, role_stats};
 use crate::scene::{Scene, now_millis};
 use crate::sink::PushSink;
@@ -334,6 +335,150 @@ pub fn sanitize_formation_for_login(
         });
         cur_form.cur_role = fallback_id;
     }
+}
+
+pub const PROLOGUE_YANGYANG_ROLE_ID: i32 = 1402;
+
+pub fn should_prologue_have_yangyang(quest_comp: &PlayerQuestComponent) -> bool {
+    quest_comp
+        .info
+        .find_active_quest(crate::helpers::quest_engine::PROLOGUE_QUEST_ID)
+        .is_some_and(|aq| {
+            aq.is_node_finished(9)
+                || aq.is_node_active(155)
+                || aq.is_node_active(10)
+                || aq.is_node_active(14)
+                || aq.is_node_active(91)
+                || aq.is_node_active(182)
+                || aq.is_node_active(131)
+        })
+}
+
+fn ensure_prologue_yangyang_role_and_weapon(
+    fs: &FileSystem,
+    assets: &Assets,
+    role_comp: &mut PlayerRoleComponent,
+    weapon_comp: &mut PlayerWeaponComponent,
+    events: Option<&mut EventQueue>,
+) -> Result<(), &'static str> {
+    if !role_comp.role_map.contains_key(&PROLOGUE_YANGYANG_ROLE_ID) {
+        let new_role = sonoro_gamesv_fs::role_info::RoleInfo::create_default(
+            assets,
+            PROLOGUE_YANGYANG_ROLE_ID,
+        )
+        .map_err(|_| "RoleNotFound")?;
+        role_comp
+            .role_map
+            .insert(PROLOGUE_YANGYANG_ROLE_ID, new_role);
+        if let Some(ev) = events {
+            ev.enqueue(crate::events::Event::RoleInfoModified {
+                player_id: role_comp.player_id,
+                role_id: PROLOGUE_YANGYANG_ROLE_ID,
+            });
+        }
+    }
+    crate::helpers::role::ensure_role_weapon(
+        fs,
+        assets,
+        role_comp,
+        weapon_comp,
+        PROLOGUE_YANGYANG_ROLE_ID,
+    )
+    .map_err(|_| "WeaponNotFound")?;
+    Ok(())
+}
+
+/// Inserts Yangyang (1402) into slot 2 on login-restore when Prologue `139000025` has already
+/// passed Wave 3 (`Node 9` -> Chasm Guardian / Crownless), before `notify_join_scene` spawns entities.
+pub fn ensure_prologue_yangyang_in_formation_login(
+    fs: &FileSystem,
+    assets: &Assets,
+    formation_info: &mut sonoro_gamesv_fs::formation_info::FormationInfo,
+    role_comp: &mut PlayerRoleComponent,
+    weapon_comp: &mut PlayerWeaponComponent,
+    quest_comp: &PlayerQuestComponent,
+) {
+    if !should_prologue_have_yangyang(quest_comp) {
+        return;
+    }
+    if ensure_prologue_yangyang_role_and_weapon(fs, assets, role_comp, weapon_comp, None).is_err() {
+        return;
+    }
+    let cur_idx = usize::try_from(formation_info.cur_formation)
+        .ok()
+        .filter(|&i| i < formation_info.formations.len())
+        .unwrap_or(0);
+    let cur_form = &mut formation_info.formations[cur_idx];
+    if cur_form
+        .roles
+        .iter()
+        .flatten()
+        .any(|r| r.role_id == PROLOGUE_YANGYANG_ROLE_ID)
+    {
+        return;
+    }
+    if let Some(empty_slot) = cur_form.roles.iter_mut().find(|slot| slot.is_none()) {
+        *empty_slot = Some(FormationRole {
+            role_id: PROLOGUE_YANGYANG_ROLE_ID,
+            entity_id: -1,
+            on_stage_without_control: false,
+        });
+    }
+}
+
+/// Live-adds Yangyang (1402) into the active formation and spawns her entity when `139000025`
+/// transitions from Wave 3 (`Node 9`) to Chasm Guardian (`Node 155`/`10`).
+#[allow(clippy::too_many_arguments)]
+pub fn sync_prologue_yangyang_live<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    fs: &FileSystem,
+    assets: &Assets,
+    sink: &mut S,
+    events: &mut EventQueue,
+    role_comp: &mut PlayerRoleComponent,
+    weapon_comp: &mut PlayerWeaponComponent,
+    echo_comp: &PlayerEchoComponent,
+    quest_comp: &PlayerQuestComponent,
+) -> Result<(), &'static str> {
+    if !should_prologue_have_yangyang(quest_comp) {
+        return Ok(());
+    }
+    ensure_prologue_yangyang_role_and_weapon(fs, assets, role_comp, weapon_comp, Some(events))?;
+    let cur_idx = usize::try_from(scene.formation_info.cur_formation)
+        .ok()
+        .filter(|&i| i < scene.formation_info.formations.len())
+        .unwrap_or(0);
+    let cur_form = &scene.formation_info.formations[cur_idx];
+    if cur_form
+        .roles
+        .iter()
+        .flatten()
+        .any(|r| r.role_id == PROLOGUE_YANGYANG_ROLE_ID)
+    {
+        return Ok(());
+    }
+    let mut target_ids: Vec<i32> = cur_form.roles.iter().flatten().map(|r| r.role_id).collect();
+    if target_ids.len() >= 3 {
+        return Ok(());
+    }
+    target_ids.push(PROLOGUE_YANGYANG_ROLE_ID);
+    let cur_role = if cur_form.cur_role > 0 {
+        cur_form.cur_role
+    } else {
+        target_ids[0]
+    };
+    sync_formation_entities(
+        scene,
+        fs,
+        assets,
+        sink,
+        events,
+        role_comp,
+        weapon_comp,
+        echo_comp,
+        &target_ids,
+        cur_role,
+    )
 }
 
 pub fn push_trial_role_list<S: PushSink + ?Sized>(
@@ -803,4 +948,249 @@ pub fn sync_formation_entities<S: PushSink + ?Sized>(
         role_ids: target_role_ids.to_vec(),
     });
     Ok(())
+}
+
+/// Roles of a `PhantomFormation` row. Each is a TrialRoleInfo id whose parent RoleInfo has
+/// RoleType 2 (Id 1 = [5001001], parent 5001).
+pub fn phantom_formation_roles(assets: &Assets, formation_id: i32) -> Vec<i32> {
+    assets
+        .read_raw_json_array("PhantomFormation")
+        .iter()
+        .find(|row| row.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(formation_id)))
+        .and_then(|row| row.get("Roles"))
+        .and_then(|v| v.as_array())
+        .map(|roles| {
+            roles
+                .iter()
+                .filter_map(|v| v.as_i64().and_then(|id| i32::try_from(id).ok()))
+                .filter(|&id| id > 0)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn concomitant_ids(scene: &Scene, entity_id: i64) -> Vec<i64> {
+    scene
+        .entity(entity_id)
+        .and_then(|s| s.concomitant.as_ref())
+        .map(|c| {
+            c.vision_entity_id
+                .iter()
+                .chain(&c.custom_entity_ids)
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn remove_role_entities(
+    scene: &mut Scene,
+    fs: &FileSystem,
+    entity_ids: &[i64],
+) -> Vec<EntityRemoveInfo> {
+    let mut remove_infos = Vec::new();
+    for &eid in entity_ids {
+        for id in concomitant_ids(scene, eid).into_iter().chain([eid]) {
+            if scene.net_id_map.contains_key(&id) {
+                let _ = scene.remove(fs, id);
+                remove_infos.push(EntityRemoveInfo {
+                    EntityId: id,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    remove_infos
+}
+
+/// ChangePhantomFormation (server action). The client action only waits until its scene team
+/// is the Phantom group (LevelEventChangePhantomFormation: SceneTeamModel.IsPhantomTeam, set in
+/// SceneTeamModel.SwitchGroupInternal from UpdateSceneGroupDataNotify / SwitchSceneGroupNotify).
+#[allow(clippy::too_many_arguments)]
+pub fn change_phantom_formation<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    fs: &FileSystem,
+    assets: &Assets,
+    sink: &mut S,
+    events: &mut EventQueue,
+    role_comp: &mut PlayerRoleComponent,
+    weapon_comp: &mut PlayerWeaponComponent,
+    echo_comp: &mut PlayerEchoComponent,
+    formation_id: i32,
+    append_buff_ids: &[i64],
+) -> Result<(), &'static str> {
+    if !scene.phantom_role_entity_ids.is_empty() {
+        return Ok(());
+    }
+    let role_ids: Vec<i32> = phantom_formation_roles(assets, formation_id)
+        .into_iter()
+        .filter(|&rid| materialize_trial_role(assets, role_comp, weapon_comp, echo_comp, rid))
+        .collect();
+    let Some(&cur_role) = role_ids.first() else {
+        return Ok(());
+    };
+    let instance_dungeon = assets
+        .tables
+        .instance_dungeon
+        .get_data_by_id(&scene.instance_id)
+        .or_else(|| assets.tables.instance_dungeon.get_data_by_id(&8))
+        .ok_or("InstanceDungeonNotFound")?;
+    push_trial_role_list(sink, assets, role_comp, weapon_comp, echo_comp, &role_ids)?;
+
+    let now_ms = now_millis();
+    let mut entity_ids = Vec::new();
+    let mut add_role_pbs = Vec::new();
+    let mut add_concom_pbs = Vec::new();
+    let mut fight_role_infos = Vec::new();
+    for &rid in &role_ids {
+        let mut spawn = || -> Result<_, &'static str> {
+            let entity = role_entity_templates::create_role_entity(
+                fs,
+                scene,
+                scene.player_id,
+                assets,
+                role_comp,
+                weapon_comp,
+                echo_comp,
+                &instance_dungeon,
+                rid,
+            )?;
+            entity_ids.push(entity.net_id);
+            if let Some(s) = scene.entity_mut(entity.net_id) {
+                s.visible = rid == cur_role;
+            }
+            add_role_pbs.push(entity_proto::build_optional(
+                assets,
+                scene,
+                None,
+                entity.net_id,
+                now_ms,
+            )?);
+            for cid in concomitant_ids(scene, entity.net_id) {
+                if let Some(s) = scene.entity_mut(cid) {
+                    s.visible = rid == cur_role;
+                }
+                add_concom_pbs.push(entity_proto::build_optional(assets, scene, None, cid, now_ms)?);
+            }
+            Ok(entity)
+        };
+        let entity = match spawn() {
+            Ok(entity) => entity,
+            Err(err) => {
+                let _ = remove_role_entities(scene, fs, &entity_ids);
+                return Err(err);
+            }
+        };
+        fight_role_infos.push(FightRoleInfo {
+            RoleId: rid,
+            EntityId: entity.net_id,
+            OnStageWithoutControl: false,
+        });
+        let buffs: Vec<BuffAdditionEntry> = append_buff_ids
+            .iter()
+            .filter(|&&id| id > 0)
+            .map(|&id| BuffAdditionEntry {
+                id,
+                stack_count: 1,
+                is_active: true,
+                ..Default::default()
+            })
+            .collect();
+        if !buffs.is_empty() {
+            events.enqueue(Event::BuffAddition {
+                target: entity,
+                instigator: entity,
+                buffs,
+            });
+        }
+    }
+    scene.phantom_role_entity_ids = entity_ids;
+
+    sink.push(
+        EntityAddNotify::MSG_ID,
+        &EntityAddNotify {
+            EntityPbs: add_role_pbs,
+            RemoveTagIds: false,
+        },
+    );
+    if !add_concom_pbs.is_empty() {
+        sink.push(
+            EntityAddNotify::MSG_ID,
+            &EntityAddNotify {
+                EntityPbs: add_concom_pbs,
+                RemoveTagIds: false,
+            },
+        );
+    }
+    let phantom = ESceneRolesGroup::Phantom.to_i32();
+    sink.push(
+        UpdateGroupFormationNotify::MSG_ID,
+        &UpdateGroupFormationNotify {
+            GroupFormation: vec![GroupFormation {
+                PlayerId: scene.player_id,
+                FightRoleInfos: vec![FightRoleInfos {
+                    GroupType: phantom,
+                    FightRoleInfos: fight_role_infos,
+                    CurRole: cur_role,
+                    LivingStatus: Some(LivingStatus::Alive),
+                    IsFixedLocation: false,
+                }],
+                CurrentGroupType: phantom,
+            }],
+        },
+    );
+    sink.push(
+        SwitchSceneGroupNotify::MSG_ID,
+        &SwitchSceneGroupNotify {
+            PlayerId: scene.player_id,
+            Group: phantom,
+        },
+    );
+    Ok(())
+}
+
+/// RestorePhantomFormation (server action): switches back to the Battle group, then removes
+/// the Echo role entities and cleans up trial role data not owned by `keep_trial_ids`.
+pub fn restore_phantom_formation<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    fs: &FileSystem,
+    sink: &mut S,
+    role_comp: &mut PlayerRoleComponent,
+    weapon_comp: &mut PlayerWeaponComponent,
+    echo_comp: &mut PlayerEchoComponent,
+    keep_trial_ids: &[i32],
+) {
+    let entity_ids = std::mem::take(&mut scene.phantom_role_entity_ids);
+    if entity_ids.is_empty() {
+        return;
+    }
+    if std::mem::take(&mut scene.phantom_cur_role) > 0 {
+        let battle_eid = scene.current_role_entity_id();
+        if let Some(s) = scene.entity_mut(battle_eid) {
+            s.visible = true;
+        }
+    }
+    sink.push(
+        SwitchSceneGroupNotify::MSG_ID,
+        &SwitchSceneGroupNotify {
+            PlayerId: scene.player_id,
+            Group: ESceneRolesGroup::Battle.to_i32(),
+        },
+    );
+    let role_ids: Vec<i32> = entity_ids
+        .iter()
+        .filter_map(|&eid| scene.entity(eid).map(|s| s.config.config_id))
+        .filter(|rid| role_comp.is_trial_role(*rid) && !keep_trial_ids.contains(rid))
+        .collect();
+    let remove_infos = remove_role_entities(scene, fs, &entity_ids);
+    if !remove_infos.is_empty() {
+        sink.push(
+            EntityRemoveNotify::MSG_ID,
+            &EntityRemoveNotify {
+                IsRemove: true,
+                RemoveInfos: remove_infos,
+            },
+        );
+    }
+    cleanup_removed_trial_roles(role_comp, weapon_comp, echo_comp, &role_ids);
 }

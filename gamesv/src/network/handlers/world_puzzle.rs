@@ -1208,42 +1208,53 @@ pub fn handle_elevator_state_change_request(
         .and_then(|idx| state.scene.as_ref()?.entities[idx].world_item.lift)
         .map(|l| l.location)
         .unwrap_or(0);
+    let target_state = match req.State {
+        Some(sonoro_proto::enums::ElevatorState::Forward) => "关卡.电梯.上升",
+        Some(sonoro_proto::enums::ElevatorState::Reverse) => "关卡.电梯.下降",
+        _ => "关卡.电梯.停靠",
+    };
+    let mut state_tag_upd = None;
     if let Some(scene) = state.scene.as_mut()
         && let Some(&idx) = scene.net_id_map.get(&req.EntityId)
     {
         scene.entities[idx].world_item.lift = Some(EntityLiftComponent {
             location: req.TagState,
         });
-        if req.State == Some(sonoro_proto::enums::ElevatorState::End) {
-            scene.update_entity_state_tag(
-                &state.assets.tables.gameplay_tag_remap,
-                req.EntityId,
-                "关卡.电梯.停靠",
-            );
-        }
+        state_tag_upd = scene.update_entity_state_tag(
+            &state.assets.tables.gameplay_tag_remap,
+            req.EntityId,
+            target_state,
+        );
+    }
+    if let (Some(upd), Some(scene)) = (state_tag_upd, state.scene.as_ref()) {
+        quest_actions::emit_entity_state_tag_update_checked(
+            scene,
+            Some(&state.assets),
+            &mut state.conn,
+            req.EntityId,
+            upd,
+        );
     }
     let info = &mut state.player_components.progress.info;
     info.set_key_int(&format!("elevator:{config_id}"), i64::from(req.TagState));
     info.set_key_int(&format!("lift_target:{config_id}"), i64::from(req.TagState));
-    if req.State == Some(sonoro_proto::enums::ElevatorState::End) {
-        state
-            .player_components
-            .quest
-            .info
-            .set_entity_state(i64::from(config_id), "关卡.电梯.停靠");
-        state
-            .player_components
-            .quest
-            .save(&state.fs)
-            .map_err(|e| e.to_string())?;
-    }
+    state
+        .player_components
+        .quest
+        .info
+        .set_entity_state(i64::from(config_id), target_state);
+    state
+        .player_components
+        .quest
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
     flush_quest_condition_changed(state);
-    if req.State != Some(sonoro_proto::enums::ElevatorState::End)
+    if !matches!(req.State, None | Some(sonoro_proto::enums::ElevatorState::End))
         && req.TagState > 0
         && prev_location != req.TagState
     {
@@ -2195,8 +2206,13 @@ fn resolve_and_grant_entity_collect_or_capture(
             let _ = reward::grant_echo_capture_only(&mut rctx, vision_id, calabash_lvl)
                 .map_err(|e| e.to_string())?;
         } else if tb_type > 0 {
-            let _ = reward::grant_treasure_box_reward(&mut rctx, tb_type, reward_id, 7000)
-                .map_err(|e| e.to_string())?;
+            let _ = reward::grant_treasure_box_reward(
+                &mut rctx,
+                tb_type,
+                reward_id,
+                reward::CHEST_REWARD_REASON,
+            )
+            .map_err(|e| e.to_string())?;
         } else if reward_id > 0 {
             let res = reward::grant_drop_package(&mut rctx, reward_id, 1)
                 .map_err(|e| e.to_string())?;
@@ -2299,6 +2315,9 @@ pub fn handle_hook_lock_batch_collect_request(
                 RemoveInfos: remove_infos,
             },
         );
+    }
+    if dirty {
+        flush_quest_condition_changed(state);
     }
     let main_cfg = state
         .scene
@@ -2888,6 +2907,9 @@ pub fn handle_remote_batch_collect_request(
             },
         );
     }
+    if dirty {
+        flush_quest_condition_changed(state);
+    }
     Ok(RemoteBatchCollectResponse {
         EntityIds: collected,
         ErrCode: Some(ErrorCode::Success),
@@ -2906,6 +2928,7 @@ pub fn handle_capture_entity_request(
         .map(|s| s.net_id_map.contains_key(&req.Id))
         .unwrap_or(false);
     let mut remove_infos = Vec::new();
+    let mut captured_any = false;
     if still_present && !state.player_components.progress.info.has_claim(&key) {
         let _ = resolve_and_grant_entity_collect_or_capture(
             state,
@@ -2919,6 +2942,7 @@ pub fn handle_capture_entity_request(
             .progress
             .save(&state.fs)
             .map_err(|e| e.to_string())?;
+        captured_any = true;
     }
     if !remove_infos.is_empty() {
         let _ = state.conn.push_msg(
@@ -2928,6 +2952,9 @@ pub fn handle_capture_entity_request(
                 RemoveInfos: remove_infos,
             },
         );
+    }
+    if captured_any {
+        flush_quest_condition_changed(state);
     }
     Ok(CaptureEntityResponse {
         ErrCode: Some(ErrorCode::Success),
@@ -2973,6 +3000,9 @@ pub fn handle_capture_batch_entity_request(
                 RemoveInfos: remove_infos,
             },
         );
+    }
+    if dirty {
+        flush_quest_condition_changed(state);
     }
     Ok(CaptureBatchEntityResponse {
         ErrCode: Some(ErrorCode::Success),
@@ -3029,8 +3059,13 @@ pub fn handle_pick_up_drop_item_request(
                     .unwrap_or(0);
                 let mut rctx = state.reward_context();
                 if tb_type > 0 {
-                    let res = reward::grant_treasure_box_reward(&mut rctx, tb_type, reward_id, 7000)
-                        .map_err(|e| e.to_string())?;
+                    let res = reward::grant_treasure_box_reward(
+                        &mut rctx,
+                        tb_type,
+                        reward_id,
+                        reward::CHEST_REWARD_REASON,
+                    )
+                    .map_err(|e| e.to_string())?;
                     granted_any = res.granted_count > 0;
                 } else if reward_id > 0 {
                     let res = reward::grant_drop_package(&mut rctx, reward_id, 1)

@@ -11,13 +11,17 @@ use sonoro_gamesv_data::tables::entity_components::range::ShapeConfig;
 use sonoro_gamesv_data::tables::level_play_data::LevelPlayData;
 use sonoro_gamesv_fs::quest_info::append_unique_int;
 use sonoro_gamesv_fs::quest_info::remove_int_value;
-use sonoro_proto::enums::{BtType, ChildQuestNodeStatus, FailReason, GameCtxType, NodeStatus};
+use sonoro_proto::enums::{
+    BtType, ChildQuestNodeStatus, EAttributeType, FailReason, GameCtxType, NodeStatus,
+};
 use sonoro_proto::pb::{
     BtRollbackNotify, BtRollbackStartNotify, BtVarUpdateNotify, BehaviorTreeInfoNotify,
-    ChildQuestNodeInfo, EnterLevelPlayNotify, EntityAddNotify, EntityRemoveInfo,
-    EntityRemoveNotify, LeaveLevelPlayNotify, LevelPlayFirstNotify, LevelPlayInfo,
-    LevelPlayInfoNotify, LevelPlayStateNotify, NodeInfo, NodeInfoExtraInfoOneof, TimerInfoPb,
-    TreeInfo, UpdateNodeStatusNotify,
+    ChildQuestNodeInfo, ChildQuestNodeProgress, ChildQuestNodeProgressProgressOneof,
+    EnterLevelPlayNotify, EntityAddNotify, EntityRemoveInfo, EntityRemoveNotify, KillProgress,
+    LeaveLevelPlayNotify, LevelPlayFirstNotify, LevelPlayInfo, LevelPlayInfoNotify,
+    LevelPlayStateNotify, NodeInfo, NodeInfoExtraInfoOneof, TimerInfoPb, TreeInfo,
+    UpdateNodeProgressNotify, UpdateNodeStatusNotify, UpdateTimerInfoNotify, VarDefinePb,
+    VarDefinePbValueOneof,
 };
 
 use crate::component::entity::small::{
@@ -31,6 +35,7 @@ use crate::component::player::{
     PlayerRoleComponent, PlayerSceneComponent, PlayerWeaponComponent,
 };
 use crate::event_queue::EventQueue;
+use crate::helpers::attributes;
 use crate::helpers::condition::{self, EvalContext};
 use crate::helpers::gameplay_tags;
 use crate::helpers::prologue_quest;
@@ -207,15 +212,27 @@ pub fn resolve_entity_config(
 }
 
 fn matches_scene_instance(assets: &Assets, lp: &LevelPlayData, scene_instance_id: i32) -> bool {
+    let map_id = assets.resolve_map_config_id(scene_instance_id);
+    // Map 100 is the developer test/sample level; never run its entries on live maps.
+    if lp.Data.LevelId == 100 {
+        return map_id == 100;
+    }
     let expected_inst = if lp.Data.InstanceId != 0 {
         lp.Data.InstanceId
     } else {
         lp.Data.LevelId
     };
-    if expected_inst == 0 || expected_inst == scene_instance_id {
+    if expected_inst == 0 {
         return true;
     }
-    assets.resolve_map_config_id(scene_instance_id) == expected_inst
+    // Editor exports default `InstanceId = 8` on prototype/sub-map LevelPlays whose `LevelId` belongs to another map.
+    if expected_inst == 8 && lp.Data.LevelId > 0 && lp.Data.LevelId != map_id {
+        return false;
+    }
+    if expected_inst == scene_instance_id {
+        return true;
+    }
+    map_id == expected_inst
 }
 
 fn json_array_contains_int(arr_opt: Option<&Value>, needle: i32) -> bool {
@@ -229,7 +246,93 @@ fn is_target_still_alive_in_scene(scene: &Scene, cfg_id: i32, exclude_net_id: i6
     scene.entities.iter().any(|s| {
         s.net_id != exclude_net_id
             && !scene.rewarded_kills.contains(&s.net_id)
+            && !s.dead_notified
             && s.config.config_id == cfg_id
+            && s.attribute
+                .as_ref()
+                .is_none_or(|a| attributes::get_attr_value(a, EAttributeType::Life) > 0)
+    })
+}
+
+fn is_level_play_monster_entity(assets: &Assets, map_id: i32, cfg_id: i32) -> bool {
+    let Some(lcfg) = assets
+        .find_level_entity(map_id, i64::from(cfg_id))
+        .or_else(|| assets.find_level_entity_any_map(i64::from(cfg_id)))
+    else {
+        return false;
+    };
+    if let Some(bp) = assets.find_blueprint_config(&lcfg.BlueprintType) {
+        return matches!(
+            bp.EntityLogic,
+            sonoro_gamesv_data::tables::blueprint_config::EntityLogic::Monster
+        );
+    }
+    lcfg.BlueprintType.contains("Monster")
+}
+
+fn resolve_lp_kill_targets(
+    assets: &Assets,
+    map_id: i32,
+    lp: &LevelPlayData,
+    cond: &Map<String, Value>,
+) -> Vec<i32> {
+    let mut targets = quest_engine::resolve_kill_targets_for_condition(assets, map_id, cond);
+    if !targets.is_empty() {
+        return targets;
+    }
+    for r in &lp.Data.Reference {
+        let Ok(rcfg) = r.trim().parse::<i32>() else {
+            continue;
+        };
+        if rcfg <= 0 {
+            continue;
+        }
+        let mc_targets = assets.spawn_monster_targets(map_id, i64::from(rcfg));
+        if !mc_targets.is_empty() {
+            for tid in mc_targets {
+                if !targets.contains(&tid) {
+                    targets.push(tid);
+                }
+            }
+        } else if is_level_play_monster_entity(assets, map_id, rcfg) && !targets.contains(&rcfg) {
+            targets.push(rcfg);
+        }
+    }
+    targets
+}
+
+fn build_lp_kill_progress<S: PushSink + ?Sized>(
+    ctx: &LevelPlayContext<'_, S>,
+    lp: &LevelPlayData,
+    node: &NodeEntry,
+) -> Option<ChildQuestNodeProgress> {
+    let cond = quest_engine::get_child_condition_pub(&node.data)?;
+    let ctype = json_str(cond.get("Type"))?;
+    if ctype != "Kill" && ctype != "MonsterCreator" {
+        return None;
+    }
+    let targets = resolve_lp_kill_targets(ctx.assets, ctx.scene.instance_id, lp, cond);
+    if targets.is_empty() {
+        return None;
+    }
+    let killed_ids: Vec<i32> = targets
+        .iter()
+        .copied()
+        .filter(|&tid| {
+            ctx.progress_comp
+                .as_deref()
+                .is_some_and(|pc| pc.info.has_claim(&lp_key("lp_kill", lp.LevelPlayId, tid)))
+        })
+        .collect();
+    let killed = killed_ids.len() as i32;
+    let total = targets.len() as i32;
+    Some(ChildQuestNodeProgress {
+        Progress: Some(ChildQuestNodeProgressProgressOneof::Kill(KillProgress {
+            MonId: killed_ids,
+            PrefabNum: total,
+            CurrNum: killed,
+            TotalNum: total,
+        })),
     })
 }
 
@@ -482,20 +585,29 @@ fn matches_reach_area_inner<S: PushSink + ?Sized>(
     {
         return check_reach_entity_range(ctx, reid, check_pos, range);
     }
-    if let Some(Value::Object(pt)) = cond.get("Pos")
-        && check_point(pt, check_pos, range)
+    let mut has_explicit_target = false;
+    if let Some(Value::Object(pt)) = cond.get("Pos") {
+        has_explicit_target = true;
+        if check_point(pt, check_pos, range) {
+            return true;
+        }
+    }
+    if let Some(Value::Object(center)) = cond.get("Center") {
+        has_explicit_target = true;
+        if check_point(center, check_pos, range) {
+            return true;
+        }
+    }
+    if let Some(Value::Array(items)) = cond.get("Locations")
+        && !items.is_empty()
     {
-        return true;
+        has_explicit_target = true;
+        if check_point_array(Some(&Value::Array(items.clone())), check_pos, range) {
+            return true;
+        }
     }
-    if let Some(Value::Object(center)) = cond.get("Center")
-        && check_point(center, check_pos, range)
-    {
-        return true;
-    }
-    if check_point_array(cond.get("Locations"), check_pos, range) {
-        return true;
-    }
-    if let Some(Value::Object(obj)) = Some(node_data)
+    if !has_explicit_target
+        && let Some(Value::Object(obj)) = Some(node_data)
         && let Some(Value::Object(tt)) = obj.get("TrackTarget")
         && let Some(Value::Object(track_type)) = tt.get("TrackType")
         && check_point_array(track_type.get("Locations"), check_pos, range)
@@ -721,9 +833,49 @@ fn is_quest_checking_level_play<S: PushSink + ?Sized>(
     false
 }
 
+fn eval_level_play_open_condition<S: PushSink + ?Sized>(
+    ctx: &LevelPlayContext<'_, S>,
+    lp: &LevelPlayData,
+    player_pos_opt: Option<[f32; 3]>,
+) -> bool {
+    let Some(open_val) = lp.Data.LevelPlayOpenCondition.as_ref() else {
+        return true;
+    };
+    let Some(obj) = open_val.as_object() else {
+        return true;
+    };
+    let Some(conds) = obj.get("Conditions").and_then(Value::as_array) else {
+        return true;
+    };
+    if conds.is_empty() {
+        return true;
+    }
+
+    let is_or = json_int(obj.get("Type")).unwrap_or(0) == 1;
+    let eval_ctx = ctx.make_eval_context();
+    let player_pos = player_pos_opt.or_else(|| current_player_pos(ctx));
+
+    for cond in conds {
+        let passed = match cond.as_object().and_then(|c| json_str(c.get("Type"))) {
+            Some("ReachArea") => cond.as_object().is_some_and(|cobj| {
+                player_pos.is_some_and(|pos| matches_reach_area_inner(ctx, &Value::Null, cobj, pos))
+            }),
+            _ => condition::eval_single_provide_condition(&eval_ctx, cond),
+        };
+        if is_or && passed {
+            return true;
+        }
+        if !is_or && !passed {
+            return false;
+        }
+    }
+    !is_or
+}
+
 fn can_enter_level_play<S: PushSink + ?Sized>(
     ctx: &LevelPlayContext<'_, S>,
     lp: &LevelPlayData,
+    player_pos_opt: Option<[f32; 3]>,
 ) -> bool {
     let lp_id = lp.LevelPlayId;
     if lp_id <= 0 || ctx.quest_comp.info.completed_level_plays.contains(&lp_id) {
@@ -733,6 +885,16 @@ fn can_enter_level_play<S: PushSink + ?Sized>(
         return false;
     }
     if lp.Data.Type != "Quest" {
+        if !ctx
+            .quest_comp
+            .info
+            .has_finished_quest(crate::helpers::quest_engine::PROLOGUE_QUEST_ID)
+        {
+            return false;
+        }
+        if !eval_level_play_open_condition(ctx, lp, player_pos_opt) {
+            return false;
+        }
         return true;
     }
     if ctx
@@ -772,6 +934,7 @@ fn push_level_play_behavior_tree_info<S: PushSink + ?Sized>(
     lp_id: i32,
     nodes: &[NodeEntry],
 ) -> io::Result<()> {
+    let lp_opt = ctx.assets.tables.level_play_data.get_data_by_id(&lp_id);
     let mut tree_nodes = std::collections::BTreeMap::new();
     let mut timer_infos = Vec::new();
     for node in nodes {
@@ -789,13 +952,24 @@ fn push_level_play_behavior_tree_info<S: PushSink + ?Sized>(
             if active
                 && let Some(due_ms) = ctx.scene.lp_timers.get_due_ms(lp_id, node.id)
             {
+                let timer_type = quest_engine::get_child_condition_pub(&node.data)
+                    .and_then(|c| c.get("TimerType"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("WaitTime");
                 timer_infos.push(TimerInfoPb {
-                    TimerType: b"WaitTime".to_vec(),
+                    TimerType: timer_type.as_bytes().to_vec(),
                     NodeId: node.id,
                     EndTime: due_ms / 1000,
                     PauseTime: 0,
                 });
             }
+            let progress = if active {
+                lp_opt
+                    .as_ref()
+                    .and_then(|lp| build_lp_kill_progress(ctx, lp, node))
+            } else {
+                None
+            };
             Some(NodeInfoExtraInfoOneof::ChildQuestNodeInfo(
                 ChildQuestNodeInfo {
                     Status: Some(if finished {
@@ -803,10 +977,28 @@ fn push_level_play_behavior_tree_info<S: PushSink + ?Sized>(
                     } else {
                         ChildQuestNodeStatus::Progress
                     }),
-                    Progress: None,
+                    Progress: progress,
                 },
             ))
         } else {
+            if active
+                && node.node_type == "QuestFailed"
+                && let Some(due_ms) = ctx.scene.lp_fail_timers.get_due_ms(lp_id, node.id)
+            {
+                let timer_type = node
+                    .data
+                    .get("FailedCondition")
+                    .and_then(|fc| fc.get("Timer"))
+                    .and_then(|t| t.get("TimerType"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("CountDownChallenge");
+                timer_infos.push(TimerInfoPb {
+                    TimerType: timer_type.as_bytes().to_vec(),
+                    NodeId: node.id,
+                    EndTime: due_ms / 1000,
+                    PauseTime: 0,
+                });
+            }
             None
         };
         tree_nodes.insert(
@@ -988,6 +1180,91 @@ fn complete_lp_child_quest<S: PushSink + ?Sized>(
     Ok(())
 }
 
+pub fn is_lp_node_active_pub(
+    progress_comp: Option<&PlayerProgressComponent>,
+    lp_id: i32,
+    node_id: i32,
+) -> bool {
+    is_lp_node_active(progress_comp, lp_id, node_id)
+}
+
+pub fn is_lp_subtree_active(
+    progress_comp: Option<&PlayerProgressComponent>,
+    lp_id: i32,
+    nodes: &[NodeEntry],
+    parent_id: i32,
+) -> bool {
+    if parent_id <= 0 {
+        return true;
+    }
+    if is_lp_node_active(progress_comp, lp_id, parent_id) {
+        return true;
+    }
+    for n in nodes {
+        if !is_lp_node_active(progress_comp, lp_id, n.id) {
+            continue;
+        }
+        let mut cur = n.parent_id;
+        let mut hops = 0usize;
+        while cur > 0 && hops < 64 {
+            if cur == parent_id {
+                return true;
+            }
+            cur = find_lp_node_by_id(nodes, cur).map_or(0, |p| p.parent_id);
+            hops += 1;
+        }
+    }
+    false
+}
+
+fn activate_lp_node_if_needed<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+    lp_id: i32,
+    node_id: i32,
+    push_updates: bool,
+    dirty_pc: &mut bool,
+) {
+    if is_level_play_node_marked(ctx.progress_comp.as_deref(), lp_id, node_id)
+        || is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node_id)
+    {
+        return;
+    }
+    set_lp_node_active(ctx, lp_id, node_id, true, dirty_pc);
+    if push_updates {
+        ctx.sink.push(
+            UpdateNodeStatusNotify::MSG_ID,
+            &UpdateNodeStatusNotify {
+                TreeOwnerId: lp_id,
+                TreeIncId: i64::from(lp_id),
+                NodeId: node_id,
+                Status: Some(NodeStatus::Activate),
+            },
+        );
+    }
+}
+
+fn push_lp_timer_info<S: PushSink + ?Sized>(
+    sink: &mut S,
+    lp_id: i32,
+    node_id: i32,
+    timer_type: &str,
+    due_ms: i64,
+) {
+    sink.push(
+        UpdateTimerInfoNotify::MSG_ID,
+        &UpdateTimerInfoNotify {
+            TreeOwnerId: lp_id,
+            TreeIncId: i64::from(lp_id),
+            TimerInfo: Some(TimerInfoPb {
+                TimerType: timer_type.as_bytes().to_vec(),
+                NodeId: node_id,
+                EndTime: due_ms / 1000,
+                PauseTime: 0,
+            }),
+        },
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn step_level_play_node<S: PushSink + ?Sized>(
     ctx: &mut LevelPlayContext<'_, S>,
@@ -1030,6 +1307,7 @@ fn step_level_play_node<S: PushSink + ?Sized>(
 
     match node.node_type.as_str() {
         "Sequence" => {
+            activate_lp_node_if_needed(ctx, lp_id, node.id, false, dirty_pc);
             for child in nodes {
                 if child.parent_id != node.id {
                     continue;
@@ -1116,6 +1394,7 @@ fn step_level_play_node<S: PushSink + ?Sized>(
             Ok(LpStepResult::Completed)
         }
         "Parallel" | "ParallelSelect" => {
+            activate_lp_node_if_needed(ctx, lp_id, node.id, push_updates && !defer_bt_notifies, dirty_pc);
             let is_parallel_all = node.node_type == "Parallel";
             let eligible_children = nodes
                 .iter()
@@ -1273,6 +1552,8 @@ fn step_level_play_node<S: PushSink + ?Sized>(
             Ok(LpStepResult::TreeEnded)
         }
         "QuestFailed" => {
+            activate_lp_node_if_needed(ctx, lp_id, node.id, push_updates && !defer_bt_notifies, dirty_pc);
+            let had_fail_timer = ctx.scene.lp_fail_timers.contains(lp_id, node.id);
             // QuestFailed monitor node checks active failure conditions
             let fail_reason = {
                 let mut lp_fail_timers = std::mem::take(&mut ctx.scene.lp_fail_timers);
@@ -1289,6 +1570,20 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                 ctx.scene.lp_fail_timers = lp_fail_timers;
                 res?
             };
+            if !had_fail_timer
+                && push_updates
+                && !defer_bt_notifies
+                && let Some(due_ms) = ctx.scene.lp_fail_timers.get_due_ms(lp_id, node.id)
+            {
+                let timer_type = node
+                    .data
+                    .get("FailedCondition")
+                    .and_then(|fc| fc.get("Timer"))
+                    .and_then(|t| t.get("TimerType"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("CountDownChallenge");
+                push_lp_timer_info(ctx.sink, lp_id, node.id, timer_type, due_ms);
+            }
             if let Some(reason) = fail_reason {
                 if let Some(fa) = node.data.get("FinishActions") {
                     run_level_play_actions(
@@ -1549,11 +1844,19 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                     && delay_ms > 0
                     && !ctx.scene.lp_timers.contains(lp_id, node.id)
                 {
+                    let due_ms = now_millis() + delay_ms;
                     ctx.scene.lp_timers.upsert(QuestTimerEntry {
                         quest_id: lp_id,
                         node_id: node.id,
-                        due_ms: now_millis() + delay_ms,
+                        due_ms,
                     });
+                    if push_updates && !defer_bt_notifies {
+                        let timer_type = cond
+                            .get("TimerType")
+                            .and_then(Value::as_str)
+                            .unwrap_or("WaitTime");
+                        push_lp_timer_info(ctx.sink, lp_id, node.id, timer_type, due_ms);
+                    }
                 }
             }
 
@@ -1620,6 +1923,86 @@ fn step_level_play_node<S: PushSink + ?Sized>(
     }
 }
 
+fn seed_unset_lp_score_targets<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+    lp_id: i32,
+    nodes: &[NodeEntry],
+    push_updates: bool,
+) {
+    const TARGET_VARS: [(&str, i64); 3] = [
+        ("铜牌目标积分", 4),
+        ("银牌目标积分", 7),
+        ("金牌目标积分", 9),
+    ];
+    let mut needs_any = false;
+    for node in nodes {
+        let s = node.data.to_string();
+        if TARGET_VARS.iter().any(|(k, _)| s.contains(k)) {
+            needs_any = true;
+            break;
+        }
+    }
+    if !needs_any {
+        return;
+    }
+
+    let mut max_score = 0i32;
+    if let Some(lp) = ctx.assets.tables.level_play_data.get_data_by_id(&lp_id) {
+        for r in &lp.Data.Children {
+            if let Some(eid) = parse_ref_entity_id(r)
+                && let Some(cfg) = ctx
+                    .assets
+                    .find_level_entity(ctx.scene.instance_id, i64::from(eid))
+            {
+                // BigCoin (Gameplay085) = 300 pts, Coin (Gameplay086) = 100 pts in WuWa parkour challenges.
+                if cfg.BlueprintType == "Gameplay085" {
+                    max_score += 300;
+                } else if cfg.BlueprintType == "Gameplay086" {
+                    max_score += 100;
+                }
+            }
+        }
+    }
+    let eff_max = if max_score >= 500 { max_score } else { 1500 };
+
+    let empty_obj = serde_json::Map::new();
+    let mut pushed_vars = Vec::new();
+    for (vname, tenths) in TARGET_VARS {
+        let scoped = crate::helpers::quest_types::scoped_var_key_with_owner(
+            Some(ctx.scene),
+            lp_id,
+            &empty_obj,
+            vname,
+        )
+        .unwrap_or_else(|| format!("Self:{lp_id}:{vname}"));
+        if ctx.quest_comp.info.get_var_int(&scoped) != 0 {
+            continue;
+        }
+        let target_val = (((i64::from(eff_max) * tenths) / 10) / 100 * 100).max(300) as i32;
+        ctx.quest_comp.info.set_var_int(&scoped, target_val);
+        pushed_vars.push((
+            vname.as_bytes().to_vec(),
+            VarDefinePb {
+                VarType: 1,
+                Value: Some(VarDefinePbValueOneof::Int(i64::from(target_val))),
+            },
+        ));
+    }
+    if push_updates {
+        for (var_name, var_define) in pushed_vars {
+            ctx.sink.push(
+                BtVarUpdateNotify::MSG_ID,
+                &BtVarUpdateNotify {
+                    TreeOwnerId: lp_id,
+                    TreeIncId: i64::from(lp_id),
+                    VarName: var_name,
+                    VarDefine: Some(var_define),
+                },
+            );
+        }
+    }
+}
+
 fn step_level_play_tree<S: PushSink + ?Sized>(
     ctx: &mut LevelPlayContext<'_, S>,
     lp_id: i32,
@@ -1630,6 +2013,7 @@ fn step_level_play_tree<S: PushSink + ?Sized>(
     if nodes.is_empty() || ctx.quest_comp.info.completed_level_plays.contains(&lp_id) {
         return Ok(());
     }
+    seed_unset_lp_score_targets(ctx, lp_id, nodes, push_updates);
     if push_updates && !ctx.scene.sent_lp_bt_trees.contains(&lp_id) {
         ctx.sink.push(
             LevelPlayStateNotify::MSG_ID,
@@ -1993,14 +2377,6 @@ pub fn complete_level_play<S: PushSink + ?Sized>(
         ensure_entity_spawned(ctx, rc.RewardEntityId);
     }
 
-    if was_entered {
-        ctx.scene.sent_lp_bt_trees.remove(&level_play_id);
-        ctx.sink.push(
-            LeaveLevelPlayNotify::MSG_ID,
-            &LeaveLevelPlayNotify { Id: level_play_id },
-        );
-    }
-
     ctx.sink.push(
         LevelPlayInfoNotify::MSG_ID,
         &LevelPlayInfoNotify {
@@ -2013,6 +2389,14 @@ pub fn complete_level_play<S: PushSink + ?Sized>(
             }],
         },
     );
+
+    if was_entered {
+        ctx.scene.sent_lp_bt_trees.remove(&level_play_id);
+        ctx.sink.push(
+            LeaveLevelPlayNotify::MSG_ID,
+            &LeaveLevelPlayNotify { Id: level_play_id },
+        );
+    }
 
     let inst_id = ctx.scene.instance_id;
     let mut qctx = ctx.as_quest_ctx();
@@ -2092,10 +2476,14 @@ fn check_level_play_kill_progress<S: PushSink + ?Sized>(
                 continue;
             }
 
+            let resolved_targets =
+                resolve_lp_kill_targets(ctx.assets, ctx.scene.instance_id, lp, cond);
             let in_exist = json_array_contains_int(cond.get("ExistTargets"), killed_cfg_id);
             let in_awake = json_array_contains_int(cond.get("TargetsToAwake"), killed_cfg_id);
-            let in_mc = json_array_contains_int(cond.get("MonsterCreatorEntityIds"), killed_cfg_id);
-            if !in_exist && !in_awake && !in_mc {
+            let in_mc =
+                json_array_contains_int(cond.get("MonsterCreatorEntityIds"), killed_cfg_id);
+            let in_resolved = resolved_targets.contains(&killed_cfg_id);
+            if !in_exist && !in_awake && !in_mc && !in_resolved {
                 continue;
             }
             has_matching_kill_node = true;
@@ -2108,32 +2496,75 @@ fn check_level_play_kill_progress<S: PushSink + ?Sized>(
                 dirty_pc = true;
             }
 
-            let mut targets_done = true;
-            for field in ["ExistTargets", "TargetsToAwake", "MonsterCreatorEntityIds"] {
-                if let Some(Value::Array(arr)) = cond.get(field) {
-                    for v in arr {
-                        let Some(tid) = json_int(Some(v)) else {
-                            continue;
-                        };
-                        let killed_rec = ctx
-                            .progress_comp
-                            .as_deref()
-                            .is_some_and(|pc| pc.info.has_claim(&lp_key("lp_kill", lp_id, tid)));
-                        if !killed_rec || is_target_still_alive_in_scene(ctx.scene, tid, killed_net_id)
-                        {
-                            targets_done = false;
-                            break;
-                        }
+            let mut creators_to_wake = Vec::new();
+            if let Some(Value::Array(arr)) = cond.get("MonsterCreatorEntityIds") {
+                for v in arr {
+                    if let Some(mc_id) = json_int(Some(v))
+                        && mc_id > 0
+                    {
+                        creators_to_wake.push(mc_id);
                     }
                 }
-                if !targets_done {
-                    break;
+            }
+            for r in &lp.Data.Reference {
+                if let Ok(rcfg) = r.trim().parse::<i32>()
+                    && rcfg > 0
+                    && !creators_to_wake.contains(&rcfg)
+                    && ctx
+                        .assets
+                        .has_spawn_monster_component(ctx.scene.instance_id, i64::from(rcfg))
+                {
+                    creators_to_wake.push(rcfg);
                 }
             }
+            for mc_id in creators_to_wake {
+                let next_wave = quest_engine::ready_wave_targets_for_creator(
+                    ctx.assets,
+                    ctx.scene.instance_id,
+                    mc_id,
+                    |tid| {
+                        ctx.progress_comp
+                            .as_deref()
+                            .is_some_and(|pc| pc.info.has_claim(&lp_key("lp_kill", lp_id, tid)))
+                    },
+                );
+                for tid in next_wave {
+                    ensure_entity_spawned(ctx, tid);
+                }
+            }
+
+            let targets_done = if !resolved_targets.is_empty() {
+                resolved_targets.iter().all(|&tid| {
+                    let killed_rec = ctx
+                        .progress_comp
+                        .as_deref()
+                        .is_some_and(|pc| pc.info.has_claim(&lp_key("lp_kill", lp_id, tid)));
+                    killed_rec && !is_target_still_alive_in_scene(ctx.scene, tid, killed_net_id)
+                })
+            } else {
+                // Dynamic target list (e.g. PrefabVar): only complete once no Reference monster remains alive.
+                lp.Data.Reference.iter().all(|r| {
+                    r.trim().parse::<i32>().ok().is_none_or(|rcfg| {
+                        !is_level_play_monster_entity(ctx.assets, ctx.scene.instance_id, rcfg)
+                            || !is_target_still_alive_in_scene(ctx.scene, rcfg, killed_net_id)
+                    })
+                })
+            };
             if targets_done {
                 matched_kill_nodes.push(node.clone());
             } else {
                 all_targets_cleared = false;
+                if let Some(progress) = build_lp_kill_progress(ctx, lp, node) {
+                    ctx.sink.push(
+                        UpdateNodeProgressNotify::MSG_ID,
+                        &UpdateNodeProgressNotify {
+                            TreeOwnerId: lp_id,
+                            TreeIncId: i64::from(lp_id),
+                            NodeId: node.id,
+                            Progress: Some(progress),
+                        },
+                    );
+                }
             }
         }
 
@@ -2152,11 +2583,28 @@ fn check_level_play_kill_progress<S: PushSink + ?Sized>(
             {
                 let mut all_ref_dead = true;
                 for r in &lp.Data.Reference {
-                    if let Ok(rcfg) = r.trim().parse::<i32>()
-                        && is_target_still_alive_in_scene(ctx.scene, rcfg, killed_net_id)
-                    {
-                        all_ref_dead = false;
-                        break;
+                    if let Ok(rcfg) = r.trim().parse::<i32>() {
+                        let mc_targets = ctx
+                            .assets
+                            .spawn_monster_targets(ctx.scene.instance_id, i64::from(rcfg));
+                        if !mc_targets.is_empty() {
+                            for tid in mc_targets {
+                                let killed_rec = ctx.progress_comp.as_deref().is_some_and(|pc| {
+                                    pc.info.has_claim(&lp_key("lp_kill", lp_id, tid))
+                                });
+                                if !killed_rec
+                                    || is_target_still_alive_in_scene(ctx.scene, tid, killed_net_id)
+                                {
+                                    all_ref_dead = false;
+                                    break;
+                                }
+                            }
+                        } else if is_target_still_alive_in_scene(ctx.scene, rcfg, killed_net_id) {
+                            all_ref_dead = false;
+                        }
+                        if !all_ref_dead {
+                            break;
+                        }
                     }
                 }
                 if all_ref_dead {
@@ -2456,7 +2904,7 @@ pub fn on_get_reward_treasure_box<S: PushSink + ?Sized>(
         &mut ctx.as_reward_ctx(),
         chest_type_id,
         reward_id,
-        7000,
+        crate::helpers::reward::CHEST_REWARD_REASON,
     )?;
 
     if cfg_id > 0 {
@@ -2551,7 +2999,7 @@ pub fn on_entity_interact_fallback<S: PushSink + ?Sized>(
         .to_vec();
     for lp_idx in ref_indices {
         let lp = &ctx.assets.tables.level_play_data.items[lp_idx as usize];
-        if !can_enter_level_play(ctx, lp) {
+        if !can_enter_level_play(ctx, lp, None) {
             continue;
         }
         let lp_id = lp.LevelPlayId;
@@ -2748,10 +3196,15 @@ pub fn on_fail_timer_due<S: PushSink + ?Sized>(
     let Ok(nodes) = ctx.assets.level_play_nodes.get_owner_nodes(lp_id) else {
         return Ok(false);
     };
-    if let Some(node) = find_lp_node_by_id(&nodes, node_id)
-        && let Some(fa) = node.data.get("FinishActions")
-    {
-        run_level_play_actions(ctx, lp_id, node.id, Some(fa), None);
+    if let Some(node) = find_lp_node_by_id(&nodes, node_id) {
+        if !is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id)
+            && !is_lp_subtree_active(ctx.progress_comp.as_deref(), lp_id, &nodes, node.parent_id)
+        {
+            return Ok(false);
+        }
+        if let Some(fa) = node.data.get("FinishActions") {
+            run_level_play_actions(ctx, lp_id, node.id, Some(fa), None);
+        }
     }
     on_level_play_enabled(ctx, lp_id, false)?;
     Ok(true)
@@ -2858,6 +3311,11 @@ pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut LevelPlayContext<'_, S>) ->
     ensure_active_timers_scheduled(ctx)?;
     let pos = current_player_pos(ctx);
     let entered_snap = ctx.quest_comp.info.progress.entered_level_plays.clone();
+    let prologue_done = ctx
+        .quest_comp
+        .info
+        .has_finished_quest(crate::helpers::quest_engine::PROLOGUE_QUEST_ID);
+    let mut dirty_entered = false;
     for lp_id in entered_snap {
         if ctx.quest_comp.info.completed_level_plays.contains(&lp_id) {
             continue;
@@ -2866,6 +3324,22 @@ pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut LevelPlayContext<'_, S>) ->
             continue;
         };
         if !matches_scene_instance(ctx.assets, &lp, ctx.scene.instance_id) {
+            continue;
+        }
+        if !prologue_done
+            && matches!(
+                lp.Data.Type.as_str(),
+                "RebornBoss"
+                    | "Challenge"
+                    | "LordGym"
+                    | "SilentArea"
+                    | "BlackSwordChallenge"
+                    | "HighSpeedMovement"
+            )
+        {
+            if remove_int_value(&mut ctx.quest_comp.info.progress.entered_level_plays, lp_id) {
+                dirty_entered = true;
+            }
             continue;
         }
         ctx.sink.push(
@@ -2902,6 +3376,9 @@ pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut LevelPlayContext<'_, S>) ->
             }
             step_level_play_tree(ctx, lp_id, &nodes, true, pos)?;
         }
+    }
+    if dirty_entered {
+        ctx.quest_comp.save(ctx.fs)?;
     }
     sync_dungeon_level_plays(ctx)?;
     Ok(())
@@ -3034,7 +3511,7 @@ pub fn on_player_move<S: PushSink + ?Sized>(
         else {
             continue;
         };
-        if !can_enter_level_play(ctx, &lp) {
+        if !can_enter_level_play(ctx, &lp, Some(player_pos)) {
             continue;
         }
         if ctx
@@ -3063,25 +3540,20 @@ pub fn on_player_move<S: PushSink + ?Sized>(
     // Also evaluate non-spawnable map LevelPlay anchors (`LevelPlayEntityId`) within 3D EnterRadius.
     let non_spawnable_indices: Vec<usize> = ctx
         .assets
-        .tables
-        .level_play_data
-        .items
+        .indexes
+        .non_spawnable_enter_lps
         .iter()
-        .enumerate()
-        .filter_map(|(idx, lp)| {
-            (lp.Data.EnterRadius > 0
-                && lp.Data.LevelPlayEntityId > 0
-                && lp.Data.Type != "Quest"
-                && lp.Data.Type != "Dungeon"
-                && lp.Data.Type != "LordGym"
-                && !candidate_lps.contains(&lp.LevelPlayId)
+        .filter_map(|&idx| {
+            let idx = idx as usize;
+            let lp = &ctx.assets.tables.level_play_data.items[idx];
+            (!candidate_lps.contains(&lp.LevelPlayId)
                 && matches_scene_instance(ctx.assets, lp, ctx.scene.instance_id))
             .then_some(idx)
         })
         .collect();
     for lp_idx in non_spawnable_indices {
         let lp = ctx.assets.tables.level_play_data.items[lp_idx].clone();
-        if !can_enter_level_play(ctx, &lp) {
+        if !can_enter_level_play(ctx, &lp, Some(player_pos)) {
             continue;
         }
         if ctx
@@ -3146,6 +3618,16 @@ pub fn on_player_move<S: PushSink + ?Sized>(
         } else {
             for node in nodes.iter() {
                 if node.node_type != "QuestFailed" {
+                    continue;
+                }
+                if !is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id)
+                    && !is_lp_subtree_active(
+                        ctx.progress_comp.as_deref(),
+                        lp_id,
+                        &nodes,
+                        node.parent_id,
+                    )
+                {
                     continue;
                 }
                 let fail_reason = {
@@ -3462,6 +3944,16 @@ pub fn on_bt_timer_end<S: PushSink + ?Sized>(
     ctx: &mut LevelPlayContext<'_, S>,
     lp_id: i32,
 ) -> io::Result<bool> {
+    on_bt_timer_end_with_type(ctx, lp_id, "")
+}
+
+/// TimerEndRequest `{TimerType}`: a client timer ran out; only finishes matching timer nodes
+/// so e.g. a `CountDownTimer` doesn't complete an unrelated `CountDownChallenge` node.
+pub fn on_bt_timer_end_with_type<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+    lp_id: i32,
+    timer_type: &str,
+) -> io::Result<bool> {
     if ctx.quest_comp.info.completed_level_plays.contains(&lp_id) {
         return Ok(false);
     }
@@ -3482,6 +3974,12 @@ pub fn on_bt_timer_end<S: PushSink + ?Sized>(
         };
         let ctype = json_str(cond.get("Type")).unwrap_or("");
         if ctype == "Timer" || ctype == "WaitTime" {
+            if !timer_type.is_empty()
+                && let Some(node_timer) = cond.get("TimerType").and_then(Value::as_str)
+                && node_timer != timer_type
+            {
+                continue;
+            }
             complete_lp_child_quest(ctx, lp_id, node, true, &mut dirty_pc, None)?;
             progressed = true;
             break;
@@ -4330,6 +4828,19 @@ mod tests {
         };
         assert!(matches_scene_instance(&assets, &lahai_roi_lp, 906));
         assert!(!matches_scene_instance(&assets, &lahai_roi_lp, 8));
+
+        let sample_map100_lp = LevelPlayData {
+            LevelPlayId: 122_000_234,
+            Data: DataEntry {
+                Id: 122_000_234,
+                LevelId: 100,
+                Type: "Challenge".to_string(),
+                InstanceId: 8,
+                ..Default::default()
+            },
+        };
+        assert!(!matches_scene_instance(&assets, &sample_map100_lp, 8));
+        assert!(!matches_scene_instance(&assets, &sample_map100_lp, 906));
     }
 
     #[test]

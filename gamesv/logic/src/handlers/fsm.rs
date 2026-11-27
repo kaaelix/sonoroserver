@@ -100,7 +100,8 @@ pub fn handle_fsm_wake<S: PushSink + ?Sized>(
                         for hid in removed_handles {
                             buff_timers.cancel_handle(due.entity_id, hid);
                         }
-                    } else {
+                    } else if !scene.entities[handle.index].dead_notified {
+                        scene.entities[handle.index].dead_notified = true;
                         death_data.push(CombatReceiveData {
                             Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
                                 CombatNotifyData {
@@ -714,13 +715,17 @@ fn reset_status_attributes<S: PushSink + ?Sized>(
 ) {
     let mut changed = Vec::new();
     for index in 0..attr.attributes.len() {
+        let attr_type = EAttributeType::from_i32_or_default(index as i32);
+        // Never refill HP (`Life`) when `ActionResetStatus` fires on phase/leash FSM transitions.
+        if attr_type == EAttributeType::Life {
+            continue;
+        }
         let cur = attr.attributes[index];
         let desired_i64 = i64::from(cur.base) + i64::from(cur.increment);
         let desired = desired_i64.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
         if cur.current == desired {
             continue;
         }
-        let attr_type = EAttributeType::from_i32_or_default(index as i32);
         changed.extend(attributes::change_attr(
             attr,
             attr_type,

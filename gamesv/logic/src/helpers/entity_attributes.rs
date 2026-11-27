@@ -63,14 +63,6 @@ fn property_id(components: &Components, entity_logic: EntityLogic) -> Option<i32
     }
 }
 
-fn configured_level(components: &Components) -> i32 {
-    components
-        .AttributeComponent
-        .as_ref()
-        .and_then(|a| a.Level)
-        .map_or(1, clamp_level)
-}
-
 fn area_monster_level(
     area_table: &Table<Area, i32>,
     area_id: i32,
@@ -112,13 +104,21 @@ fn effective_level(
     area_id: i32,
     world_level: i32,
 ) -> i32 {
-    let level = configured_level(components);
-    if level >= 10 || components.AttributeComponent.is_none() {
+    let attr = components.AttributeComponent.as_ref();
+    let explicit_level = attr.and_then(|a| a.Level).map(clamp_level);
+    let world_bonus_type = attr
+        .and_then(|a| a.WorldLevelBonusType.as_ref())
+        .and_then(|w| w.Type)
+        .unwrap_or(0);
+    if world_bonus_type != 1
+        && let Some(level) = explicit_level
+    {
         return level;
     }
     area_monster_level(area_table, area_id, world_level)
         .or_else(|| fallback_monster_level(world_level))
-        .unwrap_or(level)
+        .or(explicit_level)
+        .unwrap_or(1)
 }
 
 fn configured_curve_id(components: &Components) -> i32 {

@@ -8,8 +8,9 @@ use sonoro_proto::pb::{
     DressPlayerTitleUpdateNotify, ModifyNameRequest, ModifyNameResponse, ModifySignatureRequest,
     ModifySignatureResponse, PlayerAttr, PlayerAttrNotify, PlayerAttrValueOneof,
     PlayerHeadDataRequest, PlayerHeadDataResponse,
-    PlayerNameUpdateNotify, PlayerTitleData, PlayerTitleDataRequest, PlayerTitleDataResponse,
-    ReadCardRequest, ReadCardResponse, RoleShowListUpdateRequest, RoleShowListUpdateResponse,
+    PlayerNameUpdateNotify,
+    PlayerTitleInfo, PlayerTitleRequest, PlayerTitleResponse, ReadCardRequest, ReadCardResponse,
+    RoleShowListUpdateRequest, RoleShowListUpdateResponse,
 };
 
 use super::State;
@@ -43,27 +44,28 @@ pub fn handle_player_head_data_request(
     })
 }
 
-pub fn handle_player_title_data_request(
+pub fn handle_player_title_request(
     state: &mut State,
-    _req: PlayerTitleDataRequest,
-) -> Result<PlayerTitleDataResponse, String> {
-    let list = state
+    _req: PlayerTitleRequest,
+) -> Result<PlayerTitleResponse, String> {
+    let unlock_time = energy::now_seconds();
+    let infos = state
         .assets
         .tables
         .player_title
         .items
         .iter()
-        .map(|title| PlayerTitleData {
+        .map(|title| PlayerTitleInfo {
             PlayerTitleId: title.Id,
             IsUnlock: true,
-            StarLevel: 1,
+            UnlockTime: unlock_time,
             ..Default::default()
         })
         .collect();
-    Ok(PlayerTitleDataResponse {
-        PlayerTitleData: list,
+    Ok(PlayerTitleResponse {
+        PlayerTitleInfo: infos,
+        PlayerTitleLimitInfos: Vec::new(),
         ErrorCode: Some(ErrorCode::Success),
-        ..Default::default()
     })
 }
 

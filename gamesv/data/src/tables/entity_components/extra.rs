@@ -1340,6 +1340,28 @@ pub struct SlideRailComponent {
 
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct SpawnMonsterPreCondition {
+    #[serde(default)]
+    pub Type: Option<String>,
+    #[serde(default)]
+    pub Ids: Vec<i32>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct SpawnMonsterConfig {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default)]
+    pub DelayTime: Option<f32>,
+    #[serde(default)]
+    pub PreCondition: Option<SpawnMonsterPreCondition>,
+    #[serde(default)]
+    pub TargetsToAwake: Vec<i32>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct SpawnMonsterComponent {
     #[serde(default)]
     pub ActiveType: Option<crate::tables::EmptyObj>,
@@ -1349,6 +1371,8 @@ pub struct SpawnMonsterComponent {
     pub IssharedHatred: Option<bool>,
     #[serde(default)]
     pub SpawnMonsterConstraintType: Option<crate::tables::EmptyObj>,
+    #[serde(default)]
+    pub SpawnMonsterConfigs: Vec<SpawnMonsterConfig>,
 }
 
 #[allow(non_snake_case)]

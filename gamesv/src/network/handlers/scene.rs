@@ -943,6 +943,24 @@ pub fn handle_entity_interact_request(
             Interacting: false,
         });
     }
+    if let Some(sc) = state.scene.as_ref() {
+        let cfg_id = sc
+            .find_config_id_by_net_id(req.EntityId)
+            .unwrap_or_else(|| i32::try_from(req.EntityId).unwrap_or(0));
+        if cfg_id > 0 {
+            let eval_ctx = state.eval_context();
+            if sonoro_gamesv_logic::handlers::misc::is_entity_blocked_by_locked_level_play(
+                &eval_ctx,
+                sc.instance_id,
+                cfg_id,
+            ) {
+                return Ok(EntityInteractResponse {
+                    ErrorCode: Some(ErrorCode::ErrLevelPlayNotCreate),
+                    Interacting: false,
+                });
+            }
+        }
+    }
     if try_unlock_teleporter_for_interaction(state, req.EntityId)? {
         let mut scene = state.scene.take();
         if let Some(sc) = scene.as_mut() {
