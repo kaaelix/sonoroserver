@@ -391,11 +391,10 @@ fn load_pay_gift_items(dir: &Path) -> BTreeMap<i32, i32> {
     res
 }
 
-fn format_usd(amount: f64) -> String {
+fn format_amount(amount: f64) -> String {
     let rounded = (amount * 100.0).round() / 100.0;
     let s = format!("{rounded:.2}");
-    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-    format!("${trimmed}")
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 fn load_pay_items(dir: &Path) -> Vec<PayItemDef> {
@@ -414,7 +413,7 @@ fn load_pay_items(dir: &Path) -> Vec<PayItemDef> {
             .map(str::to_string)
             .unwrap_or_else(|| format!("com.kurogame.aki.pay{pay_id}"));
         let amt = el.get("Amount").and_then(Value::as_f64).unwrap_or(0.99);
-        pay_meta.insert(pay_id, (prod, format_usd(amt)));
+        pay_meta.insert(pay_id, (prod, format_amount(amt)));
     }
 
     let mut res = Vec::new();
@@ -438,7 +437,7 @@ fn load_pay_items(dir: &Path) -> Vec<PayItemDef> {
         let (product_id, amount) = pay_meta
             .get(&pay_id)
             .cloned()
-            .unwrap_or_else(|| (format!("com.kurogame.aki.pay{pay_id}"), "$0.99".into()));
+            .unwrap_or_else(|| (format!("com.kurogame.aki.pay{pay_id}"), "0.99".into()));
 
         res.push(PayItemDef {
             id,
@@ -452,6 +451,7 @@ fn load_pay_items(dir: &Path) -> Vec<PayItemDef> {
             amount,
         });
     }
+    res.sort_by_key(|item| item.id);
     res
 }
 

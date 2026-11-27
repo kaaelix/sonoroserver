@@ -222,7 +222,7 @@
         <button id="copyKeyBtn" onclick="copyAccessKey()" title="Copy personal browser access key" style="display:none">Copy key</button>
         <button id="rotateKeyBtn" onclick="rotateAccessKey()" title="Invalidate old keys and generate a new one" style="display:none">New key</button>
         <button id="adminBtn" onclick="promptAdmin()" title="Admin / multi-player mode">Admin</button>
-        <button onclick="closeWebView()" title="Close WebView (ESC on PC)">Close</button>
+        <button id="closeBtn" type="button" onclick="closeWebView()" title="Close WebView (ESC on PC)">Close</button>
       </div>
     </div>
   </aside>
@@ -628,15 +628,123 @@ function showTab(name){
   if(name==='roles' && !roleCatCache) loadCatalog('roles');
 }
 
+let _kuroBridgeCbId = 0;
+
+function isKuroAndroid(){ return /android/i.test(navigator.userAgent); }
+function isKuroHarmony(){ return /OpenHarmony/i.test(navigator.userAgent); }
+function isKuroIOSWebView(){
+  return /iphone|ipad|ipod/i.test(navigator.userAgent)
+    || (/mac/i.test(navigator.userAgent) && !!(window.webkit && window.webkit.messageHandlers));
+}
+
+function invokeKuroBridge(handlerName){
+  let handled = false;
+  try{
+    if(typeof window[handlerName] === 'function'){
+      window[handlerName]();
+      handled = true;
+    }
+  }catch(e){}
+  try{
+    const bridge = window.WebViewJavascriptBridge;
+    if(bridge){
+      if(isKuroHarmony() && typeof bridge[handlerName] === 'function'){
+        bridge[handlerName]();
+        handled = true;
+      }else if(typeof bridge.callHandler === 'function'){
+        bridge.callHandler(handlerName);
+        handled = true;
+      }else if(typeof bridge[handlerName] === 'function'){
+        bridge[handlerName]();
+        handled = true;
+      }
+    }
+  }catch(e){}
+  if(!handled && isKuroAndroid()){
+    document.addEventListener('WebViewJavascriptBridgeReady', () => {
+      try{
+        const b = window.WebViewJavascriptBridge;
+        if(b && typeof b.callHandler === 'function') b.callHandler(handlerName);
+        else if(b && typeof b[handlerName] === 'function') b[handlerName]();
+      }catch(e){}
+    }, {once:true});
+  }
+  if(!handled && !isKuroAndroid() && !isKuroHarmony() && isKuroIOSWebView() && !window.WebViewJavascriptBridge){
+    try{
+      const run = (b) => {
+        try{
+          if(b && typeof b.callHandler === 'function') b.callHandler(handlerName);
+          else if(b && typeof b[handlerName] === 'function') b[handlerName]();
+        }catch(e){}
+      };
+      if(window.WVJBCallbacks){
+        window.WVJBCallbacks.push(run);
+      }else{
+        window.WVJBCallbacks = [run];
+        const f = document.createElement('iframe');
+        f.style.display = 'none';
+        f.src = 'https://__bridge_loaded__';
+        (document.documentElement || document.body).appendChild(f);
+        setTimeout(() => { try{ f.remove(); }catch(e){} }, 50);
+      }
+    }catch(e){}
+  }
+  try{
+    if(window.top && window.top !== window){
+      _kuroBridgeCbId += 1;
+      window.top.postMessage({name: handlerName, data: undefined, cbid: _kuroBridgeCbId}, '*');
+      handled = true;
+    }
+  }catch(e){}
+  if(handlerName === 'close_webview'){
+    try{
+      const mh = window.webkit && window.webkit.messageHandlers;
+      if(mh){
+        for(const k of ['close_webview', 'closeWebview', 'closeWebView']){
+          if(mh[k] && typeof mh[k].postMessage === 'function'){
+            mh[k].postMessage(null);
+            handled = true;
+          }
+        }
+      }
+    }catch(e){}
+    try{
+      if(window.chrome && window.chrome.webview && typeof window.chrome.webview.postMessage === 'function'){
+        window.chrome.webview.postMessage(JSON.stringify({action: 'close_webview', event: 'close_webview'}));
+        handled = true;
+      }
+    }catch(e){}
+  }
+  return handled;
+}
+
 function closeWebView(){
-  try{ window.location.href = 'kuro://close'; }catch(e){}
-  try{ window.location.href = 'kurosdk://close'; }catch(e){}
-  try{ window.location.href = 'uniwebview://close'; }catch(e){}
+  if(invokeKuroBridge('close_webview')) return;
   try{ window.close(); }catch(e){}
-  try{ history.back(); }catch(e){}
+  const inGameWebView = urlParams.has('login_info') || urlParams.has('platform') || /;\s*wv\)/i.test(navigator.userAgent);
+  if(inGameWebView){
+    const schemes = ['kuro://close', 'kurosdk://close', 'uniwebview://close'];
+    schemes.forEach((uri, idx) => {
+      setTimeout(() => {
+        try{
+          const f = document.createElement('iframe');
+          f.style.display = 'none';
+          f.src = uri;
+          (document.body || document.documentElement).appendChild(f);
+          setTimeout(() => { try{ f.remove(); }catch(e){} }, 120);
+        }catch(e){}
+      }, idx * 80);
+    });
+  }
 }
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeWebView();
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeWebView();
+  }
+});
+document.addEventListener('DOMContentLoaded', () => {
+  invokeKuroBridge('loading_success');
 });
 
 function formatUid(uid){

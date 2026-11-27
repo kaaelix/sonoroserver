@@ -13,7 +13,7 @@ use sonoro_proto::pb::{
     ShopUpdateResponse, ShoppMoneyInfo,
 };
 
-use super::State;
+use super::{qol, State};
 
 struct PayCatalogItem {
     id: i32,
@@ -27,30 +27,66 @@ struct PayCatalogItem {
 }
 
 const DEFAULT_PAY_CATALOG: &[PayCatalogItem] = &[
+    // Purchase (Shop 100): 1:1 Lunite -> Astrite exchange entry
     PayCatalogItem { id: 10001, shop_id: 100, tab_id: 1, item_id: 3, item_count: 1, price_id: 4, price_count: 1, buy_limit: -1 },
+    // Bundles (Shop 3): Lunite-purchasable supply bundles alongside USD PayGift packs
+    PayCatalogItem { id: 30001, shop_id: 3, tab_id: 2, item_id: 52001, item_count: 1, price_id: 4, price_count: 980, buy_limit: 1 },
+    PayCatalogItem { id: 30002, shop_id: 3, tab_id: 2, item_id: 52002, item_count: 1, price_id: 4, price_count: 680, buy_limit: 1 },
+    PayCatalogItem { id: 30003, shop_id: 3, tab_id: 1, item_id: 51006, item_count: 1, price_id: 4, price_count: 300, buy_limit: 5 },
+    PayCatalogItem { id: 30004, shop_id: 3, tab_id: 1, item_id: 51007, item_count: 1, price_id: 4, price_count: 680, buy_limit: 5 },
+    // Item Exchange (Shop 4) — Tab 1: Afterglow Coral (50004)
     PayCatalogItem { id: 40001, shop_id: 4, tab_id: 1, item_id: 50001, item_count: 1, price_id: 50004, price_count: 8, buy_limit: -1 },
     PayCatalogItem { id: 40002, shop_id: 4, tab_id: 1, item_id: 50005, item_count: 1, price_id: 50004, price_count: 8, buy_limit: -1 },
     PayCatalogItem { id: 40003, shop_id: 4, tab_id: 1, item_id: 50002, item_count: 1, price_id: 50004, price_count: 8, buy_limit: -1 },
+    PayCatalogItem { id: 40010, shop_id: 4, tab_id: 1, item_id: 10001503, item_count: 1, price_id: 50004, price_count: 360, buy_limit: 2 },
+    PayCatalogItem { id: 40011, shop_id: 4, tab_id: 1, item_id: 10001203, item_count: 1, price_id: 50004, price_count: 360, buy_limit: 2 },
+    PayCatalogItem { id: 40012, shop_id: 4, tab_id: 1, item_id: 10001301, item_count: 1, price_id: 50004, price_count: 360, buy_limit: 2 },
+    PayCatalogItem { id: 40013, shop_id: 4, tab_id: 1, item_id: 10001104, item_count: 1, price_id: 50004, price_count: 360, buy_limit: 2 },
+    PayCatalogItem { id: 40014, shop_id: 4, tab_id: 1, item_id: 10001404, item_count: 1, price_id: 50004, price_count: 360, buy_limit: 2 },
+    PayCatalogItem { id: 40015, shop_id: 4, tab_id: 1, item_id: 10001102, item_count: 1, price_id: 50004, price_count: 80, buy_limit: 2 },
+    PayCatalogItem { id: 40016, shop_id: 4, tab_id: 1, item_id: 10001204, item_count: 1, price_id: 50004, price_count: 80, buy_limit: 2 },
+    // Item Exchange (Shop 4) — Tab 2: Oscillated Coral (50003)
     PayCatalogItem { id: 40004, shop_id: 4, tab_id: 2, item_id: 50001, item_count: 1, price_id: 50003, price_count: 70, buy_limit: 7 },
     PayCatalogItem { id: 40005, shop_id: 4, tab_id: 2, item_id: 50005, item_count: 1, price_id: 50003, price_count: 70, buy_limit: 7 },
     PayCatalogItem { id: 40006, shop_id: 4, tab_id: 2, item_id: 50002, item_count: 1, price_id: 50003, price_count: 70, buy_limit: 7 },
-    PayCatalogItem { id: 30001, shop_id: 3, tab_id: 1, item_id: 50014, item_count: 1, price_id: 3, price_count: 160, buy_limit: 5 },
-    PayCatalogItem { id: 30002, shop_id: 3, tab_id: 2, item_id: 50015, item_count: 1, price_id: 3, price_count: 320, buy_limit: 5 },
-    PayCatalogItem { id: 30003, shop_id: 3, tab_id: 3, item_id: 51006, item_count: 1, price_id: 4, price_count: 300, buy_limit: 5 },
-    PayCatalogItem { id: 30004, shop_id: 3, tab_id: 4, item_id: 51007, item_count: 1, price_id: 4, price_count: 680, buy_limit: 5 },
+    PayCatalogItem { id: 40020, shop_id: 4, tab_id: 2, item_id: 43010003, item_count: 1, price_id: 50003, price_count: 12, buy_limit: 40 },
+    PayCatalogItem { id: 40021, shop_id: 4, tab_id: 2, item_id: 43020003, item_count: 1, price_id: 50003, price_count: 12, buy_limit: 40 },
+    PayCatalogItem { id: 40022, shop_id: 4, tab_id: 2, item_id: 36000003, item_count: 1, price_id: 50003, price_count: 12, buy_limit: 40 },
+    PayCatalogItem { id: 40023, shop_id: 4, tab_id: 2, item_id: 36000014, item_count: 10, price_id: 50003, price_count: 30, buy_limit: 10 },
+    PayCatalogItem { id: 40024, shop_id: 4, tab_id: 2, item_id: 2, item_count: 10_000, price_id: 50003, price_count: 6, buy_limit: 50 },
+    PayCatalogItem { id: 40025, shop_id: 4, tab_id: 2, item_id: 41100013, item_count: 1, price_id: 50003, price_count: 10, buy_limit: 30 },
+    // Item Exchange (Shop 4) — Tab 3: Astrite Exchange (3)
     PayCatalogItem { id: 104300001, shop_id: 4, tab_id: 3, item_id: 50002, item_count: 1, price_id: 3, price_count: 160, buy_limit: -1 },
     PayCatalogItem { id: 104300002, shop_id: 4, tab_id: 3, item_id: 50005, item_count: 1, price_id: 3, price_count: 160, buy_limit: -1 },
     PayCatalogItem { id: 104300003, shop_id: 4, tab_id: 3, item_id: 50001, item_count: 1, price_id: 3, price_count: 160, buy_limit: -1 },
     PayCatalogItem { id: 104300004, shop_id: 4, tab_id: 3, item_id: 50007, item_count: 1, price_id: 3, price_count: 160, buy_limit: -1 },
     PayCatalogItem { id: 104300005, shop_id: 4, tab_id: 3, item_id: 50008, item_count: 1, price_id: 3, price_count: 160, buy_limit: -1 },
-    PayCatalogItem { id: 106100007, shop_id: 6, tab_id: 3, item_id: 53009, item_count: 1, price_id: 4, price_count: 1680, buy_limit: 1 },
-    PayCatalogItem { id: 106100008, shop_id: 6, tab_id: 3, item_id: 53010, item_count: 1, price_id: 4, price_count: 1680, buy_limit: 1 },
+    // Points Shop (Shop 5): Hazard Record (12) & Data Set (34, 11)
+    PayCatalogItem { id: 50001, shop_id: 5, tab_id: 1, item_id: 36000004, item_count: 1, price_id: 12, price_count: 60, buy_limit: 20 },
+    PayCatalogItem { id: 50002, shop_id: 5, tab_id: 1, item_id: 36000014, item_count: 10, price_id: 12, price_count: 40, buy_limit: 20 },
+    PayCatalogItem { id: 50003, shop_id: 5, tab_id: 1, item_id: 43010003, item_count: 1, price_id: 12, price_count: 25, buy_limit: 40 },
+    PayCatalogItem { id: 50004, shop_id: 5, tab_id: 1, item_id: 43020003, item_count: 1, price_id: 12, price_count: 25, buy_limit: 40 },
+    PayCatalogItem { id: 50005, shop_id: 5, tab_id: 1, item_id: 2, item_count: 10_000, price_id: 12, price_count: 20, buy_limit: 50 },
+    PayCatalogItem { id: 50006, shop_id: 5, tab_id: 2, item_id: 36000004, item_count: 1, price_id: 34, price_count: 50, buy_limit: 20 },
+    PayCatalogItem { id: 50007, shop_id: 5, tab_id: 2, item_id: 36000014, item_count: 10, price_id: 34, price_count: 30, buy_limit: 20 },
+    PayCatalogItem { id: 50008, shop_id: 5, tab_id: 3, item_id: 43010003, item_count: 1, price_id: 11, price_count: 20, buy_limit: 30 },
+    // Outfits (Shop 6) — Tab 1: RoleSkinTabView (must be tab_id: 1, not 3 which is MotorSkinTabView)
+    PayCatalogItem { id: 106100001, shop_id: 6, tab_id: 1, item_id: 53001, item_count: 1, price_id: 4, price_count: 3280, buy_limit: 1 },
+    PayCatalogItem { id: 106100002, shop_id: 6, tab_id: 1, item_id: 53002, item_count: 1, price_id: 4, price_count: 1680, buy_limit: 1 },
+    PayCatalogItem { id: 106100003, shop_id: 6, tab_id: 1, item_id: 53003, item_count: 1, price_id: 4, price_count: 2480, buy_limit: 1 },
+    PayCatalogItem { id: 106100004, shop_id: 6, tab_id: 1, item_id: 53004, item_count: 1, price_id: 4, price_count: 2480, buy_limit: 1 },
+    PayCatalogItem { id: 106100005, shop_id: 6, tab_id: 1, item_id: 53005, item_count: 1, price_id: 4, price_count: 2480, buy_limit: 1 },
+    PayCatalogItem { id: 106100006, shop_id: 6, tab_id: 1, item_id: 53008, item_count: 1, price_id: 4, price_count: 1680, buy_limit: 1 },
+    PayCatalogItem { id: 106100007, shop_id: 6, tab_id: 1, item_id: 53009, item_count: 1, price_id: 4, price_count: 1680, buy_limit: 1 },
+    PayCatalogItem { id: 106100008, shop_id: 6, tab_id: 1, item_id: 53010, item_count: 1, price_id: 4, price_count: 1680, buy_limit: 1 },
+    PayCatalogItem { id: 106100009, shop_id: 6, tab_id: 1, item_id: 53011, item_count: 1, price_id: 4, price_count: 1680, buy_limit: 1 },
 ];
 
 fn recommend_tab_image(r: &PayShopRecommend) -> &'static [u8] {
     match r.PrefabPath.as_str() {
         "UiItem_ShopSkinQianXiao" => b"T_ShopTabRoleQianxiao1",
         "UiItem_ShopSkinLinNai" => b"T_ShopTabRoleLinnai1",
+        "UiItem_ShopSkinFeixue" => b"T_ShopTabRoleFeixue1",
         "UiItem_ShopSkinMoNing" => b"T_ShopTabRoleMoning",
         "UiItem_ShopSkinMoto" => b"T_ShopTabMoto",
         "UiItem_ShopSkinMotoFeixue" => b"T_ShopTabMotorFeixue",
@@ -59,8 +95,75 @@ fn recommend_tab_image(r: &PayShopRecommend) -> &'static [u8] {
     }
 }
 
-fn build_pay_shop_item_pb(entry: &PayCatalogItem, bought_count: i32) -> PayShopItem {
+/// Client subtab widgets call `SetText(..., true)` literally without `SetLocalTextNew`,
+/// so resolve raw table keys to readable live Store labels.
+fn localize_shop_tab_name(shop_id: i32, tab_id: i32, raw: &str) -> Vec<u8> {
+    let text = match (shop_id, tab_id) {
+        (1, 1) => "Featured",
+        (1, 2) => "Recommended",
+        (3, 1) => "Featured Bundles",
+        (3, 2) => "Permanent Bundles",
+        (3, 3) => "Special Bundles",
+        (3, 4) => "Growth Bundles",
+        (3, 5) => "Supply Bundles",
+        (4, 1) => "Afterglow Coral",
+        (4, 2) => "Oscillated Coral",
+        (4, 3) => "Astrite Exchange",
+        (4, 4) => "Resonance Exchange",
+        (5, 1) => "Hazard Record",
+        (5, 2) => "Tactical Hologram",
+        (5, 3) => "Thousand Gateways",
+        (5, 4) => "Pioneer Exchange",
+        (5, 5) => "Event Points",
+        (6, 1) => "Outfits",
+        (6, 2) => "Flight Aspects",
+        (6, 3) => "Motorbike Coatings",
+        (6, 4) => "Accessories",
+        (7, 1) => "Voyager Supply",
+        (7, 2) => "Starter Bundles",
+        (7, 3) => "Growth Supply",
+        (100, _) => "Lunite Purchase",
+        _ if raw.contains("Rogue") => "Supply Exchange",
+        _ => raw,
+    };
+    text.as_bytes().to_vec()
+}
+
+/// Resolves `PayShopRecommend.TabName` keys since `PayShopRecommendSwitchItem` uses literal `SetText`.
+fn localize_recommend_tab_name(r: &PayShopRecommend) -> Vec<u8> {
+    let text = match r.Id {
+        1 => "Lunite Subscription",
+        2 => "Laurel Nymph",
+        3 => "Splashing Summer",
+        4 => "Zani Outfit",
+        5 => "15-Day Supply",
+        6 => "Motorbike Frame I",
+        7 => "Feixue Motorbike",
+        8 => "Mornye Outfit",
+        9 => "Chisa Outfit",
+        10 => "Lynae Outfit",
+        11 => "Yangyang Motorbike",
+        12 => "Feixue Outfit",
+        _ => r.TabName.as_str(),
+    };
+    text.as_bytes().to_vec()
+}
+
+fn build_pay_shop_item_pb(entry: &PayCatalogItem, sort: i32, bought_count: i32) -> PayShopItem {
     let sold_out = entry.buy_limit > 0 && bought_count >= entry.buy_limit;
+    let is_monthly = entry.buy_limit > 0 && entry.shop_id == 4 && entry.tab_id == 2;
+    let update_type = if is_monthly {
+        PayUpdateType::Monthly
+    } else if entry.buy_limit > 0 {
+        PayUpdateType::Forever
+    } else {
+        PayUpdateType::None
+    };
+    let update_time = if is_monthly {
+        energy::now_seconds() + 30 * 86_400
+    } else {
+        0
+    };
     PayShopItem {
         Id: entry.id,
         ItemId: entry.item_id,
@@ -73,19 +176,17 @@ fn build_pay_shop_item_pb(entry: &PayCatalogItem, bought_count: i32) -> PayShopI
             Count: entry.price_count,
             PromotionCount: entry.price_count,
         }),
-        UpdateType: Some(if entry.buy_limit > 0 {
-            PayUpdateType::Monthly
-        } else {
-            PayUpdateType::Forever
-        }),
+        UpdateType: Some(update_type),
+        UpdateTime: update_time,
         ShopItemType: Some(PayShopItemType::Normal),
         CanBuyGoods: !sold_out,
         TabId: entry.tab_id,
         ShopId: entry.shop_id,
+        Sort: sort,
         SoldOut: sold_out,
         Show: true,
         Quality: 0,
-        IsBuyMaxButton: true,
+        IsBuyMaxButton: entry.buy_limit != 1,
         ..Default::default()
     }
 }
@@ -93,10 +194,11 @@ fn build_pay_shop_item_pb(entry: &PayCatalogItem, bought_count: i32) -> PayShopI
 fn build_pay_shop_info(shop_cfg: &PayShop, progress: &ProgressInfo) -> PayShopInfo {
     let items = DEFAULT_PAY_CATALOG
         .iter()
-        .filter(|entry| entry.shop_id == shop_cfg.Id)
-        .map(|entry| {
+        .enumerate()
+        .filter(|(_, entry)| entry.shop_id == shop_cfg.Id)
+        .map(|(idx, entry)| {
             let bought = ProgressInfo::get_id_count(&progress.shop.payshop_bought, entry.id);
-            build_pay_shop_item_pb(entry, bought)
+            build_pay_shop_item_pb(entry, (idx + 1) as i32, bought)
         })
         .collect();
 
@@ -114,16 +216,15 @@ fn build_pay_shop_info(shop_cfg: &PayShop, progress: &ProgressInfo) -> PayShopIn
 
 pub fn handle_pay_shop_info_request(
     state: &mut State,
-    _req: PayShopInfoRequest,
+    req: PayShopInfoRequest,
 ) -> Result<PayShopInfoResponse, String> {
-    let progress = &state.player_components.progress.info;
     let infos = state
         .assets
         .tables
         .pay_shop
         .items
         .iter()
-        .map(|shop_cfg| build_pay_shop_info(shop_cfg, progress))
+        .map(|shop_cfg| build_pay_shop_info(shop_cfg, &state.player_components.progress.info))
         .collect();
 
     let tabs = state
@@ -136,7 +237,7 @@ pub fn handle_pay_shop_info_request(
             ShopId: t.ShopId,
             TabId: t.TabId,
             Sort: t.Sort,
-            name: t.Name.as_bytes().to_vec(),
+            name: localize_shop_tab_name(t.ShopId, t.TabId, &t.Name),
             Logic: t.Logic,
             Enable: t.Enable,
             ..Default::default()
@@ -149,24 +250,30 @@ pub fn handle_pay_shop_info_request(
         .pay_shop_recommend
         .items
         .iter()
-        .filter(|r| r.Show && !r.PrefabPath.is_empty())
+        .filter(|r| r.Show)
         .map(|r| ShopRecommend {
             Id: r.Id,
             RecommendType: r.RecommendType,
             RecommendId: r.RecommendId,
-            TabName: r.TabName.as_bytes().to_vec(),
-            PrefabPath: r.PrefabPath.as_bytes().to_vec(),
+            TabName: localize_recommend_tab_name(r),
+            PrefabPath: if r.PrefabPath.is_empty() {
+                b"UiItem_MonthlyCardStore".to_vec()
+            } else {
+                r.PrefabPath.as_bytes().to_vec()
+            },
             Sort: r.Sort,
             Show: r.Show,
             TabImage: recommend_tab_image(r).to_vec(),
         })
         .collect();
 
+    let pay_gift_shop_info = qol::build_pay_gift_shop_info(state, req.Version);
+
     Ok(PayShopInfoResponse {
         Infos: infos,
         Version: b"3.8.11".to_vec(),
         ErrorCode: Some(ErrorCode::Success),
-        PayGiftShopInfo: None,
+        PayGiftShopInfo: Some(pay_gift_shop_info),
         PayShopTabData: tabs,
         PayShopRecommendData: recs,
     })
@@ -196,10 +303,10 @@ pub fn handle_pay_shop_item_update_request(
     let progress = &state.player_components.progress.info;
     let mut items = Vec::new();
     for id in req.ShopItemIds {
-        for entry in DEFAULT_PAY_CATALOG {
+        for (idx, entry) in DEFAULT_PAY_CATALOG.iter().enumerate() {
             if entry.id == id {
                 let bought = ProgressInfo::get_id_count(&progress.shop.payshop_bought, id);
-                items.push(build_pay_shop_item_pb(entry, bought));
+                items.push(build_pay_shop_item_pb(entry, (idx + 1) as i32, bought));
             }
         }
     }

@@ -76,8 +76,8 @@ use sonoro_proto::pb::{
     KurotatoSyncEntityDealDamagePush, LandingDamageRequest, LowMemoryChangeSceneFinishRequest,
     LowMemoryChangeSceneStartNotify, MonsterDetectionInfoRequest, MonthCardRequest,
     MotorCycleCruiseStatePush, MotorFightRankListRequest, MotorSummonAndRidePush,
-    AddPlacementNotify, NewTowerRecommendRequest, OperationRestrictionNotify, PayInfoRequest,
-    PayShopInfoRequest, PhantomBattleCallCardRequest, PhantomBattleStartRequest,
+    AddPlacementNotify, NewTowerRecommendRequest, OperationRestrictionNotify, PayGiftInfoRequest,
+    PayInfoRequest, PayShopInfoRequest, PhantomBattleCallCardRequest, PhantomBattleStartRequest,
     PhantomFetterRecommendRequest, PhantomMusicSwitchRequest, PinballFriendRankRequest,
     PlaceItemOnBoardRequest, PlayerAccessRangeRequest, PlayerDeadNotify,
     PrivateChatHistoryRequest, PrivateChatRequest, QuestReadyListNotify, RacingBetsRankRequest,
@@ -9218,6 +9218,143 @@ fn audit_155_throwable_pilot_throw_attributes_and_timeline_pb() {
         Some(EntityComponentPbComponentPbOneof::RoadNetworkComponentPb(rn)) if rn.DestRoadId == 12 && rn.DestIndex == 3
     )));
 }
+
+#[test]
+fn audit_156_live_store_pay_shop_gifts_and_topup() {
+    let mut h = TestHarness::new("audit_156_store", Some(8));
+
+    let shop_resp =
+        shop::handle_pay_shop_info_request(&mut h.state, PayShopInfoRequest::default())
+            .expect("pay_shop_info");
+    assert_eq!(shop_resp.ErrorCode, Some(ErrorCode::Success));
+
+    // 1. Recommended includes MonthCard (Id 1, RecommendType 1) & Feixue (Id 12, RecommendId 106100009),
+    // with localized TabNames instead of raw PrefabTextItem_* keys.
+    assert!(shop_resp
+        .PayShopRecommendData
+        .iter()
+        .any(|r| r.Id == 1 && r.RecommendType == 1 && !r.PrefabPath.is_empty()));
+    let feixue_rec = shop_resp
+        .PayShopRecommendData
+        .iter()
+        .find(|r| r.Id == 12 && r.RecommendId == 106_100_009)
+        .expect("Feixue skin recommend entry");
+    assert_eq!(feixue_rec.TabImage, b"T_ShopTabRoleFeixue1");
+    for rec in &shop_resp.PayShopRecommendData {
+        let name = String::from_utf8_lossy(&rec.TabName);
+        assert!(
+            !name.starts_with("PrefabTextItem_"),
+            "raw recommend key leaked: {name}"
+        );
+    }
+
+    // 2. Subtab labels for core Store tabs are localized instead of raw PayShopTab_* keys.
+    for tab in &shop_resp.PayShopTabData {
+        if matches!(tab.ShopId, 1 | 3 | 4 | 5 | 6 | 7 | 100) {
+            let name = String::from_utf8_lossy(&tab.name);
+            assert!(
+                !name.starts_with("PayShopTab_"),
+                "raw PayShopTab key leaked for shop={} tab={}: {name}",
+                tab.ShopId,
+                tab.TabId
+            );
+        }
+    }
+
+    // 3. Shop 4 (Item Exchange), Shop 5 (Points Shop), and Shop 6 (Outfits tab 1) have live items.
+    let shop4 = shop_resp
+        .Infos
+        .iter()
+        .find(|s| s.Id == 4)
+        .expect("Shop 4");
+    assert!(shop4.Items.iter().any(|it| it.TabId == 1 && it.ItemId == 10_001_503));
+    assert!(shop4.Items.iter().any(|it| it.TabId == 2 && it.ItemId == 43_010_003));
+    assert!(shop4.Items.iter().any(|it| it.TabId == 3 && it.Id == 104_300_001));
+
+    let shop5 = shop_resp
+        .Infos
+        .iter()
+        .find(|s| s.Id == 5)
+        .expect("Shop 5");
+    assert!(shop5.Items.iter().any(|it| it.TabId == 1));
+    assert!(shop5.Items.iter().any(|it| it.TabId == 2));
+    assert!(shop5.Items.iter().any(|it| it.TabId == 3));
+
+    let shop6 = shop_resp
+        .Infos
+        .iter()
+        .find(|s| s.Id == 6)
+        .expect("Shop 6");
+    assert!(shop6
+        .Items
+        .iter()
+        .any(|it| it.Id == 106_100_009 && it.ItemId == 53011 && it.TabId == 1));
+    assert!(shop6
+        .Items
+        .iter()
+        .all(|it| it.TabId == 1));
+
+    // 4. Embedded PayGiftShopInfo and standalone PayGiftInfoRequest return valid ItemId / ShopId / numeric Amount.
+    let gift_shop = shop_resp
+        .PayGiftShopInfo
+        .as_ref()
+        .expect("PayGiftShopInfo must be embedded in PayShopInfoResponse");
+    assert!(!gift_shop.Gifts.is_empty());
+
+    let gift_resp =
+        qol::handle_pay_gift_info_request(&mut h.state, PayGiftInfoRequest::default())
+            .expect("pay_gift_info");
+    assert_eq!(gift_resp.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(gift_resp.Infos.len(), gift_shop.Gifts.len());
+    for g in &gift_resp.Infos {
+        assert!(g.ItemId > 0, "PayGift {} must have ItemId > 0", g.Id);
+        assert!(
+            matches!(g.ShopId, 0 | 3 | 7),
+            "PayGift {} has invalid ShopId {}",
+            g.Id,
+            g.ShopId
+        );
+        let amt = String::from_utf8_lossy(&g.Amount);
+        assert!(!amt.starts_with('$'), "PayGift {} amount must be numeric: {amt}", g.Id);
+        assert!(!g.ProductId.is_empty());
+    }
+    assert!(gift_resp.Infos.iter().any(|g| g.Id == 42 && g.ItemId == 50011 && g.Type == 1));
+    assert!(gift_resp
+        .Infos
+        .iter()
+        .any(|g| g.Id == 105_100_101 && g.ShopId == 0 && g.TabId == 2));
+
+    // 5. Purchase (PayInfoRequest) returns the 6 standard packs with numeric USD amounts.
+    let pay_info =
+        minimal::handle_pay_info_request(&mut h.state, PayInfoRequest::default())
+            .expect("pay_info");
+    assert_eq!(pay_info.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(pay_info.Infos.len(), 6);
+    let expected_amounts = ["0.99", "4.99", "14.99", "29.99", "49.99", "99.99"];
+    for (idx, (info, expected_amt)) in pay_info
+        .Infos
+        .iter()
+        .zip(expected_amounts.iter())
+        .enumerate()
+    {
+        assert_eq!(info.Id, (idx + 1) as i32);
+        assert_eq!(String::from_utf8_lossy(&info.Amount), *expected_amt);
+    }
+}
+
+#[test]
+fn audit_157_gm_panel_webview_close_bridge() {
+    let html = include_str!("../network/gm_panel.html");
+    assert!(html.contains("id=\"closeBtn\" type=\"button\" onclick=\"closeWebView()\""));
+    assert!(html.contains("window[handlerName]()"));
+    assert!(html.contains("window.WebViewJavascriptBridge"));
+    assert!(html.contains("WebViewJavascriptBridgeReady"));
+    assert!(html.contains("https://__bridge_loaded__"));
+    assert!(html.contains("invokeKuroBridge('close_webview')"));
+    assert!(html.contains("invokeKuroBridge('loading_success')"));
+    assert!(!html.contains("window.location.href = 'kuro://close'"));
+}
+
 
 
 

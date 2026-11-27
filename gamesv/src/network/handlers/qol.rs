@@ -1,9 +1,10 @@
+use sonoro_gamesv_data::inline_tables::PayGiftCfg;
 use sonoro_gamesv_data::reward_index::composite_key;
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_logic::component::player::PlayerProgressComponent;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::{consume, energy, pb_kv, quest_engine, reward};
-use sonoro_proto::enums::{BattlePassPayStatus, BattlePassType, ErrorCode};
+use sonoro_proto::enums::{BattlePassPayStatus, BattlePassType, ErrorCode, PayUpdateType};
 use sonoro_proto::pb::{
     BattlePassEnterPush, BattlePassExpUpdateNotify, BattlePassLevelUpRequest,
     BattlePassLevelUpResponse, BattlePassRecurringTakeRequest, BattlePassRecurringTakeResponse,
@@ -17,7 +18,8 @@ use sonoro_proto::pb::{
     GachaAccumulateRewardResponse, InfluenceInfo, InfluenceInfoRequest, InfluenceInfoResponse,
     InfluenceRewardRequest, InfluenceRewardResponse, MonthCardRequest, MonthCardResponse,
     PayGiftInfo, PayGiftInfoRequest, PayGiftInfoResponse, PayGiftRequest, PayGiftResponse,
-    PayItemRequest, PayItemResponse, PayShopDirectBuyNotify, PayShopDirectBuyRequest,
+    PayGiftShopInfo, PayGiftSuccessNotify, PayItemRequest, PayItemResponse,
+    PayItemSuccessNotify, PayShopDirectBuyNotify, PayShopDirectBuyRequest,
     PayShopDirectBuyResponse, PbBattlePass, PbBattlePassReward, PbBattlePassTask,
     RoleFavorUnLockRequest, RoleFavorUnLockResponse, RoleGiftRewardRequest,
     RoleGiftRewardResponse, RoleMotionUnLockRequest, RoleMotionUnLockResponse, RoleTrainRequest,
@@ -1062,40 +1064,319 @@ pub fn handle_week_card_reward_request(
     })
 }
 
+struct PayGiftMeta {
+    shop_id: i32,
+    tab_id: i32,
+    gift_type: i32,
+    pay_id: i32,
+    buy_limit: i32,
+    update_type: PayUpdateType,
+    is_active: bool,
+}
+
+/// Formats a USD price as a plain numeric string without currency symbol prefixes
+/// because the client prepends `$` itself in `PayItemConfig.GetPayShow`.
+pub fn format_pay_amount(amount: f64) -> String {
+    let rounded = (amount * 100.0).round() / 100.0;
+    let s = format!("{rounded:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Resolves `(ProductId, Amount)` for `pay_id`, preferring global USD (`Default`,
+/// then `SEA` / `America`) and `Amount` before `GlobalAmount` placeholders.
+pub fn resolve_pay_pricing(
+    assets: &Assets,
+    pay_id: i32,
+    fallback_prefix: &str,
+) -> (String, String) {
+    let items = &assets.tables.pay.items;
+    let pay_cfg = items
+        .iter()
+        .find(|p| p.PayId == pay_id && p.Region == "Default")
+        .or_else(|| items.iter().find(|p| p.PayId == pay_id && p.Region == "SEA"))
+        .or_else(|| {
+            items
+                .iter()
+                .find(|p| p.PayId == pay_id && p.Region == "America")
+        })
+        .or_else(|| items.iter().find(|p| p.PayId == pay_id));
+    match pay_cfg {
+        Some(p) => {
+            let prod = if p.ProductId.is_empty() {
+                format!("{fallback_prefix}{pay_id}")
+            } else {
+                p.ProductId.clone()
+            };
+            let amt = if p.Amount > 0.0 {
+                p.Amount
+            } else if p.GlobalAmount > 0.0 {
+                p.GlobalAmount
+            } else {
+                0.99
+            };
+            (prod, format_pay_amount(amt))
+        }
+        None => (format!("{fallback_prefix}{pay_id}"), "0.99".to_string()),
+    }
+}
+
+fn infer_bundle_pay_id(assets: &Assets, item_id: i32) -> i32 {
+    let pkg = assets
+        .tables
+        .item_info
+        .get_data_by_id(&item_id)
+        .and_then(|cfg| {
+            cfg.Parameters
+                .get(&4)
+                .copied()
+                .or_else(|| cfg.Parameters.get(&2).copied())
+        })
+        .and_then(|pkg_id| assets.tables.gift_package.get_data_by_id(&pkg_id));
+    let Some(pkg) = pkg else {
+        return 23;
+    };
+    let mut tides = 0i32;
+    let mut astrite = 0i32;
+    for (&k, &v) in pkg.Content.iter() {
+        match k {
+            50001 | 50002 | 50005 => tides += v,
+            3 => astrite += v,
+            _ => {}
+        }
+    }
+    if tides >= 15 {
+        26
+    } else if tides >= 10 {
+        25
+    } else if tides >= 5 {
+        24
+    } else if tides >= 2 || astrite >= 500 {
+        23
+    } else if astrite >= 300 {
+        22
+    } else if astrite >= 120 {
+        21
+    } else {
+        20
+    }
+}
+
+fn classify_pay_gift(assets: &Assets, cfg: &PayGiftCfg) -> PayGiftMeta {
+    match cfg.Id {
+        42 => PayGiftMeta {
+            shop_id: 3,
+            tab_id: 0,
+            gift_type: 1,
+            pay_id: 15,
+            buy_limit: 1,
+            update_type: PayUpdateType::None,
+            is_active: true,
+        },
+        43 => PayGiftMeta {
+            shop_id: 3,
+            tab_id: 0,
+            gift_type: 2,
+            pay_id: 16,
+            buy_limit: 1,
+            update_type: PayUpdateType::None,
+            is_active: true,
+        },
+        44 => PayGiftMeta {
+            shop_id: 3,
+            tab_id: 0,
+            gift_type: 2,
+            pay_id: 17,
+            buy_limit: 1,
+            update_type: PayUpdateType::None,
+            is_active: true,
+        },
+        45 => PayGiftMeta {
+            shop_id: 3,
+            tab_id: 0,
+            gift_type: 2,
+            pay_id: 18,
+            buy_limit: 1,
+            update_type: PayUpdateType::None,
+            is_active: true,
+        },
+        46 => PayGiftMeta {
+            shop_id: 3,
+            tab_id: 0,
+            gift_type: 6,
+            pay_id: 16,
+            buy_limit: 1,
+            update_type: PayUpdateType::None,
+            is_active: false,
+        },
+        47 => PayGiftMeta {
+            shop_id: 7,
+            tab_id: 1,
+            gift_type: 7,
+            pay_id: 21,
+            buy_limit: 1,
+            update_type: PayUpdateType::None,
+            is_active: true,
+        },
+        48 => PayGiftMeta {
+            shop_id: 7,
+            tab_id: 1,
+            gift_type: 7,
+            pay_id: 23,
+            buy_limit: 1,
+            update_type: PayUpdateType::None,
+            is_active: true,
+        },
+        105_100_101 => PayGiftMeta {
+            shop_id: 0,
+            tab_id: 2,
+            gift_type: 3,
+            pay_id: 24,
+            buy_limit: 1,
+            update_type: PayUpdateType::Forever,
+            is_active: true,
+        },
+        105_100_102..=105_100_999 => PayGiftMeta {
+            shop_id: 0,
+            tab_id: 3,
+            gift_type: 3,
+            pay_id: if matches!(cfg.Id, 105_100_103 | 105_100_108 | 105_100_109) {
+                26
+            } else {
+                24
+            },
+            buy_limit: 1,
+            update_type: PayUpdateType::Forever,
+            is_active: true,
+        },
+        107_100_000..=107_100_999 => PayGiftMeta {
+            shop_id: 0,
+            tab_id: 4,
+            gift_type: 3,
+            pay_id: 22,
+            buy_limit: 1,
+            update_type: PayUpdateType::Forever,
+            is_active: true,
+        },
+        103_102_001..=103_102_999 => PayGiftMeta {
+            shop_id: 3,
+            tab_id: 2,
+            gift_type: 3,
+            pay_id: match cfg.Id {
+                103_102_001 => 26,
+                103_102_002 => 25,
+                103_102_003 => 23,
+                _ => 24,
+            },
+            buy_limit: 1,
+            update_type: PayUpdateType::Forever,
+            is_active: true,
+        },
+        103_101_021..=103_101_099 | 103_103_079..=103_103_999 | 108_100_000..=108_100_999 => {
+            PayGiftMeta {
+                shop_id: 3,
+                tab_id: 1,
+                gift_type: 3,
+                pay_id: infer_bundle_pay_id(assets, cfg.ItemId),
+                buy_limit: if matches!(cfg.Id, 103_103_079 | 103_103_090 | 108_100_101) {
+                    1
+                } else {
+                    3
+                },
+                update_type: PayUpdateType::Monthly,
+                is_active: true,
+            }
+        }
+        104_100_113..=104_100_999 | 106_100_103 => PayGiftMeta {
+            shop_id: 3,
+            tab_id: 4,
+            gift_type: 3,
+            pay_id: infer_bundle_pay_id(assets, cfg.ItemId),
+            buy_limit: 3,
+            update_type: PayUpdateType::Monthly,
+            is_active: true,
+        },
+        _ => PayGiftMeta {
+            shop_id: 3,
+            tab_id: 3,
+            gift_type: 3,
+            pay_id: infer_bundle_pay_id(assets, cfg.ItemId),
+            buy_limit: 1,
+            update_type: PayUpdateType::None,
+            is_active: false,
+        },
+    }
+}
+
+fn build_pay_gift_info(state: &State, cfg: &PayGiftCfg, sort: i32) -> PayGiftInfo {
+    let meta = classify_pay_gift(&state.assets, cfg);
+    let bought = state
+        .player_components
+        .progress
+        .info
+        .get_key_int(&format!("paygift:{}", cfg.Id))
+        .max(0) as i32;
+    let (product_id, amount) =
+        resolve_pay_pricing(&state.assets, meta.pay_id, "com.kurogame.aki.gift");
+    let sold_out = meta.buy_limit > 0 && bought >= meta.buy_limit;
+    let (begin_time, end_time) = if meta.is_active {
+        (1, 2_000_000_000)
+    } else {
+        (1, 2)
+    };
+    let update_time = if matches!(meta.update_type, PayUpdateType::Monthly) && meta.is_active {
+        energy::now_seconds() + 30 * 86_400
+    } else {
+        0
+    };
+    PayGiftInfo {
+        Id: cfg.Id,
+        PayId: meta.pay_id,
+        ItemId: cfg.ItemId,
+        ItemCount: 1,
+        Sort: sort,
+        BuyLimit: meta.buy_limit,
+        BoughtCount: bought,
+        BeginTime: begin_time,
+        EndTime: end_time,
+        ProductId: product_id.into_bytes(),
+        Amount: amount.into_bytes(),
+        TabId: meta.tab_id,
+        Type: meta.gift_type,
+        IsCanBuy: meta.is_active && !sold_out,
+        UpdateType: Some(meta.update_type),
+        UpdateTime: update_time,
+        ShopId: meta.shop_id,
+        ..Default::default()
+    }
+}
+
+/// Builds the full `PayGiftShopInfo` list embedded in `PayShopInfoResponse` and `PayGiftInfoResponse`.
+pub fn build_pay_gift_shop_info(state: &State, version: Vec<u8>) -> PayGiftShopInfo {
+    let mut rows: Vec<&PayGiftCfg> = state.assets.tables.pay_gift.items.iter().collect();
+    rows.sort_by_key(|cfg| cfg.Id);
+    let infos = rows
+        .into_iter()
+        .enumerate()
+        .map(|(idx, cfg)| build_pay_gift_info(state, cfg, (idx + 1) as i32))
+        .collect();
+    PayGiftShopInfo {
+        Gifts: infos,
+        Version: if version.is_empty() {
+            b"3.8.11".to_vec()
+        } else {
+            version
+        },
+    }
+}
+
 pub fn handle_pay_gift_info_request(
     state: &mut State,
     req: PayGiftInfoRequest,
 ) -> Result<PayGiftInfoResponse, String> {
-    let rows = state.assets.reward_index.get_rows("PayGift");
-    let infos = rows
-        .iter()
-        .map(|row| {
-            let gid = row.key as i32;
-            let bought = state
-                .player_components
-                .progress
-                .info
-                .get_key_int(&format!("paygift:{gid}"))
-                .max(0) as i32;
-            PayGiftInfo {
-                Id: gid,
-                PayId: gid,
-                BuyLimit: 99,
-                BoughtCount: bought,
-                BeginTime: 1,
-                EndTime: 2_000_000_000,
-                IsCanBuy: true,
-                ..Default::default()
-            }
-        })
-        .collect();
+    let gift_shop = build_pay_gift_shop_info(state, req.Version);
     Ok(PayGiftInfoResponse {
-        Infos: infos,
-        Version: if req.Version.is_empty() {
-            b"1".to_vec()
-        } else {
-            req.Version
-        },
+        Infos: gift_shop.Gifts,
+        Version: gift_shop.Version,
         ErrorCode: Some(ErrorCode::Success),
     })
 }
@@ -1111,12 +1392,25 @@ pub fn handle_pay_gift_request(
         .progress
         .info
         .add_key_int("topup:score", 300);
+    if req.Id == 42 {
+        let _ = state
+            .player_components
+            .progress
+            .info
+            .add_key_int("month_card:days", 30);
+    }
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
-    let grant_items = if let Some(cfg) = state.assets.tables.pay_gift.get_data_by_id(&req.Id)
+    let gift_cfg = state
+        .assets
+        .tables
+        .pay_gift
+        .get_data_by_id(&req.Id)
+        .map(|c| c.into_owned());
+    let grant_items = if let Some(ref cfg) = gift_cfg
         && cfg.ItemId > 0
     {
         vec![reward::RewardItem {
@@ -1135,8 +1429,22 @@ pub fn handle_pay_gift_request(
             },
         ]
     };
+    let first_grant = grant_items[0];
     let mut rctx = state.reward_context();
     reward::grant_items(&mut rctx, 0, true, &grant_items, 8001).map_err(|e| e.to_string())?;
+    let updated_gift = gift_cfg
+        .as_ref()
+        .map(|cfg| build_pay_gift_info(state, cfg, 1));
+    state.conn.push(
+        PayGiftSuccessNotify::MSG_ID,
+        &PayGiftSuccessNotify {
+            ReceiptId: b"local_receipt".to_vec(),
+            ItemId: first_grant.item_id,
+            ItemCount: first_grant.count,
+            Id: req.Id,
+            PayGiftInfo: updated_gift,
+        },
+    );
     Ok(PayGiftResponse {
         ErrorCode: Some(ErrorCode::Success),
         ReceiptId: b"local_receipt".to_vec(),
@@ -1187,6 +1495,15 @@ pub fn handle_pay_item_request(
         8001,
     )
     .map_err(|e| e.to_string())?;
+    state.conn.push(
+        PayItemSuccessNotify::MSG_ID,
+        &PayItemSuccessNotify {
+            ReceiptId: b"local_receipt".to_vec(),
+            Id: req.Id,
+            ItemCount: total_count,
+            ItemId: item_id,
+        },
+    );
     Ok(PayItemResponse {
         ErrorCode: Some(ErrorCode::Success),
         ReceiptId: b"local_receipt".to_vec(),

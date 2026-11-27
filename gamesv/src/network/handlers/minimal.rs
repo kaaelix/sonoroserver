@@ -854,60 +854,25 @@ pub fn handle_item_exchange_info_request(
     })
 }
 
-fn format_pay_usd(amount: f64) -> String {
-    let rounded = (amount * 100.0).round() / 100.0;
-    let s = format!("{rounded:.2}");
-    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-    format!("${trimmed}")
-}
-
 pub fn handle_pay_info_request(
     state: &mut State,
     req: PayInfoRequest,
 ) -> Result<PayInfoResponse, String> {
-    let infos = state
+    let mut standard_items: Vec<_> = state
         .assets
         .tables
         .pay_item
         .items
         .iter()
+        .filter(|item| (1..=6).contains(&item.Id))
+        .collect();
+    standard_items.sort_by_key(|item| item.Id);
+
+    let infos = standard_items
+        .into_iter()
         .map(|item| {
-            let pay_cfg = state
-                .assets
-                .tables
-                .pay
-                .items
-                .iter()
-                .find(|p| p.PayId == item.PayId && p.Region == "Default")
-                .or_else(|| {
-                    state
-                        .assets
-                        .tables
-                        .pay
-                        .items
-                        .iter()
-                        .find(|p| p.PayId == item.PayId)
-                });
-            let (prod, amt) = match pay_cfg {
-                Some(p) => (
-                    if p.ProductId.is_empty() {
-                        format!("com.kurogame.aki.pay{}", item.PayId)
-                    } else {
-                        p.ProductId.clone()
-                    },
-                    format_pay_usd(if p.GlobalAmount > 0.0 {
-                        p.GlobalAmount
-                    } else if p.Amount > 0.0 {
-                        p.Amount
-                    } else {
-                        0.99
-                    }),
-                ),
-                None => (
-                    format!("com.kurogame.aki.pay{}", item.PayId),
-                    "$0.99".to_string(),
-                ),
-            };
+            let (prod, amt) =
+                super::qol::resolve_pay_pricing(&state.assets, item.PayId, "com.kurogame.aki.pay");
             let first_bought = state
                 .player_components
                 .progress

@@ -170,10 +170,42 @@ pub fn handle_pay_gift_info_request(player_id: i32, _payload: &[u8]) -> AkiResul
         .iter()
         .map(|(&id, &item_id)| PayGiftInfo {
             Id: id,
-            PayId: id,
+            PayId: match id {
+                42 => 15,
+                43 => 16,
+                44 => 17,
+                45 => 18,
+                47 => 21,
+                48 => 23,
+                _ => 24,
+            },
             ItemId: item_id,
             ItemCount: 1,
-            BuyLimit: 99,
+            ShopId: if matches!(id, 47 | 48) {
+                7
+            } else if (105_100_000..=105_100_999).contains(&id)
+                || (107_100_000..=107_100_999).contains(&id)
+            {
+                0
+            } else {
+                3
+            },
+            TabId: match id {
+                47 | 48 => 1,
+                105_100_101 => 2,
+                105_100_102..=105_100_999 => 3,
+                107_100_000..=107_100_999 => 4,
+                103_102_000..=103_102_999 => 2,
+                _ => 1,
+            },
+            Type: match id {
+                42 => 1,
+                43..=45 => 2,
+                46 => 6,
+                47 | 48 => 7,
+                _ => 3,
+            },
+            BuyLimit: 1,
             BoughtCount: bought_map.get(&id).copied().unwrap_or(0),
             BeginTime: 1,
             EndTime: 2_000_000_000,
