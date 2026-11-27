@@ -822,6 +822,19 @@ fn track_range_area(
         .map_err(|e| e.to_string())?;
         *progress_dirty = true;
     }
+    if trigger_events && is_enter {
+        let mut qctx = state.quest_context(events);
+        if sonoro_gamesv_logic::helpers::roll_block::try_launch_for_trigger(
+            &mut qctx,
+            "Range",
+            cfg_id,
+        )
+        .map_err(|e| e.to_string())?
+        {
+            out_results.insert(7, ErrorCode::Success);
+            *progress_dirty = true;
+        }
+    }
 
     if is_enter
         && area_id > 0
@@ -1005,6 +1018,18 @@ pub fn handle_entity_access_range_request(
             {
                 progress_dirty = true;
             }
+        }
+    }
+    if is_enter && prev_count == 0 && next_count > 0 && has_non_role {
+        let mut qctx = state.quest_context(events);
+        if sonoro_gamesv_logic::helpers::roll_block::try_launch_for_trigger(
+            &mut qctx,
+            "Range",
+            resolved.cfg_id,
+        )
+        .map_err(|e| e.to_string())?
+        {
+            progress_dirty = true;
         }
     }
 

@@ -1,6 +1,8 @@
 pub mod attributes;
 pub mod autopilot;
 pub mod buff;
+pub mod alert;
+pub mod roll_block;
 pub mod calabash;
 pub mod condition;
 pub mod consume;

@@ -82,6 +82,8 @@ pub fn action_callbacks<S: PushSink + ?Sized>() -> ActionCallbacks<'static, S> {
         }),
         on_trace_current_quest: Some(|ctx, qid| on_scene_trace(ctx, i64::from(qid))),
         on_var_changed: Some(events::on_var_changed),
+        on_alert_changed: Some(tree::on_alert_state_changed),
+        self_entity_config_id: 0,
     }
 }
 
@@ -993,6 +995,7 @@ pub fn destroy_quest<S: PushSink + ?Sized>(
         scene.clear_deferred_actions_for_owner(quest_id);
         interrupt_active_flow_for_quest(ctx, quest_id);
     }
+    crate::helpers::alert::auto_disable_for_quest(ctx, quest_id)?;
     if !ctx.quest_comp.info.has_active_quest(quest_id) {
         return Ok(());
     }

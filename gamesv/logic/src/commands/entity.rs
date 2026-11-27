@@ -1475,11 +1475,157 @@ fn spawn_with_location_internal<S: PushSink + ?Sized>(
             ExtraEntry::HackManagementComponent(_) => {
                 storage.world_item.hack_target_present = true;
             }
-            ExtraEntry::PullingObjectFoundation(_) => {
+            ExtraEntry::PullingObjectFoundation(pof) => {
                 storage.world_item.pulling_foundation_present = true;
+                if let Some(init_id) = pof
+                    .Config
+                    .as_ref()
+                    .and_then(|c| c.get("InitMatchEntity"))
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| i32::try_from(v).ok())
+                    && init_id > 0
+                {
+                    storage.world_item.pulling_relation_id = init_id;
+                    storage.world_item.pulling_match_index = 1;
+                }
+            }
+            ExtraEntry::JigsawFoundation(jf) => {
+                storage.world_item.board_present = true;
+                storage.world_item.board_can_move = true;
+                for m in &jf.InitMatchList {
+                    let Some(obj) = m.as_object() else {
+                        continue;
+                    };
+                    let item_cfg = obj
+                        .get("EntityId")
+                        .and_then(|v| v.as_i64())
+                        .and_then(|v| i32::try_from(v).ok())
+                        .unwrap_or(0);
+                    if item_cfg > 0
+                        && let Some(idx) = obj.get("Index").and_then(|v| v.as_object())
+                    {
+                        let row = idx
+                            .get("RowIndex")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0) as i32;
+                        let col = idx
+                            .get("ColumnIndex")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0) as i32;
+                        storage.world_item.board_occupied.push(
+                            sonoro_proto::pb::OccupiedBoardGridInfo {
+                                Pos: Some(sonoro_proto::pb::BoardGridPositionInfo {
+                                    Row: row,
+                                    Column: col,
+                                    RotAngle: 0,
+                                }),
+                                OccupyingEntityConfigId: item_cfg,
+                                EntityConfigType: 0,
+                            },
+                        );
+                    }
+                }
             }
             ExtraEntry::SunSpiritGearComponent(_) => {
                 storage.world_item.spirit_gear_present = true;
+            }
+            ExtraEntry::ExhibitComponent(_) => {
+                let item_id = progress_info
+                    .map(|pi| pi.get_key_int(&format!("exhibit:{entity_id}")) as i32)
+                    .filter(|&v| v > 0)
+                    .unwrap_or(0);
+                storage.world_item.exhibition_item_id = Some(item_id);
+            }
+            ExtraEntry::FurnitureSlotComponent(_) => {
+                let slot_id = i32::try_from(entity_id).unwrap_or(0);
+                let persisted = progress_info
+                    .map(|pi| pi.get_key_int(&format!("furn_slot:{entity_id}")) as i32)
+                    .unwrap_or(0);
+                let furn_id = if persisted > 0 {
+                    persisted
+                } else {
+                    assets
+                        .spring_festival_areas
+                        .iter()
+                        .find_map(|area| {
+                            area.DefaultFurnitures
+                                .get(&entity_id.to_string())
+                                .and_then(|d| d.ArrayInt.first().copied())
+                        })
+                        .unwrap_or(0)
+                };
+                storage.world_item.furniture = Some((slot_id, furn_id));
+            }
+            ExtraEntry::DollGrabMachineComponent(dm) => {
+                let belong = dm.BelongType.as_deref().unwrap_or("");
+                let mut can_items: Vec<i32> = Vec::new();
+                for v in &dm.Items {
+                    let uni_id = v
+                        .as_i64()
+                        .or_else(|| v.get("Id").and_then(|x| x.as_i64()))
+                        .or_else(|| v.get("ItemId").and_then(|x| x.as_i64()))
+                        .and_then(|x| i32::try_from(x).ok())
+                        .unwrap_or(0);
+                    let item_id = v
+                        .get("ItemId")
+                        .and_then(|x| x.as_i64())
+                        .and_then(|x| i32::try_from(x).ok())
+                        .unwrap_or(uni_id);
+                    if uni_id <= 0 || can_items.contains(&uni_id) {
+                        continue;
+                    }
+                    let caught_uni = progress_info.is_some_and(|pi| {
+                        pi.get_key_int(&format!("doll:uni:{entity_id}:{uni_id}")) > 0
+                    });
+                    let max_reached = progress_info.is_some_and(|pi| {
+                        let max_cnt = assets
+                            .tables
+                            .doll_grab_items_csv
+                            .get_data_by_id(&item_id)
+                            .map(|c| c.MaxGetCount)
+                            .unwrap_or(0);
+                        max_cnt > 0
+                            && (pi.get_key_int(&format!("doll:cnt:{item_id}")) as i32) >= max_cnt
+                    });
+                    if !caught_uni && !max_reached {
+                        can_items.push(uni_id);
+                    }
+                }
+                if can_items.is_empty() && dm.Items.is_empty() {
+                    for row in assets.tables.doll_grab_items_csv.as_slice() {
+                        if belong.is_empty() || row.ShowcaseBelongType == belong {
+                            let max_reached = progress_info.is_some_and(|pi| {
+                                row.MaxGetCount > 0
+                                    && (pi.get_key_int(&format!("doll:cnt:{}", row.Id)) as i32)
+                                        >= row.MaxGetCount
+                            });
+                            if !max_reached {
+                                can_items.push(row.Id);
+                            }
+                        }
+                    }
+                }
+                let high = progress_info
+                    .map(|pi| pi.get_key_int(&format!("doll:high:{entity_id}")) as i32)
+                    .unwrap_or(0);
+                let acc = progress_info
+                    .map(|pi| pi.get_key_int(&format!("doll:acc:{entity_id}")) as i32)
+                    .unwrap_or(0);
+                storage.world_item.doll_machine = Some((can_items, high, acc));
+            }
+            ExtraEntry::DollGrabShowcaseComponent(ds) => {
+                let belong = ds.BelongType.as_deref().unwrap_or("LandOfXuanfang");
+                let mut items = Vec::new();
+                if let Some(pi) = progress_info {
+                    for row in assets.tables.doll_grab_items_csv.as_slice() {
+                        if (row.ShowcaseBelongType == belong || belong.is_empty())
+                            && pi.get_key_int(&format!("doll:delivered:{}", row.Id)) > 0
+                        {
+                            items.push(row.Id);
+                        }
+                    }
+                }
+                storage.world_item.doll_showcase_items = Some(items);
             }
             _ => {}
         }

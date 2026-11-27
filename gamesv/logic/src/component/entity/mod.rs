@@ -13,15 +13,18 @@ use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_fs::file_util::load_zon;
 use sonoro_proto::enums::{DirectionType, EAttributeType};
 use sonoro_proto::pb::{
-    BatchBulletCastComponentPb, BeControlledComponentPb, BuffConsumerComponentPb,
-    BuffProducerComponentPb, ConnectorComponentPb, DropComponentPb, ElementalHolderComponentPb,
-    EntityComponentPb, EntityComponentPbComponentPbOneof, EntityFoundationComponentPb,
-    EntityFoundationComponentPbEgMOneof, EntityPb, EntityPbD3sOneof, FanComponentPb,
-    FlowerPollutionComponentPb, FoundationCoreInfo, GrapplingHookPointComponentPb,
-    GravityFlipComponent, HackTargetComponentPb, HackingComponentPb, HoldHandComponentPb,
-    MonsterWeaponComponentPb, NearbyTrackingComponentPb, NpcPb, PatrolComponentPb,
-    PullingFoundationComponentPb, RangeComponentPb, SceneItemEventListenerComponentPb,
-    ShieldComponentPb, ShieldInfoPb, SunSpiritGearComponentPb, TriggerComponentPb, Vector,
+    BatchBulletCastComponentPb, BeControlledComponentPb, BoardGridDynamicConfig, BoardPb,
+    BuffConsumerComponentPb, BuffProducerComponentPb, ConnectorComponentPb,
+    DollGrabMachineComponentPb, DollGrabShowcaseComponentPb, DropComponentPb,
+    ElementalHolderComponentPb, EntityComponentPb, EntityComponentPbComponentPbOneof,
+    EntityFoundationComponentPb, EntityFoundationComponentPbEgMOneof, EntityPb,
+    EntityPbD3sOneof, ExhibitionComponentPb, FanComponentPb, FlowerPollutionComponentPb,
+    FoundationCoreInfo, FurnitureComponentPb, GrapplingHookPointComponentPb, GravityFlipComponent,
+    HackTargetComponentPb, HackingComponentPb, HoldHandComponentPb, MonsterWeaponComponentPb,
+    NearbyTrackingComponentPb, NpcPb, OccupiedBoardGridInfo, PatrolComponentPb,
+    PullingFoundationComponentPb, RangeComponentPb, RbBlockComponentPb, RbFloorComponentPb,
+    RbItemComponentPb, SceneItemEventListenerComponentPb, ShieldComponentPb, ShieldInfoPb,
+    SunSpiritGearComponentPb, TriggerComponentPb, Vector,
 };
 use sonoro_proto::wire::PbEnum;
 use std::io;
@@ -100,7 +103,20 @@ pub struct WorldItemState {
     pub hacking_present: bool,
     pub hack_target_present: bool,
     pub pulling_foundation_present: bool,
+    pub pulling_relation_id: i32,
+    pub pulling_match_index: i32,
+    pub board_present: bool,
+    pub board_can_move: bool,
+    pub board_occupied: Vec<OccupiedBoardGridInfo>,
+    pub board_dynamic_configs: Vec<BoardGridDynamicConfig>,
     pub spirit_gear_present: bool,
+    pub exhibition_item_id: Option<i32>,
+    pub furniture: Option<(i32, i32)>,
+    pub doll_machine: Option<(Vec<i32>, i32, i32)>,
+    pub doll_showcase_items: Option<Vec<i32>>,
+    pub rb_block: Option<RbBlockComponentPb>,
+    pub rb_floor: Option<RbFloorComponentPb>,
+    pub rb_item: Option<RbItemComponentPb>,
     pub foundation_source_entity_id: i32,
     pub sub_entity_type: i32,
     /// Remaining durability of a destructible item; 0 for non-destructible entities.
@@ -151,7 +167,20 @@ impl Default for WorldItemState {
             hacking_present: false,
             hack_target_present: false,
             pulling_foundation_present: false,
+            pulling_relation_id: 0,
+            pulling_match_index: 0,
+            board_present: false,
+            board_can_move: false,
+            board_occupied: Vec::new(),
+            board_dynamic_configs: Vec::new(),
             spirit_gear_present: false,
+            exhibition_item_id: None,
+            furniture: None,
+            doll_machine: None,
+            doll_showcase_items: None,
+            rb_block: None,
+            rb_floor: None,
+            rb_item: None,
             foundation_source_entity_id: 0,
             sub_entity_type: 0,
             durability: 0,
@@ -523,8 +552,21 @@ impl EntityComponentStorage {
             push(
                 &mut entity.ComponentPbs,
                 EntityComponentPbComponentPbOneof::PullingFoundationComponentPb(
-                    PullingFoundationComponentPb::default(),
+                    PullingFoundationComponentPb {
+                        RelationId: wi.pulling_relation_id,
+                        MatchIndex: wi.pulling_match_index,
+                    },
                 ),
+            );
+        }
+        if wi.board_present {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::BoardPb(BoardPb {
+                    OccupiedGridList: wi.board_occupied.clone(),
+                    DynamicGridConfigs: wi.board_dynamic_configs.clone(),
+                    CanMove: wi.board_can_move,
+                }),
             );
         }
         if wi.spirit_gear_present {
@@ -533,6 +575,63 @@ impl EntityComponentStorage {
                 EntityComponentPbComponentPbOneof::SpiritGearComponentPb(
                     SunSpiritGearComponentPb::default(),
                 ),
+            );
+        }
+        if let Some(item_id) = wi.exhibition_item_id {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::ExhibitionComponentPb(ExhibitionComponentPb {
+                    ItemId: item_id,
+                }),
+            );
+        }
+        if let Some((slot_id, furniture_id)) = wi.furniture {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::FurnitureComponentPb(FurnitureComponentPb {
+                    SlotId: slot_id,
+                    FurnitureId: furniture_id,
+                }),
+            );
+        }
+        if let Some((items, high_score, accum_score)) = &wi.doll_machine {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::DollGrabMachineComponentPb(
+                    DollGrabMachineComponentPb {
+                        CanCapturedItems: items.clone(),
+                        HighScore: *high_score,
+                        AccumulatedScore: *accum_score,
+                    },
+                ),
+            );
+        }
+        if let Some(items) = &wi.doll_showcase_items {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::DollGrabShowcaseComponentPb(
+                    DollGrabShowcaseComponentPb {
+                        DollItems: items.clone(),
+                    },
+                ),
+            );
+        }
+        if let Some(rb_block) = &wi.rb_block {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::RbBlockComponentPb(rb_block.clone()),
+            );
+        }
+        if let Some(rb_floor) = &wi.rb_floor {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::RbFloorComponentPb(rb_floor.clone()),
+            );
+        }
+        if let Some(rb_item) = &wi.rb_item {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::RbItemComponentPb(rb_item.clone()),
             );
         }
         if wi.be_controlled_present || wi.be_controlled_player_id.is_some() || wi.be_controlled_show

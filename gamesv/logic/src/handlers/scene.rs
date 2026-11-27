@@ -1647,6 +1647,7 @@ pub fn handle_spatial_spawns_check<S: PushSink + ?Sized>(
                 member_cfg_id,
             )?;
         }
+        let _ = crate::helpers::quest_engine::triggers::reevaluate_condition_listeners(&mut qctx)?;
     }
     Ok(())
 }
@@ -1945,6 +1946,7 @@ fn is_priority_world_entity(assets: &Assets, cfg: &LevelEntityConfig) -> bool {
             | BpEntityType::InteractGear2
             | BpEntityType::InteractGearCanHit
             | BpEntityType::InteractGearTrigger
+            | BpEntityType::InteractiveConditionListener
             | BpEntityType::KiteHook
             | BpEntityType::CableWayHook
             | BpEntityType::Lift
@@ -1963,11 +1965,16 @@ fn is_priority_world_entity(assets: &Assets, cfg: &LevelEntityConfig) -> bool {
             | BpEntityType::SimpleInteract
             | BpEntityType::SpawnPasserbyNpc
             | BpEntityType::StateSceneItem
+            | BpEntityType::StateTrigger
             | BpEntityType::TargetGear
             | BpEntityType::TargetGear2
+            | BpEntityType::TargetGearWithConditionListener
             | BpEntityType::TeleControl
+            | BpEntityType::TeleControlGroup
             | BpEntityType::Teleporter
             | BpEntityType::TreasureBox
+            | BpEntityType::Trigger
+            | BpEntityType::TriggerConditionListener
             | BpEntityType::TuanziNpc
             | BpEntityType::VehicleNpc
             | BpEntityType::VehicleSceneItem
@@ -2888,7 +2895,9 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
                     },
                 );
             }
-            push_stored_elevator_state(sink, &progress_comp.info, cfg_id, net_id);
+            if item.lift_target_floor.is_none() {
+                push_stored_elevator_state(sink, &progress_comp.info, cfg_id, net_id);
+            }
             if let Some(flip_type) = item.gravity_type {
                 sink.push(
                     GravityFlipUpdateTypeNotify::MSG_ID,

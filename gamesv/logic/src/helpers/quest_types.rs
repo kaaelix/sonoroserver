@@ -146,6 +146,8 @@ pub struct ActionCallbacks<'a, S: PushSink + ?Sized> {
     pub on_finish_condition: Option<PairIdCallbackFn<S>>,
     pub on_trace_current_quest: Option<IdCallbackFn<S>>,
     pub on_var_changed: Option<StateCallbackFn<S>>,
+    pub on_alert_changed: Option<VoidCallbackFn<S>>,
+    pub self_entity_config_id: i32,
 }
 
 impl<S: PushSink + ?Sized> Default for ActionCallbacks<'_, S> {
@@ -171,6 +173,8 @@ impl<S: PushSink + ?Sized> Default for ActionCallbacks<'_, S> {
             on_finish_condition: None,
             on_trace_current_quest: None,
             on_var_changed: None,
+            on_alert_changed: None,
+            self_entity_config_id: 0,
         }
     }
 }

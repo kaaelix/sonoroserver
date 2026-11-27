@@ -242,9 +242,17 @@ pub struct DollGrabItemsCsv {
     #[serde(default, deserialize_with = "crate::tables::de_null_default")]
     pub ShowcaseBelongType: String,
     #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub MaxGetCount: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub AddTime: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
     pub DropId: i32,
     #[serde(default, deserialize_with = "crate::tables::de_null_default")]
     pub BindingItemId: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub InfiniteModeScore: i32,
+    #[serde(default, deserialize_with = "crate::tables::de_null_default")]
+    pub IsTouchGet: bool,
 }
 
 #[allow(non_snake_case)]

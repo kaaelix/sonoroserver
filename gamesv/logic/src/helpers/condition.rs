@@ -1592,21 +1592,15 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
             let Some(compare_type) = obj.get("CompareType").and_then(Value::as_str) else {
                 return false;
             };
-            let Some(compare_value) = obj.get("CompareValue").and_then(Value::as_object) else {
-                return false;
-            };
-            let Some(value_type) = json_int(compare_value.get("Type")) else {
-                return false;
-            };
-            if value_type != 0 && value_type != 1 {
-                return false;
-            }
-            let Some(progress) = ctx.progress_comp else {
-                return false;
-            };
-            let key = format!("alert:area:{area_id}");
-            let cur = i32::from(progress.info.get_key_int(&key) != 0);
-            compare_ints(cur, value_type, compare_type)
+            let compare_value = obj.get("CompareValue").and_then(Value::as_object);
+            crate::helpers::alert::compare_alert_value(
+                ctx.assets,
+                ctx.progress_comp,
+                ctx.scene,
+                area_id,
+                compare_type,
+                compare_value,
+            )
         }
         "CheckTeleControlState" => {
             let Some(config_id) = json_int(obj.get("EntityId")) else {
@@ -2360,6 +2354,69 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
                 .filter_map(|v| json_int(Some(v)))
                 .any(|eid| progress.info.get_key_int(&format!("hook_point:active:{eid}")) != 0)
         }
+        "CheckJigsawInfo" => {
+            let Some(jc) = obj.get("JigsawCondition").and_then(Value::as_object) else {
+                return false;
+            };
+            let ctype = jc.get("Type").and_then(Value::as_str).unwrap_or("");
+            let cmp = jc.get("Compare").and_then(Value::as_str).unwrap_or("Eq");
+            let matched = match ctype {
+                "CheckJigsawItemPlaceIndex" => {
+                    let fid = json_int(jc.get("FoundationEntityId")).unwrap_or(0);
+                    let iid = json_int(jc.get("ItemEntityId")).unwrap_or(0);
+                    let want_row = jc
+                        .get("PlaceIndex")
+                        .and_then(Value::as_object)
+                        .and_then(|p| json_int(p.get("RowIndex")))
+                        .unwrap_or(-1);
+                    let want_col = jc
+                        .get("PlaceIndex")
+                        .and_then(Value::as_object)
+                        .and_then(|p| json_int(p.get("ColumnIndex")))
+                        .unwrap_or(-1);
+                    if fid > 0 && iid > 0 && want_row >= 0 && want_col >= 0 {
+                        let key = format!("jigsaw:place:{fid}:{iid}");
+                        let kv_match = ctx
+                            .progress_comp
+                            .and_then(|p| {
+                                p.info
+                                    .dynamic
+                                    .strs
+                                    .iter()
+                                    .find(|s| s.key == key)
+                                    .map(|s| s.val.as_str())
+                            })
+                            .is_some_and(|s| s == format!("{want_row}:{want_col}"));
+                        kv_match
+                            || ctx.scene.is_some_and(|sc| {
+                                sc.find_entity_net_id_by_config_id(fid)
+                                    .and_then(|nid| sc.entity(nid))
+                                    .is_some_and(|st| {
+                                        st.world_item.board_occupied.iter().any(|occ| {
+                                            occ.OccupyingEntityConfigId == iid
+                                                && occ.Pos.as_ref().is_some_and(|pos| {
+                                                    pos.Row == want_row && pos.Column == want_col
+                                                })
+                                        })
+                                    })
+                            })
+                    } else {
+                        false
+                    }
+                }
+                "CheckJigsawItemMove" => {
+                    let iid = json_int(jc.get("ItemEntityId")).unwrap_or(0);
+                    if iid > 0 {
+                        ctx.progress_comp
+                            .is_some_and(|p| p.info.get_key_int(&format!("jigsaw:moving:{iid}")) != 0)
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            if cmp == "Ne" { !matched } else { matched }
+        }
         "CheckIsCharacterHoldingHands" => {
             let Some(target) = obj.get("Target").and_then(Value::as_object) else {
                 return false;
@@ -3029,8 +3086,7 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
             let Some(area_id) = json_int(obj.get("AreaId")) else {
                 return false;
             };
-            ctx.progress_comp
-                .is_some_and(|pc| pc.info.get_key_int(&format!("alert_enable:{area_id}")) != 0)
+            crate::helpers::alert::is_alert_area_enabled(ctx.progress_comp, ctx.scene, area_id)
         }
         "CheckFollowShooterActive" => {
             let want = obj.get("Active").and_then(Value::as_bool).unwrap_or(true);

@@ -370,6 +370,10 @@ pub fn on_interact_handled<S: PushSink + ?Sized>(
     }
 
     let cfg_id = resolve_config_id(ctx.scene.as_deref(), entity_id);
+    if crate::helpers::roll_block::try_launch_for_trigger(ctx, "Interact", cfg_id)? {
+        finalize_progression(ctx)?;
+        return Ok(true);
+    }
     let interact_comp = merged_interact_component(ctx, cfg_id);
     let normal_opts_len = interact_comp
         .as_ref()
@@ -3475,6 +3479,12 @@ pub fn on_player_transfer_or_leave_inst<S: PushSink + ?Sized>(
     is_leave_dungeon: bool,
 ) -> io::Result<()> {
     let aq_snapshot = ctx.quest_comp.info.active_quests.clone();
+    if is_leave_dungeon && let Some(inst_id) = ctx.scene.as_deref().map(|s| s.instance_id) {
+        crate::helpers::alert::auto_disable_for_dungeon(ctx, inst_id)?;
+    }
+    if let Some(scene) = ctx.scene.as_deref_mut() {
+        crate::helpers::roll_block::cleanup_all_sessions(scene, ctx.sink);
+    }
     let mut changed = false;
     for aq in aq_snapshot {
         let Ok(nodes) = ctx.assets.quest_nodes.get_owner_nodes(aq.quest_id) else {

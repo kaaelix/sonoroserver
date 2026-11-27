@@ -19,6 +19,6 @@ pub struct EntityStateComponent {
     pub State: Option<String>,
     #[serde(default)]
     pub LockConfig: Option<EntityStateComponentLockConfig>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
     pub StateChangeBehaviors: Vec<serde_json::Value>,
 }

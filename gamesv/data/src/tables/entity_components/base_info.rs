@@ -160,4 +160,6 @@ pub struct BaseInfoComponent {
     pub LowerNpcDensity: Option<i32>,
     #[serde(default)]
     pub MapIcon: Option<i32>,
+    #[serde(default)]
+    pub IsClientEntityFlag: Option<bool>,
 }

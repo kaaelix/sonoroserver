@@ -37,11 +37,26 @@ pub struct AdviseItemComponent {
 
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ExtraAiAlertConfig {
+    #[serde(default)]
+    pub MoveAlert: Option<f64>,
+    #[serde(default)]
+    pub StopAlert: Option<f64>,
+    #[serde(default)]
+    pub SelfStateAlert: Option<serde_json::Value>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct AiAlertNotifyComponent {
+    #[serde(default)]
+    pub AlertSound: Option<String>,
+    #[serde(default)]
+    pub Disabled: Option<bool>,
     #[serde(default)]
     pub ExcludeEntities: Option<Vec<i64>>,
     #[serde(default)]
-    pub ExtraAiAlert: Option<crate::tables::EmptyObj>,
+    pub ExtraAiAlert: Option<ExtraAiAlertConfig>,
 }
 
 #[allow(non_snake_case)]
@@ -124,7 +139,7 @@ pub struct BatchBulletCasterComponent {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct BeamCastComponent {
     #[serde(default)]
-    pub BeamLayout: Option<crate::tables::EmptyObj>,
+    pub BeamLayout: Option<serde_json::Value>,
     #[serde(default)]
     pub DelayDestroyEffect: Option<bool>,
     #[serde(default)]
@@ -138,26 +153,34 @@ pub struct BeamCastComponent {
     #[serde(default)]
     pub IgnoreMonsterCollision: Option<bool>,
     #[serde(default)]
-    pub Range: Option<crate::tables::EmptyObj>,
+    pub Range: Option<serde_json::Value>,
     #[serde(default)]
-    pub Reflection: Option<crate::tables::EmptyObj>,
+    pub Reflection: Option<serde_json::Value>,
     #[serde(default)]
     pub StartEffectPath: Option<String>,
     #[serde(default)]
     pub TargetState: Option<String>,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub TriggerActions: Vec<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct BeamReceiveComponent {
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub BeginActions: Vec<serde_json::Value>,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub CompleteActions: Vec<serde_json::Value>,
     #[serde(default)]
     pub Disabled: Option<bool>,
     #[serde(default)]
     pub Duration: Option<f64>,
     #[serde(default)]
-    pub ReceiveCondition: Option<crate::tables::EmptyObj>,
+    pub ReceiveCondition: Option<serde_json::Value>,
     #[serde(default)]
     pub ReceiveTarget: Option<String>,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub StopActions: Vec<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]
@@ -280,7 +303,9 @@ pub struct DollGrabMachineComponent {
     #[serde(default)]
     pub BelongType: Option<String>,
     #[serde(default)]
-    pub InfiniteModeData: Option<crate::tables::EmptyObj>,
+    pub InfiniteModeData: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub Items: Vec<serde_json::Value>,
     #[serde(default)]
     pub PlayCost: Option<i64>,
     #[serde(default)]
@@ -295,7 +320,9 @@ pub struct DollGrabShowcaseComponent {
     #[serde(default)]
     pub BindInfiniteModeDollGrabEntityId: Option<i64>,
     #[serde(default)]
-    pub CameraConfig: Option<crate::tables::EmptyObj>,
+    pub CameraConfig: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub DeliveryRewards: Vec<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]
@@ -526,7 +553,7 @@ pub struct EntityVisibleComponent {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct ExhibitComponent {
     #[serde(default)]
-    pub ExhibitConfig: Option<crate::tables::EmptyObj>,
+    pub ExhibitConfig: Option<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]
@@ -633,7 +660,7 @@ pub struct FollowTrackComponent {
     #[serde(default)]
     pub Disabled: Option<bool>,
     #[serde(default)]
-    pub EndType: Option<crate::tables::EmptyObj>,
+    pub EndType: Option<serde_json::Value>,
     #[serde(default)]
     pub Range: Option<i64>,
     #[serde(default)]
@@ -726,7 +753,7 @@ pub struct HackManagementComponent {
     #[serde(default)]
     pub MaxHackingCount: Option<i64>,
     #[serde(default)]
-    pub ValidDistance: Option<i64>,
+    pub ValidDistance: Option<f64>,
 }
 
 #[allow(non_snake_case)]
@@ -803,9 +830,9 @@ pub struct InhalationAbilityComponent {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct InhaledItemComponent {
     #[serde(default)]
-    pub InhaledPerResult: Option<crate::tables::EmptyObj>,
+    pub InhaledPerResult: Option<serde_json::Value>,
     #[serde(default)]
-    pub InhaledPerformance: Option<crate::tables::EmptyObj>,
+    pub InhaledPerformance: Option<serde_json::Value>,
     #[serde(default)]
     pub InhaledStrength: Option<i64>,
 }
@@ -836,7 +863,7 @@ pub struct InteractGearComponent {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct ItemFoundation2 {
     #[serde(default)]
-    pub Config: Option<crate::tables::EmptyObj>,
+    pub Config: Option<serde_json::Value>,
     #[serde(default)]
     pub Disabled: Option<bool>,
 }
@@ -845,15 +872,19 @@ pub struct ItemFoundation2 {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct JigsawFoundation {
     #[serde(default)]
-    pub CompleteCondition: Option<crate::tables::EmptyObj>,
+    pub CompleteCondition: Option<serde_json::Value>,
     #[serde(default)]
-    pub CompletedConfig: Option<crate::tables::EmptyObj>,
+    pub CompletedConfig: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub InitMatchList: Vec<serde_json::Value>,
     #[serde(default)]
-    pub JigsawConfig: Option<crate::tables::EmptyObj>,
+    pub JigsawConfig: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub MatchedConfig: Vec<serde_json::Value>,
     #[serde(default)]
     pub ModelId: Option<i64>,
     #[serde(default)]
-    pub PlaceOffset: Option<crate::tables::EmptyObj>,
+    pub PlaceOffset: Option<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]
@@ -862,7 +893,7 @@ pub struct JigsawItem {
     #[serde(default)]
     pub Disabled: Option<bool>,
     #[serde(default)]
-    pub FillCfg: Option<crate::tables::EmptyObj>,
+    pub FillCfg: Option<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]
@@ -930,7 +961,7 @@ pub struct MonitorComponent {
     #[serde(default)]
     pub Disabled: Option<bool>,
     #[serde(default)]
-    pub Range: Option<crate::tables::EmptyObj>,
+    pub Range: Option<super::range::ShapeConfig>,
     #[serde(default)]
     pub StateAfterLeaved: Option<String>,
     #[serde(default)]
@@ -1128,7 +1159,34 @@ pub struct ProjectorComponent {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct PullingObjectFoundation {
     #[serde(default)]
-    pub Config: Option<crate::tables::EmptyObj>,
+    pub Config: Option<serde_json::Value>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct QuickHackSkillContent {
+    #[serde(default)]
+    pub EntityState: String,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub Actions: Vec<serde_json::Value>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct QuickHackSkillConfig {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub Content: Vec<QuickHackSkillContent>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct QuickHackLinkEffect {
+    #[serde(default)]
+    pub StartPoint: Option<super::range::Vec3>,
+    #[serde(default)]
+    pub EndPoint: Option<super::range::Vec3>,
 }
 
 #[allow(non_snake_case)]
@@ -1137,9 +1195,13 @@ pub struct QuickHackComponent {
     #[serde(default)]
     pub AutoClose: Option<String>,
     #[serde(default)]
-    pub IconOffset: Option<crate::tables::EmptyObj>,
+    pub Disabled: Option<bool>,
     #[serde(default)]
-    pub LinkEffect: Option<crate::tables::EmptyObj>,
+    pub IconOffset: Option<super::range::Vec3>,
+    #[serde(default)]
+    pub LinkEffect: Option<QuickHackLinkEffect>,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub Skills: Vec<QuickHackSkillConfig>,
     #[serde(default)]
     pub Time: Option<f64>,
 }
@@ -1343,7 +1405,7 @@ pub struct SlideRailComponent {
 pub struct SpawnMonsterPreCondition {
     #[serde(default)]
     pub Type: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
     pub Ids: Vec<i32>,
 }
 
@@ -1356,7 +1418,7 @@ pub struct SpawnMonsterConfig {
     pub DelayTime: Option<f32>,
     #[serde(default)]
     pub PreCondition: Option<SpawnMonsterPreCondition>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
     pub TargetsToAwake: Vec<i32>,
 }
 
@@ -1371,7 +1433,7 @@ pub struct SpawnMonsterComponent {
     pub IssharedHatred: Option<bool>,
     #[serde(default)]
     pub SpawnMonsterConstraintType: Option<crate::tables::EmptyObj>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
     pub SpawnMonsterConfigs: Vec<SpawnMonsterConfig>,
 }
 

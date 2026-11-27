@@ -152,7 +152,7 @@ impl AssetIndexes {
         let mut out = Self::default();
         build_string_index_bp(tables.blueprint_config.as_slice(), &mut out.blueprint_by_type);
         build_string_index_tpl(tables.template_config.as_slice(), &mut out.template_by_type);
-        build_level_entity_indexes_from_db(db, &mut out).map_err(|e| e.to_string())?;
+        build_level_entity_indexes_from_db(db, tables, &mut out).map_err(|e| e.to_string())?;
         build_teleporter_index(tables.teleporter.as_slice(), &mut out);
         build_teleporter_area_index(
             tables.teleporter.as_slice(),
@@ -330,32 +330,44 @@ pub fn is_spawnable_blueprint(bp: &str) -> bool {
         || bp.contains("AirWall")
 }
 
-pub fn is_spawnable_item_config(_cfg: &LevelEntityConfig, entity_type: EntityType) -> bool {
+pub fn is_spawnable_item_config(cfg: &LevelEntityConfig, entity_type: EntityType) -> bool {
+    if matches!(entity_type, EntityType::Chair | EntityType::Chair2) {
+        if cfg
+            .ComponentsData
+            .BaseInfoComponent
+            .as_ref()
+            .and_then(|b| b.IsClientEntityFlag)
+            == Some(true)
+        {
+            return false;
+        }
+        // Keep synthetic/inert MonsterChair configs (without interaction/state components) non-spawnable.
+        if cfg.BlueprintType == "MonsterChair"
+            && cfg.ComponentsData.InteractComponent.is_none()
+            && cfg.ComponentsData.EntityStateComponent.is_none()
+        {
+            return false;
+        }
+        return true;
+    }
     !matches!(
         entity_type,
         EntityType::AdviseItem
             | EntityType::Audio
             | EntityType::AudioBox
-            | EntityType::Chair
-            | EntityType::Chair2
             | EntityType::CustomAoiEditor
-            | EntityType::DaemonHack
-            | EntityType::DollGrabShowcase
             | EntityType::DynamicSpawnMonster
             | EntityType::DynamicSpawnMonsterPoint
             | EntityType::EntityBatchRefresh
             | EntityType::EntityList
             | EntityType::EntityPackage
-            | EntityType::ExhibitBase
             | EntityType::FlowerPollutionManager
             | EntityType::FollowDecorationChair
-            | EntityType::Furniture
             | EntityType::FurnitureSlot
             | EntityType::GroupAi
             | EntityType::LevelPlay
             | EntityType::LevelPlay2
             | EntityType::LevelPlayReward
-            | EntityType::Monitor
             | EntityType::PathDrivenActorSpawner
             | EntityType::PerformanceOptimizer
             | EntityType::Position
@@ -521,6 +533,7 @@ fn build_string_index_tpl(items: &[TemplateConfig], map: &mut HashMap<String, u3
 
 fn build_level_entity_indexes_from_db(
     db: &AssetsDb,
+    tables: &DataTables,
     out: &mut AssetIndexes,
 ) -> Result<(), sonoro_common::sqlite::SqliteError> {
     let rows = db.query_level_entity_index_rows()?;
@@ -549,7 +562,22 @@ fn build_level_entity_indexes_from_db(
             })
             .or_insert(r.idx);
         id_pairs.push((r.entity_id, r.idx));
-        if r.spawnable {
+        let is_newly_spawnable = out
+            .blueprint_by_type
+            .get(r.blueprint_type.as_str())
+            .and_then(|bp_idx| tables.blueprint_config.as_slice().get(*bp_idx as usize))
+            .is_some_and(|bp| match bp.EntityType {
+                EntityType::Monitor
+                | EntityType::DaemonHack
+                | EntityType::DollGrabShowcase
+                | EntityType::ExhibitBase
+                | EntityType::Furniture => true,
+                EntityType::Chair | EntityType::Chair2 => {
+                    !r.is_client_flag && r.blueprint_type != "MonsterChair"
+                }
+                _ => false,
+            });
+        if r.spawnable || is_newly_spawnable {
             cell_pairs.push((
                 SpatialCellKey {
                     map_id: r.map_id,

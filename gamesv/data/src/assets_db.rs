@@ -32,7 +32,7 @@ pub struct SunSpiritRow {
     pub area_id: i32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct LevelEntityIndexRow {
     pub idx: u32,
     pub entity_id: i64,
@@ -43,6 +43,8 @@ pub struct LevelEntityIndexRow {
     pub area_id: i32,
     pub in_sleep: bool,
     pub is_hidden: bool,
+    pub blueprint_type: String,
+    pub is_client_flag: bool,
 }
 
 /// 4-bucket rotating cache storing `Arc<V>` values so evicted handles stay valid for existing callers.
@@ -433,7 +435,7 @@ impl AssetsDb {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut stmt = guard.conn.prepare_cached(
-            "SELECT idx, entity_id, map_id, COALESCE(cell_x, 0), COALESCE(cell_y, 0), spawnable, area_id, in_sleep, is_hidden FROM level_entities ORDER BY idx",
+            "SELECT idx, entity_id, map_id, COALESCE(cell_x, 0), COALESCE(cell_y, 0), spawnable, area_id, in_sleep, is_hidden, blueprint_type, COALESCE(json_extract(data, '$.ComponentsData.BaseInfoComponent.IsClientEntityFlag'), 0) FROM level_entities ORDER BY idx",
         )?;
         let mut rows = stmt.query([])?;
         let mut out = Vec::with_capacity(220_000);
@@ -448,6 +450,8 @@ impl AssetsDb {
                 area_id: row.get(6)?,
                 in_sleep: row.get::<_, i32>(7)? != 0,
                 is_hidden: row.get::<_, i32>(8)? != 0,
+                blueprint_type: row.get::<_, String>(9)?,
+                is_client_flag: row.get::<_, i32>(10)? != 0,
             });
         }
         Ok(out)

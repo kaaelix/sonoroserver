@@ -537,6 +537,141 @@ pub fn handle_dango_monopoly_task_reward_request(
 // Doll Grabber & Delivery
 // =========================================================================
 
+fn resolve_doll_machine_cfg_and_item(
+    state: &State,
+    entity_inc_id: i64,
+    uni_id: i32,
+) -> (i32, i32) {
+    let inst_id = state.scene.as_ref().map_or(8, |s| s.instance_id);
+    let cfg_id = state
+        .scene
+        .as_ref()
+        .and_then(|s| s.find_config_id_by_net_id(entity_inc_id))
+        .unwrap_or(entity_inc_id as i32);
+    let Some(le) = state
+        .assets
+        .find_level_entity(inst_id, i64::from(cfg_id))
+        .or_else(|| state.assets.find_level_entity_any_map(i64::from(cfg_id)))
+    else {
+        return (cfg_id, uni_id);
+    };
+    let mut comps = le.ComponentsData.clone();
+    if let Some(tpl) = state.assets.find_template_config(&le.BlueprintType) {
+        tpl.ComponentsData.merge_into(&mut comps);
+    }
+    for entry in &comps.extra {
+        if let ExtraEntry::DollGrabMachineComponent(dm) = entry {
+            for v in &dm.Items {
+                let entry_uni = v
+                    .get("Id")
+                    .and_then(|x| x.as_i64())
+                    .and_then(|x| i32::try_from(x).ok())
+                    .unwrap_or(0);
+                let entry_item = v
+                    .get("ItemId")
+                    .and_then(|x| x.as_i64())
+                    .and_then(|x| i32::try_from(x).ok())
+                    .unwrap_or(0);
+                if entry_uni == uni_id && entry_item > 0 {
+                    return (cfg_id, entry_item);
+                }
+            }
+        }
+    }
+    (cfg_id, uni_id)
+}
+
+fn process_doll_grab(
+    state: &mut State,
+    entity_inc_id: i64,
+    uni_id: i32,
+    is_time_ball: bool,
+) -> Result<Vec<DollGrabItemInfo>, String> {
+    let (cfg_id, item_id) = resolve_doll_machine_cfg_and_item(state, entity_inc_id, uni_id);
+    let doll_cfg = state.assets.tables.doll_grab_items_csv.get_data_by_id(&item_id);
+    let max_cnt = doll_cfg.as_ref().map(|d| d.MaxGetCount).unwrap_or(0);
+    let cur_cnt = state
+        .player_components
+        .progress
+        .info
+        .get_key_int(&format!("doll:cnt:{item_id}")) as i32;
+    let drop_id = doll_cfg.as_ref().map(|d| d.DropId).unwrap_or(0);
+    let binding_item_id = doll_cfg.as_ref().map(|d| d.BindingItemId).unwrap_or(0);
+    let inf_score = doll_cfg.as_ref().map(|d| d.InfiniteModeScore).unwrap_or(0);
+
+    let mut grab_items = Vec::new();
+    if max_cnt <= 0 || cur_cnt < max_cnt {
+        state
+            .player_components
+            .progress
+            .info
+            .add_key_int(&format!("doll:cnt:{item_id}"), 1);
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int(&format!("doll:uni:{cfg_id}:{uni_id}"), 1);
+        if drop_id > 0 {
+            let preview = reward::preview_drop_items(&state.assets, drop_id);
+            let mut rctx = state.reward_context();
+            let _ = reward::grant_drop_package(&mut rctx, drop_id, 0)
+                .map_err(|e| e.to_string())?;
+            for g in preview {
+                grab_items.push(DollGrabItemInfo {
+                    ItemId: g.item_id,
+                    ItemCount: g.count,
+                });
+            }
+        }
+        if grab_items.is_empty() && binding_item_id > 0 {
+            grab_items.push(DollGrabItemInfo {
+                ItemId: binding_item_id,
+                ItemCount: 1,
+            });
+        }
+    }
+    if grab_items.is_empty() {
+        grab_items.push(DollGrabItemInfo {
+            ItemId: item_id,
+            ItemCount: 1,
+        });
+    }
+
+    let delta_score = if inf_score > 0 {
+        inf_score
+    } else if is_time_ball {
+        15
+    } else {
+        10
+    };
+    let info = &mut state.player_components.progress.info;
+    let sess = info.add_key_int(&format!("doll:cur:{cfg_id}"), i64::from(delta_score)) as i32;
+    let acc = info.add_key_int(&format!("doll:acc:{cfg_id}"), i64::from(delta_score)) as i32;
+    let high = sess.max(info.get_key_int(&format!("doll:high:{cfg_id}")) as i32);
+    info.set_key_int(&format!("doll:high:{cfg_id}"), i64::from(high));
+    info.set_key_int(&format!("doll:fin:{cfg_id}"), 1);
+    info.mark_claim(&format!("doll:fin:{cfg_id}"));
+    info.add_key_int("doll_grab:cur", i64::from(delta_score));
+    info.add_key_int("doll_grab:total", i64::from(delta_score));
+
+    if let Some(scene) = state.scene.as_mut()
+        && let Some(ent) = scene.entity_mut(entity_inc_id)
+        && let Some((can_items, hi, ac)) = &mut ent.world_item.doll_machine
+    {
+        can_items.retain(|&id| id != uni_id);
+        *hi = (*hi).max(high);
+        *ac = acc;
+    }
+
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    super::world_puzzle::flush_quest_condition_changed(state);
+    Ok(grab_items)
+}
+
 pub fn handle_doll_delivery_request(
     state: &mut State,
     req: DollDeliveryRequest,
@@ -549,25 +684,48 @@ pub fn handle_doll_delivery_request(
     .map_err(|e| e.to_string())?;
 
     let mut belong_type: Option<String> = None;
-    if let Some(scene) = state.scene.as_ref()
-        && let Some(le) = state
-            .assets
-            .find_level_entity(scene.instance_id, i64::from(req.EntityCfgId))
+    let mut delivery_rewards: Vec<(i32, i32)> = Vec::new();
+    let inst_id = state.scene.as_ref().map_or(8, |s| s.instance_id);
+    if let Some(le) = state
+        .assets
+        .find_level_entity(inst_id, i64::from(req.EntityCfgId))
+        .or_else(|| state.assets.find_level_entity_any_map(i64::from(req.EntityCfgId)))
     {
-        for entry in &le.ComponentsData.extra {
-            if let ExtraEntry::DollGrabShowcaseComponent(sc) = entry
-                && let Some(bt) = &sc.BelongType
-                && !bt.is_empty()
-            {
-                belong_type = Some(bt.clone());
+        let mut comps = le.ComponentsData.clone();
+        if let Some(tpl) = state.assets.find_template_config(&le.BlueprintType) {
+            tpl.ComponentsData.merge_into(&mut comps);
+        }
+        for entry in &comps.extra {
+            if let ExtraEntry::DollGrabShowcaseComponent(sc) = entry {
+                if let Some(bt) = &sc.BelongType
+                    && !bt.is_empty()
+                {
+                    belong_type = Some(bt.clone());
+                }
+                for rw in &sc.DeliveryRewards {
+                    let cnt = rw
+                        .get("AchievedDollCount")
+                        .and_then(|v| v.as_i64())
+                        .and_then(|v| i32::try_from(v).ok())
+                        .unwrap_or(0);
+                    let drop_id = rw
+                        .get("DropId")
+                        .and_then(|v| v.as_i64())
+                        .and_then(|v| i32::try_from(v).ok())
+                        .unwrap_or(0);
+                    if cnt > 0 && drop_id > 0 {
+                        delivery_rewards.push((cnt, drop_id));
+                    }
+                }
             }
         }
     }
 
-    let mut items = Vec::new();
+    let mut all_delivered = Vec::new();
+    let mut newly_delivered = Vec::new();
     let mut first_match = None;
     for di in &state.assets.tables.doll_grab_items_csv.items {
-        if di.BindingItemId <= 0 {
+        if di.BindingItemId <= 0 && di.InfiniteModeScore <= 0 {
             continue;
         }
         if let Some(bt) = &belong_type
@@ -578,38 +736,115 @@ pub fn handle_doll_delivery_request(
         if first_match.is_none() {
             first_match = Some(di.Id);
         }
-        if state
+        let already = state
             .player_components
-            .inventory
+            .progress
             .info
-            .normal_item_count(di.BindingItemId)
-            > 0
-        {
-            state
+            .get_key_int(&format!("doll:delivered:{}", di.Id))
+            > 0;
+        let caught = state
+            .player_components
+            .progress
+            .info
+            .get_key_int(&format!("doll:cnt:{}", di.Id))
+            > 0;
+        let owned = di.BindingItemId > 0
+            && state
                 .player_components
-                .progress
+                .inventory
                 .info
-                .mark_claim(&format!("doll:item:{}:{}", req.EntityCfgId, di.Id));
-            items.push(di.Id);
+                .normal_item_count(di.BindingItemId)
+                > 0;
+        if already || caught || owned {
+            all_delivered.push(di.Id);
+            if !already {
+                newly_delivered.push(di.Id);
+                state
+                    .player_components
+                    .progress
+                    .info
+                    .set_key_int(&format!("doll:delivered:{}", di.Id), 1);
+                state
+                    .player_components
+                    .progress
+                    .info
+                    .mark_claim(&format!("doll:item:{}:{}", req.EntityCfgId, di.Id));
+            }
         }
     }
-    if items.is_empty()
+    if all_delivered.is_empty()
         && let Some(fid) = first_match
     {
         state
             .player_components
             .progress
             .info
+            .set_key_int(&format!("doll:delivered:{fid}"), 1);
+        state
+            .player_components
+            .progress
+            .info
             .mark_claim(&format!("doll:item:{}:{}", req.EntityCfgId, fid));
-        items.push(fid);
+        all_delivered.push(fid);
+        newly_delivered.push(fid);
     }
+
+    let combo_count = state
+        .assets
+        .doll_grab_combos
+        .iter()
+        .filter(|combo| {
+            combo.MainItemId > 0
+                && all_delivered.contains(&combo.MainItemId)
+                && combo
+                    .PartItemIds
+                    .iter()
+                    .all(|pid| all_delivered.contains(pid))
+        })
+        .count() as i32;
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int(&format!("doll:combo:{}", req.EntityCfgId), i64::from(combo_count));
+
+    let mut drop_ids = Vec::new();
+    let achieved_milestone = combo_count.max(all_delivered.len() as i32);
+    for (need_cnt, drop_id) in delivery_rewards {
+        let key = format!("doll:drw:{}:{need_cnt}", req.EntityCfgId);
+        if achieved_milestone >= need_cnt
+            && state.player_components.progress.info.mark_claim(&key)
+        {
+            let mut rctx = state.reward_context();
+            let _ = reward::grant_drop_package(&mut rctx, drop_id, 0);
+            drop_ids.push(drop_id);
+        }
+    }
+
+    if let Some(scene) = state.scene.as_mut()
+        && let Some(nid) = scene.find_entity_net_id_by_config_id(req.EntityCfgId)
+        && let Some(ent) = scene.entity_mut(nid)
+    {
+        ent.world_item.doll_showcase_items = Some(all_delivered.clone());
+    }
+
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    if !newly_delivered.is_empty() || !drop_ids.is_empty() {
+        let _ = state.conn.push_msg(
+            sonoro_proto::pb::DollDeliveryNotify::MSG_ID,
+            &sonoro_proto::pb::DollDeliveryNotify {
+                DropIds: drop_ids,
+                ItemIds: newly_delivered,
+            },
+        );
+    }
+    super::world_puzzle::flush_quest_condition_changed(state);
     Ok(DollDeliveryResponse {
-        ItemIds: items,
+        ItemIds: all_delivered,
         ErrorCode: Some(ErrorCode::Success),
     })
 }
@@ -618,11 +853,14 @@ pub fn handle_doll_garb_insert_coin_request(
     state: &mut State,
     req: DollGarbInsertCoinRequest,
 ) -> Result<DollGarbInsertCoinResponse, String> {
-    state
-        .player_components
-        .progress
-        .info
-        .add_key_int(&format!("doll:coins:{}", req.EntityIncId), 1);
+    let cfg_id = state
+        .scene
+        .as_ref()
+        .and_then(|s| s.find_config_id_by_net_id(req.EntityIncId))
+        .unwrap_or(req.EntityIncId as i32);
+    let info = &mut state.player_components.progress.info;
+    info.add_key_int(&format!("doll:coins:{}", req.EntityIncId), 1);
+    info.set_key_int(&format!("doll:cur:{cfg_id}"), 0);
     state
         .player_components
         .progress
@@ -635,15 +873,21 @@ pub fn handle_doll_garb_insert_coin_request(
 
 pub fn handle_doll_garb_start_request(
     state: &mut State,
-    _req: DollGarbStartRequest,
+    req: DollGarbStartRequest,
 ) -> Result<DollGarbStartResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        "doll_grab:cur",
-        0,
-    )
-    .map_err(|e| e.to_string())?;
+    let cfg_id = state
+        .scene
+        .as_ref()
+        .and_then(|s| s.find_config_id_by_net_id(req.EntityIncId))
+        .unwrap_or(req.EntityIncId as i32);
+    let info = &mut state.player_components.progress.info;
+    info.set_key_int("doll_grab:cur", 0);
+    info.set_key_int(&format!("doll:cur:{cfg_id}"), 0);
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     Ok(DollGarbStartResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -685,20 +929,10 @@ pub fn handle_doll_grab_request(
     state: &mut State,
     req: DollGrabRequest,
 ) -> Result<DollGrabResponse, String> {
-    let info = &mut state.player_components.progress.info;
-    let _sess = info.add_key_int("doll_grab:cur", 10);
-    info.add_key_int("doll_grab:total", 10);
-    state
-        .player_components
-        .progress
-        .save(&state.fs)
-        .map_err(|e| e.to_string())?;
+    let grab_items = process_doll_grab(state, req.EntityIncId, req.ItemUniId, false)?;
     Ok(DollGrabResponse {
         ErrorCode: Some(ErrorCode::Success),
-        GrabItemInfos: vec![DollGrabItemInfo {
-            ItemId: req.ItemUniId,
-            ItemCount: 1,
-        }],
+        GrabItemInfos: grab_items,
     })
 }
 
@@ -706,37 +940,40 @@ pub fn handle_doll_grab_time_ball_request(
     state: &mut State,
     req: DollGrabTimeBallRequest,
 ) -> Result<DollGrabTimeBallResponse, String> {
-    let info = &mut state.player_components.progress.info;
-    info.add_key_int("doll_grab:cur", 15);
-    info.add_key_int("doll_grab:total", 15);
-    state
-        .player_components
-        .progress
-        .save(&state.fs)
-        .map_err(|e| e.to_string())?;
+    let grab_items = process_doll_grab(state, req.EntityIncId, req.ItemUniId, true)?;
     Ok(DollGrabTimeBallResponse {
         ErrorCode: Some(ErrorCode::Success),
-        GrabItemInfos: vec![DollGrabItemInfo {
-            ItemId: req.ItemUniId,
-            ItemCount: 1,
-        }],
+        GrabItemInfos: grab_items,
     })
 }
 
 pub fn handle_doll_grab_stop_request(
     state: &mut State,
-    _req: DollGrabStopRequest,
+    req: DollGrabStopRequest,
 ) -> Result<DollGrabStopResponse, String> {
+    let cfg_id = state
+        .scene
+        .as_ref()
+        .and_then(|s| s.find_config_id_by_net_id(req.EntityIncId))
+        .unwrap_or(req.EntityIncId as i32);
     let info = &mut state.player_components.progress.info;
-    let sess = info.get_key_int("doll_grab:cur") as i32;
-    let total = info.get_key_int("doll_grab:total") as i32;
-    let high = sess.max(info.get_key_int("doll_grab:high") as i32);
+    let sess = (info.get_key_int(&format!("doll:cur:{cfg_id}")) as i32)
+        .max(info.get_key_int("doll_grab:cur") as i32);
+    let total = (info.get_key_int(&format!("doll:acc:{cfg_id}")) as i32)
+        .max(info.get_key_int("doll_grab:total") as i32);
+    let high = sess
+        .max(info.get_key_int(&format!("doll:high:{cfg_id}")) as i32)
+        .max(info.get_key_int("doll_grab:high") as i32);
+    info.set_key_int(&format!("doll:high:{cfg_id}"), i64::from(high));
     info.set_key_int("doll_grab:high", i64::from(high));
+    info.set_key_int(&format!("doll:fin:{cfg_id}"), 1);
+    info.mark_claim(&format!("doll:fin:{cfg_id}"));
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    super::world_puzzle::flush_quest_condition_changed(state);
     Ok(DollGrabStopResponse {
         HighScore: high,
         AccumulatedScore: total,
@@ -2839,9 +3076,14 @@ pub fn handle_roll_block_exit_game_play_request(
         0,
     )
     .map_err(|e| e.to_string())?;
-    Ok(RollBlockExitGamePlayResponse {
-        Code: Some(ErrorCode::Success),
-    })
+    let mut events = EventQueue::new();
+    let code = {
+        let mut qctx = state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::roll_block::handle_exit(&mut qctx, req.IncId)
+            .map_err(|e| e.to_string())?
+    };
+    drain_event_queue_best_effort(&mut events, state);
+    Ok(RollBlockExitGamePlayResponse { Code: Some(code) })
 }
 
 pub fn handle_roll_block_game_play_ready_request(
@@ -2855,9 +3097,13 @@ pub fn handle_roll_block_game_play_ready_request(
         1,
     )
     .map_err(|e| e.to_string())?;
-    Ok(RollBlockGamePlayReadyResponse {
-        Code: Some(ErrorCode::Success),
-    })
+    let mut events = EventQueue::new();
+    let code = {
+        let mut qctx = state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::roll_block::handle_ready(&mut qctx, req.IncId)
+    };
+    drain_event_queue_best_effort(&mut events, state);
+    Ok(RollBlockGamePlayReadyResponse { Code: Some(code) })
 }
 
 pub fn handle_roll_block_input_request(
@@ -2874,9 +3120,13 @@ pub fn handle_roll_block_input_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
-    Ok(RollBlockInputResponse {
-        Code: Some(ErrorCode::Success),
-    })
+    let mut events = EventQueue::new();
+    let code = {
+        let mut qctx = state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::roll_block::handle_input(&mut qctx, req.IncId, req.Input)
+    };
+    drain_event_queue_best_effort(&mut events, state);
+    Ok(RollBlockInputResponse { Code: Some(code) })
 }
 
 pub fn handle_roll_block_movement_finish_request(
@@ -2891,25 +3141,17 @@ pub fn handle_roll_block_movement_finish_request(
     )
     .map_err(|e| e.to_string())?;
     let mut events = EventQueue::new();
-    {
+    let code = {
         let mut qctx = state.quest_context(&mut events);
-        if let Some(mut lp_ctx) = level_play::LevelPlayContext::from_quest_ctx(&mut qctx) {
-            let cfg_id = lp_ctx
-                .scene
-                .find_config_id_by_net_id(req.EntityId)
-                .unwrap_or(req.EntityId as i32);
-            let _ = level_play::on_condition_event(
-                &mut lp_ctx,
-                LevelPlayEventKind::FinishRollBlock,
-                cfg_id,
-                req.IncId,
-            );
-        }
-    }
+        sonoro_gamesv_logic::helpers::roll_block::handle_movement_finish(
+            &mut qctx,
+            req.IncId,
+            req.EntityId,
+        )
+        .map_err(|e| e.to_string())?
+    };
     drain_event_queue_best_effort(&mut events, state);
-    Ok(RollBlockMovementFinishResponse {
-        Code: Some(ErrorCode::Success),
-    })
+    Ok(RollBlockMovementFinishResponse { Code: Some(code) })
 }
 
 pub fn handle_roll_block_reset_game_play_request(
@@ -2923,25 +3165,28 @@ pub fn handle_roll_block_reset_game_play_request(
         0,
     )
     .map_err(|e| e.to_string())?;
-    Ok(RollBlockResetGamePlayResponse {
-        Code: Some(ErrorCode::Success),
-    })
+    let mut events = EventQueue::new();
+    let code = {
+        let mut qctx = state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::roll_block::handle_reset(&mut qctx, req.IncId)
+    };
+    drain_event_queue_best_effort(&mut events, state);
+    Ok(RollBlockResetGamePlayResponse { Code: Some(code) })
 }
 
 pub fn handle_roll_block_switch_control_block_request(
     state: &mut State,
     req: RollBlockSwitchControlBlockRequest,
 ) -> Result<RollBlockSwitchControlBlockResponse, String> {
-    let key = format!("rb_blk:ctrl:{}", req.IncId);
-    let prev = state.player_components.progress.info.get_key_int(&key);
-    let next = prev + 1;
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        &key,
-        next,
-    )
-    .map_err(|e| e.to_string())?;
+    let mut events = EventQueue::new();
+    let (prev, next) = {
+        let mut qctx = state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::roll_block::handle_switch_control_block(
+            &mut qctx,
+            req.IncId,
+        )
+    };
+    drain_event_queue_best_effort(&mut events, state);
     Ok(RollBlockSwitchControlBlockResponse {
         PreMainControlBlockEntityId: prev,
         CurMainControlBlockEntityId: next,
@@ -2960,9 +3205,12 @@ pub fn handle_roll_block_toggle_hint_request(
         i64::from(req.IsOpen),
     )
     .map_err(|e| e.to_string())?;
-    Ok(RollBlockToggleHintResponse {
-        Code: Some(ErrorCode::Success),
-    })
+    let code = sonoro_gamesv_logic::helpers::roll_block::handle_toggle_hint(
+        state.scene.as_mut(),
+        req.IncId,
+        req.IsOpen,
+    );
+    Ok(RollBlockToggleHintResponse { Code: Some(code) })
 }
 
 // =========================================================================

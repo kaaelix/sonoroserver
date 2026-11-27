@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -11,6 +12,268 @@ use crate::tables::blueprint_config::BlueprintConfig;
 use crate::tables::level_entity_config::LevelEntityConfig;
 use crate::tables::template_config::TemplateConfig;
 
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct AlertAreaConfigEntry {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default)]
+    pub Description: String,
+    #[serde(default)]
+    pub CreatorId: i32,
+    #[serde(default)]
+    pub MinValue: f64,
+    #[serde(default)]
+    pub MaxValue: f64,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockGridSize {
+    #[serde(default)]
+    pub X: i32,
+    #[serde(default)]
+    pub Y: i32,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockBlockInit {
+    #[serde(default)]
+    pub Type: String,
+    #[serde(default)]
+    pub BlockId: i32,
+    #[serde(default)]
+    pub LayType: Option<String>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockCellItem {
+    #[serde(default)]
+    pub Type: String,
+    #[serde(default)]
+    pub Key: Option<i32>,
+    #[serde(default)]
+    pub InitActive: Option<bool>,
+    #[serde(default)]
+    pub Direction: Option<String>,
+    #[serde(default)]
+    pub Height: Option<f64>,
+    #[serde(default)]
+    pub Path: Option<RollBlockCellPath>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockCellPath {
+    #[serde(default)]
+    pub Height: f64,
+    #[serde(default)]
+    pub Nodes: Vec<RollBlockGridSize>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockCellConfig {
+    #[serde(default)]
+    pub Type: String,
+    #[serde(default)]
+    pub LinkDirection: Option<String>,
+    #[serde(default)]
+    pub JumpDirection: Option<String>,
+    #[serde(default)]
+    pub Key: Option<i32>,
+    #[serde(default)]
+    pub Block: Option<RollBlockBlockInit>,
+    #[serde(default)]
+    pub Items: Vec<RollBlockCellItem>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockGridConfig {
+    #[serde(default)]
+    pub BoardSize: RollBlockGridSize,
+    #[serde(default)]
+    pub Grids: Vec<RollBlockCellConfig>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockHintStep {
+    #[serde(default)]
+    pub Type: String,
+    #[serde(default)]
+    pub BlockId: i32,
+    #[serde(default)]
+    pub Direction: String,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockLevelConfig {
+    #[serde(default)]
+    pub Difficulty: i32,
+    #[serde(default)]
+    pub GridConfig: RollBlockGridConfig,
+    #[serde(default)]
+    pub DefaultControlledBlockId: i32,
+    #[serde(default)]
+    pub HintSteps: Vec<RollBlockHintStep>,
+    #[serde(default)]
+    pub HintStepThreshold: Option<i32>,
+    #[serde(default)]
+    pub RewardId: i32,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockConfig {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default)]
+    pub GroupName: String,
+    #[serde(default)]
+    pub Levels: Vec<RollBlockLevelConfig>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockTemplateBlockEntry {
+    #[serde(default)]
+    pub BlockType: String,
+    #[serde(default)]
+    pub TemplateId: String,
+    #[serde(default)]
+    pub PhantomTemplateId: String,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockTemplateGridEntry {
+    #[serde(default)]
+    pub GridType: String,
+    #[serde(default)]
+    pub TemplateId: String,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockTemplateItemEntry {
+    #[serde(default)]
+    pub ItemType: String,
+    #[serde(default)]
+    pub TemplateId: String,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct RollBlockTemplateConfig {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default)]
+    pub Name: String,
+    #[serde(default)]
+    pub Length: f32,
+    #[serde(default)]
+    pub DelayTime: f32,
+    #[serde(default)]
+    pub DeadDelayTime: f32,
+    #[serde(default)]
+    pub BlockTemplate: Vec<RollBlockTemplateBlockEntry>,
+    #[serde(default)]
+    pub GridTemplates: Vec<RollBlockTemplateGridEntry>,
+    #[serde(default)]
+    pub ItemTemplates: Vec<RollBlockTemplateItemEntry>,
+    #[serde(default)]
+    pub TreasureTemplate: String,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct DollGrabItemComboEntry {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default)]
+    pub Name: String,
+    #[serde(default)]
+    pub MainItemId: i32,
+    #[serde(default)]
+    pub PartItemIds: Vec<i32>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct FurnitureConfigEntry {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default)]
+    pub ActivityId: i32,
+    #[serde(default)]
+    pub TagId: i32,
+    #[serde(default)]
+    pub Atmosphere: i32,
+    #[serde(default)]
+    pub EntityId: i64,
+    #[serde(default)]
+    pub IsEntityGroup: bool,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct SpringFestivalDefaultFurnitures {
+    #[serde(default)]
+    pub ArrayInt: Vec<i32>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct SpringFestivalAreaEntry {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default)]
+    pub Floor: i32,
+    #[serde(default)]
+    pub ActivityId: i32,
+    #[serde(default)]
+    pub MaxAtmosphere: i32,
+    #[serde(default)]
+    pub SlotEntityIds: Vec<i32>,
+    #[serde(default)]
+    pub AtmosphereLevelId: i32,
+    #[serde(default)]
+    pub DefaultFurnitures: HashMap<String, SpringFestivalDefaultFurnitures>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct SpringFestivalSkipEntryCfg {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default)]
+    pub Activity: i32,
+    #[serde(default)]
+    pub FinishCondition: i32,
+    #[serde(default)]
+    pub UnlockCondition: i32,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct SpringFestivalRewardEntry {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default)]
+    pub ActivityId: i32,
+    #[serde(default)]
+    pub TabId: i32,
+    #[serde(default)]
+    pub ConditionGroup: i32,
+    #[serde(default)]
+    pub DropId: i32,
+}
+
 #[derive(Default)]
 pub struct Assets {
     pub tables: DataTables,
@@ -20,6 +283,41 @@ pub struct Assets {
     pub level_play_nodes: LazyNodeStore,
     pub flow_states: LazyFlowStore,
     pub reward_index: RewardIndex,
+    pub alert_area_configs: HashMap<i32, AlertAreaConfigEntry>,
+    pub roll_blocks: HashMap<i32, RollBlockConfig>,
+    pub roll_block_templates: HashMap<i32, RollBlockTemplateConfig>,
+    pub doll_grab_combos: Vec<DollGrabItemComboEntry>,
+    pub furniture_configs: HashMap<i32, FurnitureConfigEntry>,
+    pub spring_festival_areas: Vec<SpringFestivalAreaEntry>,
+    pub spring_festival_skip_entries: Vec<SpringFestivalSkipEntryCfg>,
+    pub spring_festival_rewards: Vec<SpringFestivalRewardEntry>,
+}
+
+fn read_raw_table_str(
+    base_path: &str,
+    tables: &DataTables,
+    name: &str,
+) -> String {
+    if let Some(db) = tables.assets_db()
+        && let Some(raw) = db.read_raw_file(name)
+    {
+        raw
+    } else {
+        let path = format!("{base_path}/{name}.json");
+        std::fs::read_to_string(&path).unwrap_or_default()
+    }
+}
+
+fn parse_raw_vec<T: serde::de::DeserializeOwned>(
+    base_path: &str,
+    tables: &DataTables,
+    name: &str,
+) -> Vec<T> {
+    let raw = read_raw_table_str(base_path, tables, name);
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str::<Vec<T>>(&raw).unwrap_or_default()
 }
 
 impl Assets {
@@ -72,6 +370,41 @@ impl Assets {
             )
         };
         let reward_index = RewardIndex::new(tables.assets_db().cloned());
+        let mut alert_area_configs = HashMap::new();
+        for entry in parse_raw_vec::<AlertAreaConfigEntry>(base_path, &tables, "AlertAreaConfig") {
+            if entry.Id > 0 {
+                alert_area_configs.insert(entry.Id, entry);
+            }
+        }
+        let mut roll_blocks = HashMap::new();
+        for entry in parse_raw_vec::<RollBlockConfig>(base_path, &tables, "RollBlock") {
+            if entry.Id > 0 {
+                roll_blocks.insert(entry.Id, entry);
+            }
+        }
+        let mut roll_block_templates = HashMap::new();
+        for entry in parse_raw_vec::<RollBlockTemplateConfig>(base_path, &tables, "RollBlockTemplate") {
+            if entry.Id > 0 {
+                roll_block_templates.insert(entry.Id, entry);
+            }
+        }
+        let doll_grab_combos =
+            parse_raw_vec::<DollGrabItemComboEntry>(base_path, &tables, "DollGrabItemComboCsv");
+        let mut furniture_configs = HashMap::new();
+        for entry in parse_raw_vec::<FurnitureConfigEntry>(base_path, &tables, "Furniture") {
+            if entry.Id > 0 {
+                furniture_configs.insert(entry.Id, entry);
+            }
+        }
+        let spring_festival_areas =
+            parse_raw_vec::<SpringFestivalAreaEntry>(base_path, &tables, "SpringFestivalArea");
+        let spring_festival_skip_entries = parse_raw_vec::<SpringFestivalSkipEntryCfg>(
+            base_path,
+            &tables,
+            "SpringFestivalSkipEntry",
+        );
+        let spring_festival_rewards =
+            parse_raw_vec::<SpringFestivalRewardEntry>(base_path, &tables, "SpringFestivalReward");
 
         Ok(Self {
             tables,
@@ -81,6 +414,14 @@ impl Assets {
             level_play_nodes,
             flow_states,
             reward_index,
+            alert_area_configs,
+            roll_blocks,
+            roll_block_templates,
+            doll_grab_combos,
+            furniture_configs,
+            spring_festival_areas,
+            spring_festival_skip_entries,
+            spring_festival_rewards,
         })
     }
 
@@ -258,6 +599,17 @@ impl Assets {
 
     pub fn get_motorcycle_config_id(&self) -> Option<i32> {
         self.tables.get_motorcycle_config_id()
+    }
+
+    pub fn alert_area_bounds(&self, area_id: i32) -> (f64, f64) {
+        self.alert_area_configs
+            .get(&area_id)
+            .map(|c| {
+                let lo = c.MinValue.min(c.MaxValue);
+                let hi = c.MaxValue.max(lo);
+                (lo, hi)
+            })
+            .unwrap_or((0.0, 100.0))
     }
 }
 

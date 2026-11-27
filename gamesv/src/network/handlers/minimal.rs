@@ -1114,6 +1114,97 @@ pub fn handle_entity_follow_track_request(
         &format!("wp:follow_track:{}", req.EntityId),
     )
     .map_err(|e| e.to_string())?;
+    let map_id = state
+        .scene
+        .as_ref()
+        .map(|s| state.assets.resolve_map_config_id(s.instance_id))
+        .unwrap_or(8);
+    let cfg_id = state
+        .scene
+        .as_ref()
+        .and_then(|s| s.find_config_id_by_net_id(req.EntityId))
+        .or_else(|| i32::try_from(req.EntityId).ok())
+        .unwrap_or(0);
+    let mut foundation_id = 0i32;
+    if cfg_id > 0
+        && let Some(resolved) =
+            sonoro_gamesv_logic::helpers::level_play::resolve_entity_config(
+                &state.assets,
+                map_id,
+                i64::from(cfg_id),
+            )
+    {
+        for entry in &resolved.components.extra {
+            if let sonoro_gamesv_data::tables::entity_components::extra::ExtraEntry::FollowTrackComponent(
+                ft,
+            ) = entry
+            {
+                foundation_id = ft
+                    .EndType
+                    .as_ref()
+                    .and_then(|v| v.get("FoundationId"))
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| i32::try_from(v).ok())
+                    .unwrap_or(0);
+                break;
+            }
+        }
+    }
+    if cfg_id > 0 || foundation_id > 0 {
+        let mut events = EventQueue::new();
+        {
+            let mut qctx = state.quest_context(&mut events);
+            let cbs = quest_engine::action_callbacks();
+            if cfg_id > 0 {
+                let _ = sonoro_gamesv_logic::helpers::quest_actions::apply_entity_state_change(
+                    &mut qctx,
+                    &cbs,
+                    cfg_id,
+                    "关卡.Common.状态.完成",
+                );
+            }
+            if foundation_id > 0 {
+                let _ = sonoro_gamesv_logic::helpers::quest_actions::apply_entity_state_change(
+                    &mut qctx,
+                    &cbs,
+                    foundation_id,
+                    "关卡.Common.状态.完成",
+                );
+            }
+            let _ = quest_engine::on_condition_state_changed(&mut qctx);
+        }
+        drain_event_queue_best_effort(&mut events, state);
+    }
+    let reward_target = if foundation_id > 0 { foundation_id } else { cfg_id };
+    if reward_target > 0
+        && !state
+            .player_components
+            .progress
+            .info
+            .has_claim(&format!("follow_track:rw:{reward_target}"))
+        && let Some(resolved) =
+            sonoro_gamesv_logic::helpers::level_play::resolve_entity_config(
+                &state.assets,
+                map_id,
+                i64::from(reward_target),
+            )
+        && let Some(rc) = &resolved.components.RewardComponent
+        && let Some(reward_id) = rc.RewardId
+        && reward_id > 0
+    {
+        state
+            .player_components
+            .progress
+            .info
+            .mark_claim(&format!("follow_track:rw:{reward_target}"));
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        let mut rctx = state.reward_context();
+        let _ = reward::grant_drop_package(&mut rctx, reward_id, 1);
+    }
     Ok(EntityFollowTrackResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

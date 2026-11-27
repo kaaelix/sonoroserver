@@ -1228,6 +1228,58 @@ pub fn on_timers_due<S: PushSink + ?Sized>(
         progressed = true;
     }
 
+    if let Some(lp_ctx_check) = LevelPlayContext::from_quest_ctx(ctx) {
+        drop(lp_ctx_check);
+    }
+    if crate::helpers::alert::tick_alert_areas(ctx, now_ms)? {
+        progressed = true;
+    }
+    let due_state_changes = ctx
+        .scene
+        .as_deref_mut()
+        .map(|s| s.drain_due_state_changes(now_ms))
+        .unwrap_or_default();
+    if !due_state_changes.is_empty() {
+        let cbs = crate::helpers::quest_engine::action_callbacks::<S>();
+        for item in due_state_changes {
+            let cur_state = ctx
+                .quest_comp
+                .info
+                .get_entity_state(item.entity_config_id)
+                .unwrap_or("");
+            if item.expected_from_state.is_empty() || cur_state == item.expected_from_state {
+                let _ = crate::helpers::quest_actions::apply_entity_state_change(
+                    ctx,
+                    &cbs,
+                    item.entity_config_id as i32,
+                    &item.target_state,
+                );
+                crate::helpers::quest_engine::events::on_condition_state_changed(ctx)?;
+                progressed = true;
+            }
+        }
+    }
+    let due_delayed_actions = ctx
+        .scene
+        .as_deref_mut()
+        .map(|s| s.drain_due_delayed_actions(now_ms))
+        .unwrap_or_default();
+    if !due_delayed_actions.is_empty() {
+        for batch in due_delayed_actions {
+            let mut cbs = crate::helpers::quest_engine::action_callbacks::<S>();
+            cbs.bt_type = batch.bt_type;
+            quest_actions::execute_state_actions_with_wait(
+                ctx,
+                &mut cbs,
+                batch.owner_id,
+                batch.node_id,
+                batch.self_entity_config_id,
+                &batch.actions,
+            )?;
+            progressed = true;
+        }
+    }
+
     if progressed {
         finalize_progression(ctx)?;
     }
@@ -2068,6 +2120,7 @@ pub fn rollback_quest_to_node<S: PushSink + ?Sized>(
     if !ctx.quest_comp.info.has_active_quest(quest_id) {
         return Ok(());
     }
+    crate::helpers::alert::auto_disable_for_quest(ctx, quest_id)?;
     let nodes = ctx
         .assets
         .quest_nodes
@@ -2214,6 +2267,7 @@ pub fn succeed_quest<S: PushSink + ?Sized>(
     if !ctx.quest_comp.info.has_active_quest(quest_id) {
         return Ok(());
     }
+    crate::helpers::alert::auto_disable_for_quest(ctx, quest_id)?;
     if let Some(scene) = ctx.scene.as_deref_mut() {
         scene.quest_timers.cancel_quest(quest_id);
         scene.fail_timers.cancel_quest(quest_id);
@@ -2356,4 +2410,20 @@ pub fn finalize_progression<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>)
     ctx.sink
         .push(TraceQuestNotify::MSG_ID, &TraceQuestNotify { QuestId: tracked });
     ctx.quest_comp.save(ctx.fs)
+}
+
+pub fn on_alert_state_changed<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+) -> io::Result<()> {
+    let mut changed = recheck_pending_conditions(ctx)?;
+    if check_active_quest_failed_monitors(ctx, None)? {
+        changed = true;
+    }
+    if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(ctx) {
+        let _ = level_play::on_condition_state_changed(&mut lp_ctx)?;
+    }
+    if changed {
+        finalize_progression(ctx)?;
+    }
+    Ok(())
 }

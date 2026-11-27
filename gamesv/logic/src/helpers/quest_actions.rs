@@ -12,10 +12,10 @@ use sonoro_gamesv_fs::last_scene_info::LastSceneInfo;
 use sonoro_gamesv_fs::quest_info::{QuestInfo, append_unique_int, append_unique_str, remove_int_value, remove_str_value};
 use sonoro_proto::enums::{
     BtType, ChangeReason, ERemoveEntityType, ExitVehicleType, GameCtxType, GravityFlipType,
-    IllustratedType, MoveStatus, SuspendType, TeleportReason,
+    IllustratedType, LiftMoveType, MoveStatus, SuspendType, TeleportReason,
 };
 use sonoro_proto::pb::{
-    AddGuestNotify, AlertArea, AlertAreaNotify, AudioStatePb, AudioStateUpdateNotify,
+    AddGuestNotify, AudioStatePb, AudioStateUpdateNotify,
     BehaviorTreeCtxPb, BtSuspendNotify, BtVarUpdateNotify, CommonTagData, ElevatorMoveNotify,
     EnableNearbyTrackingNotify, EntityAddBubbleNotify, EntityAddDynamicInteractNotify,
     EntityCommonTagNotify, EntityCtxPb,
@@ -24,14 +24,16 @@ use sonoro_proto::pb::{
     FlowShowEntityNotify, GameCtxPb, GameCtxPbCtxInfoOneof, GameplayCueNotify,
     GravityFlipUpdateTypeNotify, GuideCondDoneNotify, IllustratedEntry, IllustratedUnlockNotify, InstanceTimer,
     InstanceTimerNotify, InstResultNotify, InstSettleNotify, LeaveSceneNotify,
-    LevelPlayStateNotify, MailInfosNotify, MapMarkShowIdInfoUpdateNotify, ModifyEntityCampNotify,
+    LevelPlayStateNotify, LiftMoveTypeCustomSpeedPb, LiftMoveTypeDefaultPb, LiftMoveTypePb,
+    LiftMoveTypeTeleportPb, MailInfosNotify, MapMarkShowIdInfoUpdateNotify, ModifyEntityCampNotify,
     MovePackageNotify, MoveReplaySample, MoveSplineConfig, MoveSplineConfigEndPointOneof,
     MoveSplineConfigLookDirOneof, MoveSplineConfigStartPointOneof, MoveSplineStatusNotify,
     MovingEntityData, NormalItem, NormalItemUpdateNotify, OccupationPbInfo,
     OperationRestrictionNotify, PlayerReviveNotify, PlayerVarNotify, RemoveGuestNotify,
     RoleTrialCloseNotify, RoleTrialOpenNotify, Rotator, RoverRogueRoomInfoNotify, SceneAreaState,
     SceneAreaStateNotify, SceneChangeDataLayerNotify, SceneItemMoveTargetInfo,
-    SceneItemMoveTargetNotify, SceneItemSplineRuntimeData, SceneSubLevelsChangedNotify,
+    SceneItemMoveTargetNotify, SceneItemSplineRuntimeData, SceneItemStateChangeConditionAction,
+    SceneSubLevelsChangedNotify,
     SceneTimeInfo, ShortMessageInfo, ShortMessageUpdateNotify, StateChangeActionCtxPb,
     SummonEntityNotify,
     SyncSceneTimeNotify, TeleportNotify, TeleportUpdateNotify, TemporaryTeleportAllInfoNotify,
@@ -597,8 +599,10 @@ pub fn execute_action<S: PushSink + ?Sized>(
         }
         "SetBattleState" => apply_set_battle_state_action(ctx, params),
         "ExecBattleAction" => apply_exec_battle_action(ctx, params)?,
-        "ExecAlertSystemAction" => apply_exec_alert_system_action(ctx, params)?,
-        "ModifySceneItemAttributeTag" => apply_modify_scene_tag_action(ctx, params)?,
+        "ExecAlertSystemAction" => {
+            crate::helpers::alert::apply_exec_alert_system_action(ctx, callbacks, Some(params))?
+        }
+        "ModifySceneItemAttributeTag" => apply_modify_scene_tag_action(ctx, callbacks, params)?,
         "SetElementalBoxToTarget" | "ChangeElementalBoxState" => {
             apply_elemental_box_action(ctx, name, params)?;
         }
@@ -642,6 +646,7 @@ pub fn execute_action<S: PushSink + ?Sized>(
             record_progress_add(ctx, "rogue:reward_cnt", 1)?;
         }
         "RollBlockGetReward" => {
+            crate::helpers::roll_block::try_grant_action_reward(ctx, params);
             record_progress_add(ctx, "rb_blk:rw", 1)?;
         }
         "HonamiStoryActivateSafeEvacuation" => {
@@ -700,6 +705,116 @@ pub fn execute_action<S: PushSink + ?Sized>(
                 apply_entity_state_change(ctx, callbacks, eid, perf_tag)?;
             }
         }
+        "SetJigsawFoundation" => {
+            if let Some(cfg) = params.get("Config").and_then(|v| v.as_object())
+                && let Some(eid) = json_int(cfg.get("EntityId"))
+                && eid > 0
+            {
+                let ty = json_str(cfg.get("Type")).unwrap_or("");
+                if ty == "SetPieceState"
+                    && let Some(pieces) = cfg.get("PieceState").and_then(|v| v.as_array())
+                {
+                    let mut changed = Vec::new();
+                    for p in pieces {
+                        let Some(po) = p.as_object() else {
+                            continue;
+                        };
+                        let Some(idx) = po.get("Index").and_then(|v| v.as_object()) else {
+                            continue;
+                        };
+                        let row = json_int(idx.get("RowIndex")).unwrap_or(0);
+                        let col = json_int(idx.get("ColumnIndex")).unwrap_or(0);
+                        let init_state = json_str(po.get("InitState")).unwrap_or("");
+                        let is_correct = json_bool(po.get("IsCorrect")).unwrap_or(false);
+                        let active = json_bool(po.get("Active")).unwrap_or(true);
+                        let flags = match init_state {
+                            "Correct" => 1i64,
+                            "Disable" => 0i64,
+                            "Incorrect" => 2i64,
+                            _ if is_correct => 1i64,
+                            _ if !active => 0i64,
+                            _ => 2i64,
+                        };
+                        changed.push(sonoro_proto::pb::BoardGridDynamicConfig {
+                            RowIndex: row,
+                            ColumnIndex: col,
+                            Flags: flags,
+                        });
+                    }
+                    if !changed.is_empty() {
+                        let board_id = ctx
+                            .scene
+                            .as_deref()
+                            .and_then(|s| s.find_entity_net_id_by_config_id(eid))
+                            .unwrap_or_else(|| i64::from(eid));
+                        if let Some(scene) = ctx.scene.as_deref_mut()
+                            && let Some(nid) = scene.find_entity_net_id_by_config_id(eid)
+                            && let Some(st) = scene.entity_mut(nid)
+                        {
+                            for c in &changed {
+                                if let Some(prev) = st
+                                    .world_item
+                                    .board_dynamic_configs
+                                    .iter_mut()
+                                    .find(|e| e.RowIndex == c.RowIndex && e.ColumnIndex == c.ColumnIndex)
+                                {
+                                    prev.Flags = c.Flags;
+                                } else {
+                                    st.world_item.board_dynamic_configs.push(c.clone());
+                                }
+                            }
+                        }
+                        ctx.sink.push(
+                            sonoro_proto::pb::BoardGridDynamicConfigChangeNotify::MSG_ID,
+                            &sonoro_proto::pb::BoardGridDynamicConfigChangeNotify {
+                                ChangedConfigs: changed,
+                                BoardEntityId: board_id,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        "SetJigsawItem" => {
+            if let Some(cfg) = params.get("Config").and_then(|v| v.as_object()) {
+                let item_id = json_int(cfg.get("ItemEntityId")).unwrap_or(0);
+                let found_id = json_int(cfg.get("FoundationEntityId")).unwrap_or(0);
+                if item_id > 0 && found_id > 0
+                    && let Some(dest) = cfg.get("Destination").and_then(|v| v.as_object())
+                {
+                    let row = json_int(dest.get("RowIndex")).unwrap_or(0);
+                    let col = json_int(dest.get("ColumnIndex")).unwrap_or(0);
+                    if let Some(pc) = ctx.progress_comp.as_deref_mut() {
+                        pc.info
+                            .set_key_str(&format!("jigsaw:place:{found_id}:{item_id}"), &format!("{row}:{col}"));
+                        pc.save(ctx.fs)?;
+                    }
+                    let board_net = ctx
+                        .scene
+                        .as_deref()
+                        .and_then(|s| s.find_entity_net_id_by_config_id(found_id))
+                        .unwrap_or_else(|| i64::from(found_id));
+                    let item_net = ctx
+                        .scene
+                        .as_deref()
+                        .and_then(|s| s.find_entity_net_id_by_config_id(item_id))
+                        .unwrap_or_else(|| i64::from(item_id));
+                    ctx.sink.push(
+                        sonoro_proto::pb::MovePlacementNotify::MSG_ID,
+                        &sonoro_proto::pb::MovePlacementNotify {
+                            TargetBoardEntityId: board_net,
+                            PlacementEntityId: item_net,
+                            PosRot: None,
+                            PosOnBoard: Some(sonoro_proto::pb::BoardGridPositionInfo {
+                                Row: row,
+                                Column: col,
+                                RotAngle: 0,
+                            }),
+                        },
+                    );
+                }
+            }
+        }
         "StopSceneItemMove" => apply_stop_scene_item_move(ctx, params)?,
         "StopMotorCruise" => record_progress_int(ctx, "motor:cruise", 0, false)?,
         "SetTeleControl" => {
@@ -747,7 +862,7 @@ pub fn execute_action<S: PushSink + ?Sized>(
         | "ChangeLiftTarget"
         | "NpcMoveToPoint"
         | "PlayerMoveToPoint"
-        | "CharacterMoveToPoint" => apply_server_move_action(ctx, name, params)?,
+        | "CharacterMoveToPoint" => apply_server_move_action(ctx, callbacks, name, params)?,
         "VehicleEnter"
         | "VehicleExitPlayer"
         | "VehicleExitNpc"
@@ -1996,9 +2111,10 @@ pub fn send_quest_entity_visibility<S: PushSink + ?Sized>(
             if eid <= 0 {
                 continue;
             }
-            ensure_quest_entity_spawned(ctx, eid);
+            // Update visibility flags before spawning so previously hidden entities aren't skipped.
             append_unique_int(&mut ctx.quest_comp.info.world.shown_entities, eid);
             remove_int_value(&mut ctx.quest_comp.info.world.hidden_entities, eid);
+            ensure_quest_entity_spawned(ctx, eid);
         }
     } else {
         for &eid in entity_ids {
@@ -2207,6 +2323,64 @@ fn execute_entity_state_change_behaviors<S: PushSink + ?Sized>(
             }
             matched_actions.extend(acts.iter().cloned());
         }
+        if let Some(cond_actions) = obj.get("ConditionAction").and_then(|v| v.as_array()) {
+            for (cond_idx, ca) in cond_actions.iter().enumerate() {
+                let Some(ca_obj) = ca.as_object() else {
+                    continue;
+                };
+                if let Some(cond_val) = ca_obj.get("Condition")
+                    && !cond_val.is_null()
+                {
+                    let mut eval_ctx = ctx.make_eval_context();
+                    eval_ctx.self_entity_config_id = entity_cfg_id;
+                    if !crate::helpers::condition::eval_inline_condition_block(&eval_ctx, cond_val)
+                    {
+                        continue;
+                    }
+                }
+                if let Some(acts) = ca_obj
+                    .get("Action")
+                    .or_else(|| ca_obj.get("Actions"))
+                    .and_then(|v| v.as_array())
+                {
+                    if let Some(entity_ctx) = &entity_ctx {
+                        crate::helpers::quest_engine::triggers::push_entity_level_events(
+                            ctx,
+                            GameCtxType::EntityStateChangeConditionAction,
+                            GameCtxPbCtxInfoOneof::EntityStateChangeConditionAction(
+                                SceneItemStateChangeConditionAction {
+                                    EntityCtx: Some(entity_ctx.clone()),
+                                    StateIndex: idx as i32,
+                                    ConditionIndex: cond_idx as i32,
+                                },
+                            ),
+                            acts,
+                        );
+                    }
+                    matched_actions.extend(acts.iter().cloned());
+                }
+            }
+        }
+        if let Some(delay_obj) = obj.get("DelayChangeState").and_then(|v| v.as_object())
+            && let Some(new_state) = json_str(delay_obj.get("NewState"))
+            && !new_state.is_empty()
+        {
+            let secs = json_float(delay_obj.get("Time")).unwrap_or(0.0);
+            let delay_ms = if secs.is_finite() && secs > 0.0 {
+                (f64::from(secs) * 1000.0).round() as i64
+            } else {
+                0
+            };
+            if let Some(scene) = ctx.scene.as_deref_mut() {
+                let due_ms = crate::scene::now_millis().saturating_add(delay_ms);
+                scene.upsert_pending_state_change(
+                    i64::from(entity_cfg_id),
+                    state_str.to_string(),
+                    new_state.to_string(),
+                    due_ms,
+                );
+            }
+        }
     }
     if matched_actions.is_empty() {
         return Ok(());
@@ -2214,9 +2388,11 @@ fn execute_entity_state_change_behaviors<S: PushSink + ?Sized>(
 
     let mut behavior_cbs = ActionCallbacks {
         on_entity_state_changed: callbacks.on_entity_state_changed,
+        on_alert_changed: callbacks.on_alert_changed,
+        self_entity_config_id: entity_cfg_id,
         ..Default::default()
     };
-    execute_action_list(ctx, &mut behavior_cbs, entity_cfg_id, 0, &matched_actions)
+    execute_state_actions_with_wait(ctx, &mut behavior_cbs, entity_cfg_id, 0, entity_cfg_id, &matched_actions)
 }
 
 pub fn sync_world_state_on_join<S: PushSink + ?Sized>(
@@ -2455,6 +2631,7 @@ pub fn sync_world_state_on_join<S: PushSink + ?Sized>(
             },
         );
     }
+    crate::helpers::alert::sync_alert_areas_on_join(ctx);
     Ok(())
 }
 
@@ -2576,13 +2753,17 @@ fn apply_change_self_entity_state<S: PushSink + ?Sized>(
     else {
         return Ok(());
     };
-    let Some(cfg_id) = ctx.scene.as_deref().and_then(|s| {
-        let owner_nid = s.active_flow_owner_entity_id;
-        if owner_nid == 0 {
-            None
-        } else {
-            s.entity(owner_nid).map(|e| e.config.config_id)
-        }
+    let Some(cfg_id) = (if callbacks.self_entity_config_id > 0 {
+        Some(callbacks.self_entity_config_id)
+    } else {
+        ctx.scene.as_deref().and_then(|s| {
+            let owner_nid = s.active_flow_owner_entity_id;
+            if owner_nid == 0 {
+                None
+            } else {
+                s.entity(owner_nid).map(|e| e.config.config_id)
+            }
+        })
     }) else {
         return Ok(());
     };
@@ -2987,8 +3168,6 @@ fn is_tracked_or_client_action(name: &str) -> bool {
             | "SeqEventFireBullet"
             | "SetActorVar"
             | "SetAudioEnable"
-            | "SetJigsawFoundation"
-            | "SetJigsawItem"
             | "SetSkillButtonEffect"
             | "SetSportsState"
             | "SetTargetElementalAbility"
@@ -5768,96 +5947,76 @@ fn apply_exec_battle_action<S: PushSink + ?Sized>(
     Ok(())
 }
 
-fn apply_exec_alert_system_action<S: PushSink + ?Sized>(
+pub fn execute_state_actions_with_wait<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
-    params: &Map<String, Value>,
+    callbacks: &mut ActionCallbacks<'_, S>,
+    owner_id: i32,
+    node_id: i32,
+    self_entity_config_id: i32,
+    actions: &[Value],
 ) -> io::Result<()> {
-    let Some(opt) = params.get("Option").and_then(|v| v.as_object()) else {
-        return Ok(());
-    };
-    let Some(atype) = json_str(opt.get("Type")) else {
-        return Ok(());
-    };
-    let Some(area_id) = json_int(opt.get("AreaId")) else {
-        return Ok(());
-    };
-    if area_id <= 0 {
+    if actions.is_empty() {
         return Ok(());
     }
-
-    let k_enable = format!("alert_enable:{area_id}");
-    let k_ui = format!("alert_ui:{area_id}");
-    let k_vis = format!("alert_vis:{area_id}");
-    let k_val = format!("alert_val:{area_id}");
-
-    let mut remove_ids = Vec::new();
-    let mut areas = Vec::new();
-
-    match atype {
-        "EnableAlertArea" => {
-            let enable = json_bool(opt.get("IsEnable")).unwrap_or(true);
-            record_progress_int(ctx, &k_enable, i64::from(enable), false)?;
-            if !enable {
-                remove_ids.push(area_id);
-            } else {
-                let pc = ctx.progress_comp.as_deref();
-                areas.push(AlertArea {
-                    AreaId: area_id,
-                    AlertValue: pc.map_or(0.0, |p| p.info.get_key_int(&k_val) as f32),
-                    EnableUi: pc.is_some_and(|p| p.info.get_key_int(&k_ui) != 0),
-                    VisibleUi: pc.is_some_and(|p| p.info.get_key_int(&k_vis) != 0),
-                    ..Default::default()
-                });
+    let mut deferred_wait_ms: i64 = 0;
+    for (idx, item) in actions.iter().enumerate() {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        if json_str(obj.get("Name")) == Some("Wait") {
+            let secs = obj
+                .get("Params")
+                .and_then(|v| v.as_object())
+                .and_then(|p| json_float(p.get("Time")))
+                .unwrap_or(0.0);
+            if secs.is_finite() && secs > 0.0 && idx + 1 < actions.len() {
+                deferred_wait_ms = ((f64::from(secs) * 1000.0).round() as i64).clamp(1, 300_000);
+                if let Some(scene) = ctx.scene.as_deref_mut() {
+                    let due_ms = crate::scene::now_millis().saturating_add(deferred_wait_ms);
+                    scene.pending_delayed_actions.push(crate::scene::PendingDelayedActions {
+                        owner_id,
+                        node_id,
+                        self_entity_config_id,
+                        bt_type: callbacks.bt_type,
+                        actions: actions[idx + 1..].to_vec(),
+                        due_ms,
+                    });
+                    break;
+                }
             }
+            continue;
         }
-        "EnableAlertUi" => {
-            let enable = json_bool(opt.get("IsEnable")).unwrap_or(true);
-            record_progress_int(ctx, &k_ui, i64::from(enable), false)?;
-            let pc = ctx.progress_comp.as_deref();
-            areas.push(AlertArea {
-                AreaId: area_id,
-                AlertValue: pc.map_or(0.0, |p| p.info.get_key_int(&k_val) as f32),
-                EnableUi: enable,
-                VisibleUi: pc.map_or(enable, |p| p.info.get_key_int(&k_vis) != 0),
-                ..Default::default()
-            });
-        }
-        "SetAlertUiVisible" => {
-            let vis = json_bool(opt.get("IsVisible")).unwrap_or(true);
-            record_progress_int(ctx, &k_vis, i64::from(vis), false)?;
-            let pc = ctx.progress_comp.as_deref();
-            areas.push(AlertArea {
-                AreaId: area_id,
-                AlertValue: pc.map_or(0.0, |p| p.info.get_key_int(&k_val) as f32),
-                EnableUi: pc.is_none_or(|p| p.info.get_key_int(&k_ui) != 0),
-                VisibleUi: vis,
-                ..Default::default()
-            });
-        }
-        "ModifyAlertValue" => {
-            let val = json_int(opt.get("AlertValue")).unwrap_or(0);
-            record_progress_int(ctx, &k_val, i64::from(val), false)?;
-            let pc = ctx.progress_comp.as_deref();
-            areas.push(AlertArea {
-                AreaId: area_id,
-                AlertValue: val as f32,
-                EnableUi: pc.is_none_or(|p| p.info.get_key_int(&k_ui) != 0),
-                VisibleUi: pc.is_none_or(|p| p.info.get_key_int(&k_vis) != 0),
-                ..Default::default()
-            });
-        }
-        _ => {}
-    }
-
-    if !areas.is_empty() || !remove_ids.is_empty() {
-        ctx.sink.push(
-            AlertAreaNotify::MSG_ID,
-            &AlertAreaNotify {
-                AlertAreas: areas,
-                RemoveAreaIds: remove_ids,
+        let mut child_cbs = ActionCallbacks {
+            bt_type: callbacks.bt_type,
+            is_flow_action: callbacks.is_flow_action,
+            defer_flow_transition: callbacks.defer_flow_transition,
+            deferred_bt_vars: None,
+            start_flow: callbacks.start_flow,
+            start_flow_state: callbacks.start_flow_state,
+            complete_guide: callbacks.complete_guide,
+            on_entity_state_changed: callbacks.on_entity_state_changed,
+            on_phone_message: callbacks.on_phone_message,
+            on_npc_mail: callbacks.on_npc_mail,
+            on_time_changed: callbacks.on_time_changed,
+            on_weather_changed: callbacks.on_weather_changed,
+            on_item_gained: callbacks.on_item_gained,
+            on_level_play_enabled: callbacks.on_level_play_enabled,
+            on_accept_focus_wait: callbacks.on_accept_focus_wait,
+            on_finish_flow_state: callbacks.on_finish_flow_state,
+            on_destroy_quest: callbacks.on_destroy_quest,
+            on_finish_condition: callbacks.on_finish_condition,
+            on_trace_current_quest: callbacks.on_trace_current_quest,
+            on_var_changed: callbacks.on_var_changed,
+            on_alert_changed: callbacks.on_alert_changed,
+            self_entity_config_id: if self_entity_config_id > 0 {
+                self_entity_config_id
+            } else {
+                callbacks.self_entity_config_id
             },
-        );
+        };
+        execute_action(ctx, &mut child_cbs, owner_id, node_id, item)?;
     }
+    let _ = deferred_wait_ms;
     Ok(())
 }
 
@@ -6074,12 +6233,19 @@ fn apply_set_npc_group_perform<S: PushSink + ?Sized>(
 
 fn apply_modify_scene_tag_action<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
+    callbacks: &ActionCallbacks<'_, S>,
     params: &Map<String, Value>,
 ) -> io::Result<()> {
     if ctx.scene.is_none() {
         return Ok(());
     }
-    let ids = parse_int_list(params.get("EntityIds"));
+    let mut ids = parse_int_list(params.get("EntityIds"));
+    if ids.is_empty()
+        && json_str(params.get("Type")) == Some("Self")
+        && callbacks.self_entity_config_id > 0
+    {
+        ids.push(callbacks.self_entity_config_id);
+    }
     let tags = parse_int_list(params.get("PerformanceTag"));
     if tags.is_empty() {
         return Ok(());
@@ -6142,8 +6308,47 @@ fn resolve_quest_spline_end_pos(
     Some([base[0] + off[0], base[1] + off[1], base[2] + off[2]])
 }
 
+fn parse_lift_move_type_pb(params: &Map<String, Value>) -> Option<LiftMoveTypePb> {
+    let mt = params.get("MoveType")?.as_object()?;
+    let mt_type = json_str(mt.get("Type")).unwrap_or("Default");
+    match mt_type {
+        "Teleport" => Some(LiftMoveTypePb {
+            Type: Some(LiftMoveType::Teleport),
+            MoveTeleport: Some(LiftMoveTypeTeleportPb {
+                StartTeleportOffsetDistance: json_float(mt.get("StartTeleportOffsetDistance"))
+                    .unwrap_or(0.0),
+                EndTeleportOffsetDistance: json_float(mt.get("EndTeleportOffsetDistance"))
+                    .unwrap_or(0.0),
+                SendTeleportEvent: json_bool(mt.get("SendTeleportEvent")).unwrap_or(false),
+                TeleportStartEventOffsetDistance: json_float(
+                    mt.get("TeleportStartEventOffsetDistance"),
+                )
+                .unwrap_or(0.0),
+            }),
+            ..Default::default()
+        }),
+        "CustomSpeed" => Some(LiftMoveTypePb {
+            Type: Some(LiftMoveType::CustomSpeed),
+            CustomSpeed: Some(LiftMoveTypeCustomSpeedPb {
+                TotalTime: json_float(mt.get("TotalTime")).unwrap_or(0.0),
+                TimePathCurve: json_str(mt.get("TimePathCurve"))
+                    .unwrap_or("")
+                    .as_bytes()
+                    .to_vec(),
+            }),
+            ..Default::default()
+        }),
+        _ => Some(LiftMoveTypePb {
+            Type: Some(LiftMoveType::Default),
+            MoveDefault: Some(LiftMoveTypeDefaultPb {}),
+            ..Default::default()
+        }),
+    }
+}
+
 fn apply_server_move_action<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
+    callbacks: &ActionCallbacks<'_, S>,
     name: &str,
     params: &Map<String, Value>,
 ) -> io::Result<()> {
@@ -6312,26 +6517,51 @@ fn apply_server_move_action<S: PushSink + ?Sized>(
         }
         "ChangeLiftTarget" => {
             if let Some(cfg_id) = resolve_action_entity_cfg_id(ctx.scene.as_deref(), params) {
+                let prev_persisted = ctx.progress_comp.as_deref().and_then(|pc| {
+                    let v = pc.info.get_key_int(&format!("elevator:{cfg_id}"));
+                    (v > 0).then_some(v as i32)
+                });
                 let loc = json_int(params.get("Location")).unwrap_or(0);
                 record_progress_int(ctx, &format!("lift_target:{cfg_id}"), i64::from(loc), false)?;
                 record_progress_int(ctx, &format!("elevator:{cfg_id}"), i64::from(loc), false)?;
                 ensure_quest_entity_spawned(ctx, cfg_id);
-                if let Some(scene) = ctx.scene.as_deref_mut()
-                    && let Some(net_id) = scene.find_entity_net_id_by_config_id(cfg_id)
-                    && let Some(storage) = scene.entity_mut(net_id)
-                {
-                    let prev_loc = storage.world_item.lift.map(|l| l.location);
+                let move_type = parse_lift_move_type_pb(params);
+                let move_info = ctx.scene.as_deref_mut().and_then(|scene| {
+                    let net_id = scene.find_entity_net_id_by_config_id(cfg_id)?;
+                    let storage = scene.entity_mut(net_id)?;
+                    let prev_loc = storage.world_item.lift.map(|l| l.location).or(prev_persisted);
                     storage.world_item.lift = Some(LiftComponent { location: loc });
-                    if loc > 0 && prev_loc != Some(loc) {
-                        ctx.sink.push(
-                            ElevatorMoveNotify::MSG_ID,
-                            &ElevatorMoveNotify {
-                                EntityId: net_id,
-                                Location: loc,
-                                MoveType: None,
-                            },
-                        );
-                    }
+                    Some((net_id, prev_loc))
+                });
+                if let Some((net_id, prev_loc)) = move_info
+                    && loc > 0
+                    && prev_loc != Some(loc)
+                {
+                    let moving_state = if loc > prev_loc.unwrap_or(1) {
+                        "关卡.电梯.上升"
+                    } else {
+                        "关卡.电梯.下降"
+                    };
+                    ctx.sink.push(
+                        ElevatorMoveNotify::MSG_ID,
+                        &ElevatorMoveNotify {
+                            EntityId: net_id,
+                            Location: loc,
+                            MoveType: move_type,
+                        },
+                    );
+                    let mut state_cbs = ActionCallbacks {
+                        on_entity_state_changed: Some(
+                            callbacks
+                                .on_entity_state_changed
+                                .unwrap_or(crate::helpers::quest_engine::events::on_entity_state_changed),
+                        ),
+                        ..Default::default()
+                    };
+                    apply_entity_state_change(ctx, &mut state_cbs, cfg_id, moving_state)?;
+                    let _ = crate::helpers::quest_engine::on_condition_state_changed(ctx)?;
+                } else {
+                    let _ = crate::helpers::quest_engine::on_condition_state_changed(ctx)?;
                 }
             }
         }

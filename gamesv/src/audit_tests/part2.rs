@@ -76,7 +76,7 @@ use sonoro_proto::pb::{
     KurotatoSyncEntityDealDamagePush, LandingDamageRequest, LowMemoryChangeSceneFinishRequest,
     LowMemoryChangeSceneStartNotify, MonsterDetectionInfoRequest, MonthCardRequest,
     MotorCycleCruiseStatePush, MotorFightRankListRequest, MotorSummonAndRidePush,
-    MovePlacementNotify, NewTowerRecommendRequest, OperationRestrictionNotify, PayInfoRequest,
+    AddPlacementNotify, NewTowerRecommendRequest, OperationRestrictionNotify, PayInfoRequest,
     PayShopInfoRequest, PhantomBattleCallCardRequest, PhantomBattleStartRequest,
     PhantomFetterRecommendRequest, PhantomMusicSwitchRequest, PinballFriendRankRequest,
     PlaceItemOnBoardRequest, PlayerAccessRangeRequest, PlayerDeadNotify,
@@ -1186,7 +1186,7 @@ fn audit_103_full_solo_regression_suite() {
     )
     .expect("place on board");
     assert!(!h.state.player_components.progress.info.get_key_str("misc:board_item:82050:82051").is_empty());
-    assert!(h.drain_push_msg_ids().contains(&MovePlacementNotify::MSG_ID));
+    assert!(h.drain_push_msg_ids().contains(&AddPlacementNotify::MSG_ID));
 
     h.state.player_components.echo.echo_map.insert(
         501,
@@ -2251,7 +2251,7 @@ fn audit_111_clock_weather_collect_lock_reset_point_and_filter_parity() {
         false,
         false
     ));
-    assert!(!is_spawnable_item_config(&var_mgr, BpEntityType::Monitor));
+    assert!(is_spawnable_item_config(&var_mgr, BpEntityType::Monitor));
     assert!(!is_spawnable_item_config(&var_mgr, BpEntityType::VarManager));
 
     h.state.player_components.quest.info.env.time_locked = true;
@@ -7678,5 +7678,848 @@ fn audit_146_elevator_airwall_jinzhou_npcs_tower_and_tod_lock() {
     }
     assert_eq!(h.state.scene.as_ref().unwrap().instance.map_time.hour, 19);
 }
+
+#[test]
+fn audit_147_ch2_cctv_alert_area_sneak_and_delay_state() {
+    use crate::network::handlers::{combat_sync, world_puzzle};
+    use crate::network::state::State;
+    use sonoro_gamesv_logic::helpers::{alert, condition};
+    use sonoro_proto::enums::SneakFinishType;
+    use sonoro_proto::pb::{
+        ChangeEntityStateRequest, EntityCameraAlertRequest, QuickHackSkillRequest, SneakFinishRequest,
+        SneakNotify, SneakRequest, SneakTimeRequest,
+    };
+
+    let mut h = TestHarness::new("audit_147_ch2_cctv", Some(100));
+    let mut events = EventQueue::default();
+
+    // 1) All world gameplay entity types unblocked in spawn table.
+    let mut cfg_stub = LevelEntityConfig::default();
+    cfg_stub.Id = 1;
+    cfg_stub.EntityId = 999_999;
+    cfg_stub.MapId = 100;
+    for bpt in [
+        BpEntityType::Monitor,
+        BpEntityType::DaemonHack,
+        BpEntityType::DollGrabShowcase,
+        BpEntityType::ExhibitBase,
+        BpEntityType::Furniture,
+        BpEntityType::Chair,
+    ] {
+        assert!(
+            is_spawnable_item_config(&cfg_stub, bpt),
+            "{bpt:?} must be spawnable"
+        );
+    }
+
+    // Spawn real Monitor (36000369) and QuickHack target (39700001) on Map 100.
+    let (mon_nid, qh_nid) = {
+        let State {
+            scene,
+            fs,
+            assets,
+            conn,
+            player_components,
+            ..
+        } = &mut h.state;
+        let sc = scene.as_mut().expect("scene");
+        let m = entity_cmd::spawn_with_location_and_progress(
+            &mut events,
+            sc,
+            fs,
+            assets,
+            conn,
+            &player_components.basic,
+            36_000_369,
+            Some(false),
+            Some(false),
+            Some(100),
+            None,
+            true,
+            &player_components.progress.info,
+            false,
+            true,
+        )
+        .expect("spawn Monitor")
+        .expect("Monitor handle");
+        let q = entity_cmd::spawn_with_location_and_progress(
+            &mut events,
+            sc,
+            fs,
+            assets,
+            conn,
+            &player_components.basic,
+            39_700_001,
+            Some(false),
+            Some(false),
+            Some(100),
+            None,
+            true,
+            &player_components.progress.info,
+            false,
+            true,
+        )
+        .expect("spawn QuickHack")
+        .expect("QuickHack handle");
+        (m.net_id, q.net_id)
+    };
+    let _ = events.drain_all().count();
+
+    // 2) AlertArea + EntityCameraAlertRequest + CompareAlertValue Custom + CheckAlertAreaEnabled.
+    let area_id = h
+        .state
+        .assets
+        .alert_area_configs
+        .keys()
+        .copied()
+        .next()
+        .unwrap_or(1);
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = quest_engine::action_callbacks();
+        let enable_params = serde_json::json!({
+            "Option": { "Type": "EnableAlertArea", "AreaId": area_id, "IsEnable": true }
+        });
+        alert::apply_exec_alert_system_action(&mut qctx, &mut cbs, enable_params.as_object())
+            .expect("enable AlertArea");
+        let modify_params = serde_json::json!({
+            "Option": {
+                "Type": "ModifyAlertValue",
+                "AreaId": area_id,
+                "SetType": { "Type": 3, "CustomValue": 10.0 }
+            }
+        });
+        alert::apply_exec_alert_system_action(&mut qctx, &mut cbs, modify_params.as_object())
+            .expect("set AlertArea value");
+        assert!(alert::is_alert_area_enabled(
+            qctx.progress_comp.as_deref(),
+            qctx.scene.as_deref(),
+            area_id
+        ));
+    }
+    let alert_resp = world_puzzle::handle_entity_camera_alert_request(
+        &mut h.state,
+        EntityCameraAlertRequest {
+            EntityId: mon_nid,
+            IsAlert: true,
+        },
+    )
+    .expect("camera alert");
+    assert_eq!(alert_resp.ErrorCode, Some(ErrorCode::Success));
+    {
+        let sc = h.state.scene.as_ref().unwrap();
+        let rt = sc.alert_areas.get(&area_id).expect("AlertArea runtime");
+        assert!(rt.alert_value >= 10.0);
+        let qctx = h.state.quest_context(&mut events);
+        let eval_ctx = qctx.make_eval_context();
+        assert!(eval_single_inline_condition(
+            &eval_ctx,
+            &serde_json::json!({
+                "Type": "CompareAlertValue",
+                "AreaId": area_id,
+                "CompareType": "Ge",
+                "CompareValue": { "Type": 2, "CompareValue": 5.0 }
+            })
+        ));
+        assert!(eval_single_inline_condition(
+            &eval_ctx,
+            &serde_json::json!({
+                "Type": "CheckAlertAreaEnabled",
+                "AreaId": area_id
+            })
+        ));
+    }
+
+    // 3) QuickHackSkillRequest & Sneak lifecycle.
+    let qh_resp = combat_sync::handle_quick_hack_skill_request(
+        &mut h.state,
+        &mut events,
+        QuickHackSkillRequest {
+            EntityId: qh_nid,
+            SkillId: 1,
+        },
+    )
+    .expect("QuickHack skill");
+    assert_eq!(qh_resp.ErrorCode, Some(ErrorCode::Success));
+
+    let sneak_resp = world_puzzle::handle_sneak_request(
+        &mut h.state,
+        SneakRequest {
+            TreeOwnerId: 139_000_025,
+            NodeId: 1,
+            IsStart: true,
+            TreeIncId: 139_000_025,
+        },
+    )
+    .expect("SneakRequest start");
+    assert_eq!(sneak_resp.ErrorId, Some(ErrorCode::Success));
+    assert!(!h.drain_decoded::<SneakNotify>(SneakNotify::MSG_ID).is_empty());
+
+    let sneak_t = world_puzzle::handle_sneak_time_request(
+        &mut h.state,
+        SneakTimeRequest {
+            TreeIncId: 139_000_025,
+            TreeOwnerId: 139_000_025,
+        },
+    )
+    .expect("SneakTimeRequest");
+    assert_eq!(sneak_t.ErrorId, Some(ErrorCode::Success));
+
+    let sneak_fin = world_puzzle::handle_sneak_finish_request(
+        &mut h.state,
+        SneakFinishRequest {
+            SneakId: 1,
+            FinishType: Some(SneakFinishType::SneakSuccess),
+        },
+    )
+    .expect("SneakFinish");
+    assert_eq!(sneak_fin.ErrorCode, Some(ErrorCode::Success));
+
+    // 4) DelayChangeState schedules & transitions state when due.
+    let lock_id = gameplay_tags::id_from_name(
+        &h.state.assets.tables.gameplay_tag_remap,
+        "关卡.Common.状态.锁定",
+    )
+    .unwrap_or(0);
+    if let Some(sc) = h.state.scene.as_mut() {
+        sc.upsert_pending_state_change(
+            36_000_369,
+            String::new(),
+            "关卡.Common.状态.锁定".into(),
+            0,
+        );
+        let due = sc.drain_due_state_changes(i64::MAX);
+        assert_eq!(due.len(), 1);
+    }
+    let ch_resp = world_puzzle::handle_change_entity_state_request(
+        &mut h.state,
+        ChangeEntityStateRequest {
+            EntityId: mon_nid as i32,
+            StateTagId: lock_id,
+        },
+    )
+    .expect("change state");
+    assert_eq!(ch_resp.ErrorCode, Some(ErrorCode::Success));
+    let _ = condition::eval_entity_visible_component;
+}
+
+#[test]
+fn audit_148_step3_beam_fan_jigsaw_foundation_hook_and_timeline() {
+    use crate::network::handlers::{combat_sync, events_misc, minimal, world_puzzle};
+    use crate::network::state::State;
+    use sonoro_proto::enums::EntityBeamReceiveType;
+    use sonoro_proto::pb::{
+        ActionNotify, AddPlacementNotify, BeamCastHitPlayerRequest, BeControlledRequest,
+        BoardGridPositionInfo, EntityBeamReceiveRequest, EntityFollowTrackRequest,
+        EntitySendEventRequest, FoundationRequest, HookLockPointFinishRequest,
+        ItemRelateFoundationNotify, MovePlacementNotify, MovePlacementRequest,
+        PlaceItemOnBoardRequest, PositionAndRotate, PullingFoundationRequest,
+        SetBaoziStateRequest, SetFanStateRequest, TimelineTraceControlRequest,
+        TimelineTraceStartRequest, TurntableCompleteRequest, VacuumCleanerRequest, Vector,
+    };
+
+    let mut h = TestHarness::new("audit_148_puzzles", Some(8));
+    let mut events = EventQueue::default();
+
+    let (cast_nid, recv_nid, pull_nid, fnd2_nid, board_nid, track_nid, fan_nid) = {
+        let State {
+            scene,
+            fs,
+            assets,
+            conn,
+            player_components,
+            ..
+        } = &mut h.state;
+        let sc = scene.as_mut().expect("scene");
+        let mut spawn_one = |cfg_id: i64| -> i64 {
+            entity_cmd::spawn_with_location_and_progress(
+                &mut events,
+                sc,
+                fs,
+                assets,
+                conn,
+                &player_components.basic,
+                cfg_id,
+                Some(false),
+                Some(false),
+                Some(8),
+                None,
+                true,
+                &player_components.progress.info,
+                false,
+                true,
+            )
+            .expect("spawn ok")
+            .expect("handle")
+            .net_id
+        };
+        (
+            spawn_one(133_003_485),
+            spawn_one(133_003_491),
+            spawn_one(106_901_929),
+            spawn_one(114_900_011),
+            spawn_one(102_002_159),
+            spawn_one(102_002_091),
+            spawn_one(106_002_504),
+        )
+    };
+    h.drain_count();
+
+    // 1) BeamCast & BeamReceive
+    let bc = combat_sync::handle_beam_cast_hit_player_request(
+        &mut h.state,
+        BeamCastHitPlayerRequest { EntityId: cast_nid },
+    )
+    .expect("beam cast");
+    assert_eq!(bc.Code, Some(ErrorCode::Success));
+    let br = world_puzzle::handle_entity_beam_receive_request(
+        &mut h.state,
+        EntityBeamReceiveRequest {
+            EntityId: recv_nid,
+            ReceiveType: Some(EntityBeamReceiveType::CompleteAction),
+        },
+    )
+    .expect("beam receive");
+    assert_eq!(br.ErrorCode, Some(ErrorCode::Success));
+
+    // 2) Projector SendEvent, Baozi, Fan
+    let se = world_puzzle::handle_entity_send_event_request(
+        &mut h.state,
+        EntitySendEventRequest {
+            EntityId: cast_nid,
+            EventKey: b"beam_done".to_vec(),
+        },
+    )
+    .expect("send event");
+    assert_eq!(se.ErrorCode, Some(ErrorCode::Success));
+    assert!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .has_claim("ent_self_ev:133003485:beam_done"),
+        "expected ent_self_ev claim recorded"
+    );
+    let _ = world_puzzle::handle_set_baozi_state_request(
+        &mut h.state,
+        SetBaoziStateRequest {
+            FanEntityId: fan_nid,
+            BaoziEntityId: recv_nid,
+            IsActive: 1,
+        },
+    )
+    .expect("baozi");
+    let _ = world_puzzle::handle_set_fan_state_request(
+        &mut h.state,
+        SetFanStateRequest {
+            FanEntityId: fan_nid,
+            IsActive: 1,
+        },
+    )
+    .expect("fan");
+
+    // 3) Jigsaw PlaceItemOnBoard & MovePlacement (with config_id + PosOnBoard notifies)
+    let place = events_misc::handle_place_item_on_board_request(
+        &mut h.state,
+        PlaceItemOnBoardRequest {
+            TargetBoardEntityId: board_nid,
+            PlacementEntityId: pull_nid,
+            ToPlace: 1,
+            PosOnBoard: Some(BoardGridPositionInfo {
+                Row: 1,
+                Column: 2,
+                RotAngle: 0,
+            }),
+            PosRot: None,
+        },
+    )
+    .expect("place on board");
+    assert_eq!(place.ErrCode, Some(ErrorCode::Success));
+    let add_n = h.drain_decoded::<AddPlacementNotify>(AddPlacementNotify::MSG_ID);
+    assert!(add_n.iter().any(|n| {
+        n.BoardEntityConfigId == 102_002_159
+            && n.GridInfo
+                .as_ref()
+                .is_some_and(|g| g.OccupyingEntityConfigId == 106_901_929)
+    }));
+
+    let mv = world_puzzle::handle_move_placement_request(
+        &mut h.state,
+        MovePlacementRequest {
+            TargetBoardEntityId: board_nid,
+            PlacementEntityId: pull_nid,
+            PosOnBoard: Some(BoardGridPositionInfo {
+                Row: 0,
+                Column: 1,
+                RotAngle: 90,
+            }),
+            PosRot: Some(PositionAndRotate::default()),
+        },
+    )
+    .expect("move placement");
+    assert_eq!(mv.ErrCode, Some(ErrorCode::Success));
+    let mv_n = h.drain_decoded::<MovePlacementNotify>(MovePlacementNotify::MSG_ID);
+    assert!(mv_n.iter().any(|n| n.PosOnBoard.is_some()));
+
+    // 4) PullingObjectFoundation, Foundation, BeControlled, Turntable, Vacuum, FollowTrack, Hook, Timeline
+    let _ = events_misc::handle_pulling_foundation_request(
+        &mut h.state,
+        PullingFoundationRequest {
+            EntityId: pull_nid,
+            AccusedEntityId: fnd2_nid,
+            Pos: Some(Vector::default()),
+            Rot: None,
+        },
+    )
+    .expect("pulling foundation");
+    let relate_n = h.drain_decoded::<ItemRelateFoundationNotify>(ItemRelateFoundationNotify::MSG_ID);
+    assert!(
+        relate_n
+            .iter()
+            .any(|n| n.FoundationEntityId == 106_901_929 && n.ItemEntityId == 114_900_011)
+    );
+
+    let _ = events_misc::handle_foundation_request(
+        &mut h.state,
+        FoundationRequest {
+            EntityId: fnd2_nid,
+            AccusedEntityId: recv_nid,
+            ActiveOperate: 1,
+            Pos: Some(Vector::default()),
+            Rot: None,
+        },
+    )
+    .expect("foundation");
+    let _ = world_puzzle::handle_be_controlled_request(
+        &mut h.state,
+        BeControlledRequest {
+            EntityId: recv_nid,
+            IsControl: false,
+        },
+    )
+    .expect("be_controlled detach");
+    let _ = events_misc::handle_turntable_complete_request(
+        &mut h.state,
+        TurntableCompleteRequest { EntityId: fan_nid },
+    )
+    .expect("turntable");
+    let _ = events_misc::handle_vacuum_cleaner_request(
+        &mut h.state,
+        VacuumCleanerRequest {
+            SkillId: 1,
+            SceneOwnerId: 0,
+            AdsorbEntityIncId: fan_nid,
+            EntityIncIds: vec![recv_nid],
+            Type: None,
+        },
+    )
+    .expect("vacuum");
+    let ft = minimal::handle_entity_follow_track_request(
+        &mut h.state,
+        EntityFollowTrackRequest {
+            EntityId: track_nid,
+        },
+    )
+    .expect("follow track");
+    assert_eq!(ft.ErrorCode, Some(ErrorCode::Success));
+    let _ = world_puzzle::handle_hook_lock_point_finish_request(
+        &mut h.state,
+        HookLockPointFinishRequest { EntityId: fan_nid },
+    )
+    .expect("hook finish");
+    let _ = world_puzzle::handle_timeline_trace_start_request(
+        &mut h.state,
+        TimelineTraceStartRequest {
+            EntityId: fan_nid,
+            Index: 0,
+        },
+    )
+    .expect("timeline start");
+    let _ = world_puzzle::handle_timeline_trace_control_request(
+        &mut h.state,
+        TimelineTraceControlRequest {
+            Forward: true,
+            EntityId: fan_nid,
+        },
+    )
+    .expect("timeline control");
+    let _ = ActionNotify::MSG_ID;
+}
+
+#[test]
+fn audit_149_roll_block_grid_physics_and_progression() {
+    use crate::network::connection::drain_event_queue_best_effort;
+    use crate::network::handlers::events_major;
+    use sonoro_gamesv_logic::helpers::roll_block;
+    use sonoro_proto::enums::RbGridDirection;
+    use sonoro_proto::pb::{
+        RbBlockPbStateStateOneof, RbBlockStateChangeNotify, RbInput, RbRollInput,
+        RollBlockCloseGamePlayNotify, RollBlockExitGamePlayRequest,
+        RollBlockGamePlayReadyRequest, RollBlockInputRequest, RollBlockMovementFinishRequest,
+        RollBlockOpenGamePlayNotify, RollBlockResetGamePlayNotify,
+        RollBlockResetGamePlayRequest, RollBlockToggleHintRequest,
+        RollBlockUpdateAvailableInputsNotify, RollBlockUpdateGamePlayNotify,
+    };
+
+    let mut h = TestHarness::new("audit_149_roll_block", Some(100));
+    let mut events = EventQueue::default();
+
+    // 1) RollBlock & RollBlockTemplate assets loaded cleanly.
+    assert!(h.state.assets.roll_blocks.contains_key(&700_004));
+    assert!(h.state.assets.roll_blocks.contains_key(&700_001));
+    assert!(h.state.assets.roll_block_templates.contains_key(&100_001));
+
+    // Activate LevelPlay 41000000 node 5 (FinishRollBlock for CenterEntityId 41000018, Group 700004).
+    h.state
+        .player_components
+        .quest
+        .info
+        .progress
+        .entered_level_plays
+        .push(41_000_000);
+    h.state
+        .player_components
+        .progress
+        .info
+        .set_key_int("lp_act:41000000:5", 1);
+
+    let launched = {
+        let mut qctx = h.state.quest_context(&mut events);
+        roll_block::try_launch_for_trigger(&mut qctx, "Interact", 41_700_031)
+            .expect("launch roll block")
+    };
+    assert!(launched, "FinishRollBlock must launch on Interact trigger");
+    drain_event_queue_best_effort(&mut events, &mut h.state);
+
+    let opens = h.drain_decoded::<RollBlockOpenGamePlayNotify>(RollBlockOpenGamePlayNotify::MSG_ID);
+    assert_eq!(opens.len(), 1);
+    let open_info = opens[0].Info.as_ref().expect("open info");
+    let inc_id = open_info.IncId;
+    assert_eq!(open_info.GroupId, 700_004);
+    assert_eq!(open_info.Difficulty, 1);
+    assert!(!open_info.InitInvisibleEntityIds.is_empty());
+    let sc = h.state.scene.as_ref().expect("scene");
+    assert!(
+        open_info
+            .InitInvisibleEntityIds
+            .iter()
+            .all(|nid| sc.entity(*nid).is_some()),
+        "RollBlock must spawn board entities into scene"
+    );
+    assert!(
+        sc.entities.iter().any(|e| e.world_item.rb_block.is_some()),
+        "RollBlock must spawn at least one RbBlock"
+    );
+    assert!(
+        sc.entities.iter().any(|e| e.world_item.rb_floor.is_some()),
+        "RollBlock must spawn at least one RbFloor"
+    );
+
+    // 2) Ready -> pushes AvailableInputs.
+    events_major::handle_roll_block_game_play_ready_request(
+        &mut h.state,
+        RollBlockGamePlayReadyRequest { IncId: inc_id },
+    )
+    .expect("ready");
+    let avail = h.drain_decoded::<RollBlockUpdateAvailableInputsNotify>(
+        RollBlockUpdateAvailableInputsNotify::MSG_ID,
+    );
+    assert_eq!(avail.len(), 1);
+    assert!(!avail[0].AvailableInputs.is_empty());
+
+    // 3) Replay HintSteps for 700004 Diff 1 -> should solve Diff 1 and push Diff 2 update!
+    let blk_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .roll_block_sessions
+        .get(&inc_id)
+        .unwrap()
+        .blocks[0]
+        .net_id;
+    let hints: Vec<RbGridDirection> = h
+        .state
+        .assets
+        .roll_blocks
+        .get(&700_004)
+        .unwrap()
+        .Levels[0]
+        .HintSteps
+        .iter()
+        .map(|s| match s.Direction.as_str() {
+            "Backward" => RbGridDirection::RbBackward,
+            "Right" => RbGridDirection::RbRight,
+            "Left" => RbGridDirection::RbLeft,
+            _ => RbGridDirection::RbForward,
+        })
+        .collect();
+    assert!(!hints.is_empty());
+
+    for (idx, dir) in hints.iter().enumerate() {
+        events_major::handle_roll_block_input_request(
+            &mut h.state,
+            RollBlockInputRequest {
+                IncId: inc_id,
+                Input: Some(RbInput {
+                    Roll: Some(RbRollInput {
+                        Direction: Some(*dir),
+                    }),
+                }),
+            },
+        )
+        .expect("input");
+        let st_n = h.drain_decoded::<RbBlockStateChangeNotify>(RbBlockStateChangeNotify::MSG_ID);
+        assert!(
+            matches!(
+                st_n.last().and_then(|n| n.State.as_ref()).and_then(|s| s.State.as_ref()),
+                Some(RbBlockPbStateStateOneof::MovingState(_))
+            ),
+            "step {idx} must emit MovingState"
+        );
+        events_major::handle_roll_block_movement_finish_request(
+            &mut h.state,
+            RollBlockMovementFinishRequest {
+                IncId: inc_id,
+                EntityId: blk_nid,
+            },
+        )
+        .expect("movement finish");
+    }
+
+    let updates =
+        h.drain_decoded::<RollBlockUpdateGamePlayNotify>(RollBlockUpdateGamePlayNotify::MSG_ID);
+    assert_eq!(
+        updates.len(),
+        1,
+        "Completing Difficulty 1 of 700004 must advance to Difficulty 2"
+    );
+    assert_eq!(updates[0].Info.as_ref().unwrap().Difficulty, 2);
+
+    // 4) Reset, ToggleHint, Exit cleanly.
+    events_major::handle_roll_block_toggle_hint_request(
+        &mut h.state,
+        RollBlockToggleHintRequest {
+            IncId: inc_id,
+            IsOpen: true,
+        },
+    )
+    .expect("toggle hint");
+    events_major::handle_roll_block_reset_game_play_request(
+        &mut h.state,
+        RollBlockResetGamePlayRequest { IncId: inc_id },
+    )
+    .expect("reset");
+    assert!(
+        !h.drain_decoded::<RollBlockResetGamePlayNotify>(RollBlockResetGamePlayNotify::MSG_ID)
+            .is_empty()
+    );
+    events_major::handle_roll_block_exit_game_play_request(
+        &mut h.state,
+        RollBlockExitGamePlayRequest { IncId: inc_id },
+    )
+    .expect("exit");
+    assert!(
+        !h.drain_decoded::<RollBlockCloseGamePlayNotify>(RollBlockCloseGamePlayNotify::MSG_ID)
+            .is_empty()
+    );
+}
+
+#[test]
+fn audit_150_doll_grab_exhibit_furniture_and_spring_festival() {
+    use crate::network::handlers::{activity, events_major, events_misc, world_puzzle};
+    use crate::network::state::State;
+    use sonoro_proto::pb::{
+        ActivityDataDataOneof, DollDeliveryNotify, DollDeliveryRequest, DollGarbInsertCoinRequest,
+        DollGarbStartRequest, DollGrabRequest, DollGrabStopRequest, DollGrabTimeBallRequest,
+        EntityItemBundleInfo, ExhibitionItemSaveRequest, FurnitureDiySaveRequest,
+        FurnitureDiySlotInfo, SpringFestivalAtmosphereUpdateNotify,
+    };
+
+    let mut h = TestHarness::new("audit_150_doll_furn", Some(8));
+    let mut events = EventQueue::default();
+
+    // 1) Spawn DollGrabMachine (150750068) on Map 8.
+    let doll_machine_nid = {
+        let State {
+            scene,
+            fs,
+            assets,
+            conn,
+            player_components,
+            ..
+        } = &mut h.state;
+        let sc = scene.as_mut().expect("scene");
+        let dm = entity_cmd::spawn_with_location_and_progress(
+            &mut events,
+            sc,
+            fs,
+            assets,
+            conn,
+            &player_components.basic,
+            150_750_068,
+            Some(false),
+            Some(false),
+            Some(8),
+            None,
+            true,
+            &player_components.progress.info,
+            false,
+            true,
+        )
+        .expect("spawn doll machine")
+        .expect("dm handle");
+        let pb = sc.entity(dm.net_id).unwrap().to_proto(assets, 0);
+        assert!(
+            pb.ComponentPbs.iter().any(|c| matches!(
+                &c.ComponentPb,
+                Some(EntityComponentPbComponentPbOneof::DollGrabMachineComponentPb(d))
+                    if !d.CanCapturedItems.is_empty()
+            )),
+            "DollGrabMachine must populate CanCapturedItems from ItemUniId list"
+        );
+        dm.net_id
+    };
+    h.drain_count();
+
+    // Grab the 3 parts of combo 350001 (MainItemId=350004, PartItemIds=[350005, 350006]) + timeball!
+    let _ = events_major::handle_doll_garb_insert_coin_request(
+        &mut h.state,
+        DollGarbInsertCoinRequest {
+            EntityIncId: doll_machine_nid,
+        },
+    )
+    .expect("coin");
+    let _ = events_major::handle_doll_garb_start_request(
+        &mut h.state,
+        DollGarbStartRequest {
+            EntityIncId: doll_machine_nid,
+        },
+    )
+    .expect("start");
+    for item_id in [350_004, 350_005, 350_006] {
+        let gr = events_major::handle_doll_grab_request(
+            &mut h.state,
+            DollGrabRequest {
+                EntityIncId: doll_machine_nid,
+                ItemUniId: item_id,
+            },
+        )
+        .expect("doll grab");
+        assert_eq!(gr.ErrorCode, Some(ErrorCode::Success));
+        assert!(!gr.GrabItemInfos.is_empty());
+    }
+    let _ = events_major::handle_doll_grab_time_ball_request(
+        &mut h.state,
+        DollGrabTimeBallRequest {
+            EntityIncId: doll_machine_nid,
+            ItemUniId: 750_014,
+        },
+    )
+    .expect("time ball");
+    let stop_r = events_major::handle_doll_grab_stop_request(
+        &mut h.state,
+        DollGrabStopRequest {
+            EntityIncId: doll_machine_nid,
+        },
+    )
+    .expect("stop");
+    assert!(stop_r.SessionScore >= 45);
+
+    let deliv = events_major::handle_doll_delivery_request(
+        &mut h.state,
+        DollDeliveryRequest {
+            EntityCfgId: 13_750_056,
+        },
+    )
+    .expect("delivery");
+    assert!(deliv.ItemIds.contains(&350_004));
+    assert!(
+        !h.drain_decoded::<DollDeliveryNotify>(DollDeliveryNotify::MSG_ID)
+            .is_empty(),
+        "DollDelivery must push DollDeliveryNotify"
+    );
+    assert!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int("doll:combo:13750056")
+            >= 1,
+        "Combo 350001 must increment doll:combo:13750056 for CheckDollGrabShowcaseItemComboAchieved"
+    );
+
+    // 2) ExhibitionItemSaveRequest persists and hydrates ExhibitBase component.
+    let ex_resp = events_misc::handle_exhibition_item_save_request(
+        &mut h.state,
+        ExhibitionItemSaveRequest {
+            EntityItemBundleInfos: vec![EntityItemBundleInfo {
+                EntityId: 42_750_039,
+                ItemId: 60_000_123,
+            }],
+        },
+    )
+    .expect("exhibit save");
+    assert_eq!(ex_resp.ErrCode, Some(ErrorCode::Success));
+    assert_eq!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int("exhibit:42750039"),
+        60_000_123
+    );
+
+    // 3) FurnitureDiySaveRequest computes real Atmosphere & notifies SpringFestivalActivity.
+    let furn_id = *h
+        .state
+        .assets
+        .furniture_configs
+        .keys()
+        .next()
+        .expect("Furniture config");
+    let diy_resp = world_puzzle::handle_furniture_diy_save_request(
+        &mut h.state,
+        FurnitureDiySaveRequest {
+            IsOneClickPreset: false,
+            ActivityId: 107_900_001,
+            AreaId: 101,
+            FurnitureDiySlotInfos: vec![FurnitureDiySlotInfo {
+                SlotEntityCfgId: 691_750_152,
+                RootFurnitureId: furn_id,
+                SubFurnitureIds: Vec::new(),
+            }],
+        },
+    )
+    .expect("furniture diy save");
+    assert_eq!(diy_resp.ErrCode, Some(ErrorCode::Success));
+    assert!(diy_resp.Atmosphere > 0);
+    assert!(
+        !h.drain_decoded::<SpringFestivalAtmosphereUpdateNotify>(
+            SpringFestivalAtmosphereUpdateNotify::MSG_ID
+        )
+        .is_empty()
+    );
+
+    let acts = {
+        let qctx = h.state.quest_context(&mut events);
+        let eval_ctx = qctx.make_eval_context();
+        activity::build_activity_list(
+            qctx.assets,
+            qctx.progress_comp.as_deref().unwrap(),
+            Some(&eval_ctx),
+        )
+    };
+    let sf = acts.iter().find_map(|a| match &a.Data {
+        Some(ActivityDataDataOneof::SpringFestivalActivityInfo(s)) => Some(s),
+        _ => None,
+    });
+    if let Some(info) = sf {
+        assert!(!info.UnlockFurnitures.is_empty());
+        assert!(!info.AreaInfos.is_empty());
+        assert!(info.Atmosphere > 0);
+    }
+}
+
 
 

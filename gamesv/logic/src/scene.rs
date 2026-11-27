@@ -205,6 +205,24 @@ pub enum CombineRegisterResult {
     Existing,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingEntityStateChange {
+    pub entity_config_id: i64,
+    pub expected_from_state: String,
+    pub target_state: String,
+    pub due_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingDelayedActions {
+    pub owner_id: i32,
+    pub node_id: i32,
+    pub self_entity_config_id: i32,
+    pub bt_type: sonoro_proto::enums::BtType,
+    pub actions: Vec<serde_json::Value>,
+    pub due_ms: i64,
+}
+
 #[derive(Debug)]
 pub struct Scene {
     pub player_id: i32,
@@ -235,6 +253,15 @@ pub struct Scene {
     pub player_motion_type: MotionType,
     pub has_player_motion: bool,
     pub active_sneak_id: i32,
+    pub active_sneak_owner_id: i32,
+    pub active_sneak_inc_id: i64,
+    pub active_sneak_due_ms: i64,
+    pub finished_sneak_nodes: HashSet<(i32, i32)>,
+    pub alert_areas: HashMap<i32, crate::helpers::alert::AlertAreaRuntime>,
+    pub roll_block_sessions: HashMap<i32, crate::helpers::roll_block::RollBlockSession>,
+    pub next_roll_block_inc_id: i32,
+    pub pending_state_changes: Vec<PendingEntityStateChange>,
+    pub pending_delayed_actions: Vec<PendingDelayedActions>,
     pub failed_dungeons: Vec<i32>,
     pub current_quest_node: i32,
     pub current_quest_id: i32,
@@ -331,6 +358,15 @@ impl Scene {
             player_motion_type: MotionType::Spurt,
             has_player_motion: false,
             active_sneak_id: 0,
+            active_sneak_owner_id: 0,
+            active_sneak_inc_id: 0,
+            active_sneak_due_ms: 0,
+            finished_sneak_nodes: HashSet::new(),
+            alert_areas: HashMap::new(),
+            roll_block_sessions: HashMap::new(),
+            next_roll_block_inc_id: 1,
+            pending_state_changes: Vec::new(),
+            pending_delayed_actions: Vec::new(),
             failed_dungeons: Vec::new(),
             current_quest_node: 19,
             current_quest_id: 139_000_025,
@@ -1432,12 +1468,72 @@ impl Scene {
             self.quest_timers.next_wake_delay_ms(now_ms),
             self.lp_timers.next_wake_delay_ms(now_ms),
             self.fail_timers.next_wake_delay_ms(now_ms),
+            crate::helpers::alert::next_alert_wake_delay_ms(&self.alert_areas, now_ms),
+            self.pending_state_changes
+                .iter()
+                .map(|p| (p.due_ms - now_ms).max(0))
+                .min(),
+            self.pending_delayed_actions
+                .iter()
+                .map(|p| (p.due_ms - now_ms).max(0))
+                .min(),
             self.lp_fail_timers.next_wake_delay_ms(now_ms),
             self.next_deferred_wait_delay_ms(now_ms),
         ]
         .into_iter()
         .flatten()
         .min()
+    }
+
+    pub fn upsert_pending_state_change(
+        &mut self,
+        entity_config_id: i64,
+        expected_from_state: String,
+        target_state: String,
+        due_ms: i64,
+    ) {
+        if let Some(entry) = self
+            .pending_state_changes
+            .iter_mut()
+            .find(|p| p.entity_config_id == entity_config_id)
+        {
+            entry.expected_from_state = expected_from_state;
+            entry.target_state = target_state;
+            entry.due_ms = due_ms;
+            return;
+        }
+        self.pending_state_changes.push(PendingEntityStateChange {
+            entity_config_id,
+            expected_from_state,
+            target_state,
+            due_ms,
+        });
+    }
+
+    pub fn drain_due_state_changes(&mut self, now_ms: i64) -> Vec<PendingEntityStateChange> {
+        let mut due = Vec::new();
+        let mut i = 0;
+        while i < self.pending_state_changes.len() {
+            if self.pending_state_changes[i].due_ms <= now_ms {
+                due.push(self.pending_state_changes.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        due
+    }
+
+    pub fn drain_due_delayed_actions(&mut self, now_ms: i64) -> Vec<PendingDelayedActions> {
+        let mut due = Vec::new();
+        let mut i = 0;
+        while i < self.pending_delayed_actions.len() {
+            if self.pending_delayed_actions[i].due_ms <= now_ms {
+                due.push(self.pending_delayed_actions.swap_remove(i));
+            } else {
+                i += 1;
+            }
+        }
+        due
     }
 
     pub fn clear_bt_occupations(&mut self) {

@@ -1,10 +1,10 @@
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_logic::component::player::PlayerProgressComponent;
 use sonoro_gamesv_logic::helpers::condition::{self, EvalContext};
-use sonoro_gamesv_logic::helpers::energy;
+use sonoro_gamesv_logic::helpers::{energy, pb_kv};
 use sonoro_gamesv_logic::sink::PushSink;
 use sonoro_proto::PbMessage;
-use sonoro_proto::enums::{ActivityOpenType, ActivityType, ErrorCode, SignState};
+use sonoro_proto::enums::{ActivityOpenType, ActivityType, ConditionTaskState, ErrorCode, SignState};
 use sonoro_proto::pb::{
     ActivityAvignon, ActivityBetHorsesData, ActivityBlackCoastData, ActivityCiacconaGalData,
     ActivityCorniceMeetingData, ActivityDangoMonopolyData, ActivityData, ActivityDataDataOneof,
@@ -13,27 +13,28 @@ use sonoro_proto::pb::{
     ActivityMoraleData, ActivityPermanentRogueData, ActivityPrizeDrawingData, ActivityRegressData,
     ActivityRequest, ActivityResponse, ActivityRogueData, ActivityScratchTicketData,
     ActivityTaskData, ActivityTimePointRewarData, ActivityTrapDefenseData, ActivityTurnTableData,
-    ActivityUpdateNotify, ActivityWeeklyRogueData, AdvertisingPageInfo, ArtemisActivityInfo,
+    ActivityUpdateNotify, ActivityWeeklyRogueData, AdvertisingPageInfo, AreaInfo, ArtemisActivityInfo,
     BabelTowerActivity, BeginnerCarnivalData, BossPilingActivityInfo, BossRushActivityData,
-    CumulativeShopData, DailyAdventureActivityData, DangoAbyssActivityData, DangoBrawlActivityInfo,
-    DoubleInstActivityReward, DreamLinkActivityData, DropCatchActivityInfo, EdgeRunnerActivityInfo,
-    EncircleActivityPb, FarmGoldData, FeiXuePreheatActivityInfo, FightPhotoActivityData,
-    FlagChallengeActivityInfo, FloroRanchActivityData, GatherActivityInfo, GiantActivityInfo,
-    GolemCrackActivityInfo, H5ViewActivityData, HarvestActivity, HonamiStoryActivityData,
-    InfrThemeActivityPb, KurotatoActivityData, LifePointDrawActivityData,
-    LinkageCheckInActivityData, MapTravelActivityData, MatchThreeActivityInfo,
-    MotorCycleIpActivityData, MotorDecalActivityData, MotorDevelopActivityData,
-    MotorFightActivityPb, MotorFightTalentTreePb, MotorParkourActivityInfo, MowTowerActivityData,
-    NewBieCourseActivity, NewPlayerSupportActivityData, NewPlayerSupportActivityV2Pb,
-    NewTowerClimbingActivityData, NewbieAdventureV2Pb, NewbieCourseV2ActivityPb,
-    NewbieMainActivityPb, OnlineMotorActivityData, ParkourActivity, PhantomArenaActivityData,
-    PhantomBattleGuideActivity, PhantomCollectActivity, PinballActivityData,
-    PreheatSignActivityData, QingXiaoActivityInfo, RealmBetweenActivityInfo, RhythmActivityPb,
-    RiskHarvestActivityData, RoadBookActivityInfo, RoleCoopActivityData, RoleGiftActivityData,
-    RoleSkinTrialActivity, RoleTowerActivityData, RoleTrialInfoActivity, RoguelikeSeason,
-    RoverRogueActivityData, RoverRogueHistoryInsInfo, SignActivity, SkinRewardActivityData,
-    SolarSchoolActivityPb, SolarisSpeedActivity, SpringFestivalActivityInfo, SpringSignData,
-    SurvivorsActivityData, TetrisActivityInfo, ThemeCelebration, ThroughTrainActivityData,
+    ConditionTask, CumulativeShopData, DailyAdventureActivityData, DangoAbyssActivityData,
+    DangoBrawlActivityInfo, DoubleInstActivityReward, DreamLinkActivityData, DropCatchActivityInfo,
+    EdgeRunnerActivityInfo, EncircleActivityPb, FarmGoldData, FeiXuePreheatActivityInfo,
+    FightPhotoActivityData, FlagChallengeActivityInfo, FloroRanchActivityData,
+    FurnitureDiySlotInfo, GatherActivityInfo, GiantActivityInfo, GolemCrackActivityInfo,
+    H5ViewActivityData, HarvestActivity, HonamiStoryActivityData, InfrThemeActivityPb,
+    KurotatoActivityData, LifePointDrawActivityData, LinkageCheckInActivityData,
+    MapTravelActivityData, MatchThreeActivityInfo, MotorCycleIpActivityData,
+    MotorDecalActivityData, MotorDevelopActivityData, MotorFightActivityPb,
+    MotorFightTalentTreePb, MotorParkourActivityInfo, MowTowerActivityData, NewBieCourseActivity,
+    NewPlayerSupportActivityData, NewPlayerSupportActivityV2Pb, NewTowerClimbingActivityData,
+    NewbieAdventureV2Pb, NewbieCourseV2ActivityPb, NewbieMainActivityPb, OnlineMotorActivityData,
+    ParkourActivity, PhantomArenaActivityData, PhantomBattleGuideActivity, PhantomCollectActivity,
+    PinballActivityData, PreheatSignActivityData, QingXiaoActivityInfo, RealmBetweenActivityInfo,
+    RhythmActivityPb, RiskHarvestActivityData, RoadBookActivityInfo, RoleCoopActivityData,
+    RoleGiftActivityData, RoleSkinTrialActivity, RoleTowerActivityData, RoleTrialInfoActivity,
+    RoguelikeSeason, RoverRogueActivityData, RoverRogueHistoryInsInfo, SignActivity,
+    SkinRewardActivityData, SolarSchoolActivityPb, SolarisSpeedActivity,
+    SpringFestivalActivityInfo, SpringSignData, SpringSkipEntry, SurvivorsActivityData,
+    TetrisActivityInfo, ThemeCelebration, ThroughTrainActivityData,
     ThroughTrainSummaryActivityData, TotalTopUpActivityInfo, TowerDefenseActivityInfo,
     WuWuWeekActivity,
 };
@@ -541,6 +542,131 @@ fn supports_base_only(act_type: ActivityType) -> bool {
     )
 }
 
+fn build_spring_festival_activity(
+    assets: &Assets,
+    progress_comp: &PlayerProgressComponent,
+    cond_ctx: Option<&EvalContext<'_>>,
+    act_id: i32,
+) -> SpringFestivalActivityInfo {
+    let mut area_infos = Vec::new();
+    let mut computed_atm = 0i32;
+    for area in &assets.spring_festival_areas {
+        if area.ActivityId != act_id {
+            continue;
+        }
+        let key = format!("diy_slots:{act_id}:{}", area.Id);
+        let area_info = if let Some(saved) = pb_kv::load_msg::<AreaInfo>(progress_comp, &key)
+        {
+            saved
+        } else {
+            let mut slot_infos = Vec::new();
+            let mut default_atm = 0i32;
+            for &slot_id in &area.SlotEntityIds {
+                let root_furn = progress_comp
+                    .info
+                    .get_key_int(&format!("furn_slot:{slot_id}"))
+                    .max(0) as i32;
+                let root_furn = if root_furn > 0 {
+                    root_furn
+                } else {
+                    area.DefaultFurnitures
+                        .get(&slot_id.to_string())
+                        .and_then(|d| d.ArrayInt.first().copied())
+                        .unwrap_or(0)
+                };
+                if root_furn > 0
+                    && let Some(fc) = assets.furniture_configs.get(&root_furn)
+                {
+                    default_atm = default_atm.saturating_add(fc.Atmosphere);
+                }
+                slot_infos.push(FurnitureDiySlotInfo {
+                    SlotEntityCfgId: slot_id,
+                    RootFurnitureId: root_furn,
+                    SubFurnitureIds: Vec::new(),
+                });
+            }
+            AreaInfo {
+                AreaId: area.Id,
+                Atmosphere: default_atm,
+                FurnitureDiySlotInfos: slot_infos,
+            }
+        };
+        computed_atm = computed_atm.saturating_add(area_info.Atmosphere);
+        area_infos.push(area_info);
+    }
+
+    let mut unlock_furnitures: Vec<i32> = assets
+        .furniture_configs
+        .values()
+        .filter(|f| f.ActivityId == act_id || f.ActivityId == 0)
+        .map(|f| f.Id)
+        .collect();
+    unlock_furnitures.sort_unstable();
+    unlock_furnitures.dedup();
+
+    let claims = &progress_comp.info.dynamic.claims;
+    let mut reward_score_ids = Vec::new();
+    append_int_claim_suffixes(claims, "sf_score:", &mut reward_score_ids);
+    let mut reward_level_ids = Vec::new();
+    append_int_claim_suffixes(claims, "sf_atm:", &mut reward_level_ids);
+
+    let saved_atm_score = progress_comp.info.get_key_int("spring:atmosphere_score") as i32;
+    let atmosphere = saved_atm_score.max(computed_atm);
+    let atmosphere_level = (progress_comp.info.get_key_int("spring:atmosphere") as i32)
+        .max(if atmosphere > 0 { (atmosphere / 1000).max(1) } else { 0 });
+
+    let condition_tasks = assets
+        .spring_festival_rewards
+        .iter()
+        .filter(|r| r.ActivityId == act_id)
+        .map(|r| {
+            let taken = progress_comp
+                .info
+                .has_claim(&format!("sf_task:{}", r.Id));
+            let finished = taken
+                || (r.ConditionGroup > 0
+                    && cond_ctx.is_some_and(|c| condition::eval_condition_group(c, r.ConditionGroup)));
+            ConditionTask {
+                Id: r.Id,
+                Current: i32::from(finished),
+                Target: 1,
+                Status: Some(if taken {
+                    ConditionTaskState::ConditionTaskTaken
+                } else if finished {
+                    ConditionTaskState::ConditionTaskFinish
+                } else {
+                    ConditionTaskState::ConditionTaskRunning
+                }),
+            }
+        })
+        .collect();
+
+    let spring_skip_entries = assets
+        .spring_festival_skip_entries
+        .iter()
+        .filter(|e| e.Activity == act_id)
+        .map(|e| SpringSkipEntry {
+            Id: e.Id,
+            UnLock: e.UnlockCondition <= 0
+                || cond_ctx.is_some_and(|c| condition::eval_condition_group(c, e.UnlockCondition)),
+            Finish: e.FinishCondition > 0
+                && cond_ctx.is_some_and(|c| condition::eval_condition_group(c, e.FinishCondition)),
+        })
+        .collect();
+
+    SpringFestivalActivityInfo {
+        AreaInfos: area_infos,
+        UnlockFurnitures: unlock_furnitures,
+        ConditionTasks: condition_tasks,
+        RewardScoreIds: reward_score_ids,
+        RewardLevelIds: reward_level_ids,
+        Atmosphere: atmosphere,
+        AtmosphereLevel: atmosphere_level,
+        SpringSkipEntries: spring_skip_entries,
+        ..Default::default()
+    }
+}
+
 fn append_int_claim_suffixes(claims: &[String], prefix: &str, target: &mut Vec<i32>) {
     for c in claims {
         if let Some(rest) = c.strip_prefix(prefix)
@@ -637,6 +763,10 @@ pub fn build_activity_list(
         } else if act_type == ActivityType::RoleTrialActivity {
             Some(ActivityDataDataOneof::RoleTrialInfoActivity(
                 RoleTrialInfoActivity::default(),
+            ))
+        } else if act_type == ActivityType::SpringFestivalActivity {
+            Some(ActivityDataDataOneof::SpringFestivalActivityInfo(
+                build_spring_festival_activity(assets, progress_comp, cond_ctx, def.Id),
             ))
         } else {
             default_data_for_type(act_type, def.Id, now_s, progress_comp)

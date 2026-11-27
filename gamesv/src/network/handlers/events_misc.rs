@@ -68,7 +68,7 @@ use sonoro_proto::pb::{
     MiniWriteLetterSaveContentResponse, MixDrinkRoleInviteRequest, MixDrinkRoleInviteResponse,
     MixDrinkRoleRewardRequest, MixDrinkRoleRewardResponse, MixDrinkSettleRequest,
     MixDrinkSettleResponse, MoonPhaseRandomRequest, MoonPhaseRandomResponse,
-    MoonPhaseRewardRequest, MoonPhaseRewardResponse, MoonPhaseSelect, MovePlacementNotify,
+    MoonPhaseRewardRequest, MoonPhaseRewardResponse, MoonPhaseSelect,
     MowTowerLevelsRewardRequest, MowTowerLevelsRewardResponse, MowTowerResultNotify,
     MowTowerSettlementRequest, MowTowerSettlementResponse, MulCorniceMeetingRewardRequest,
     MulCorniceMeetingRewardResponse, OccupyRewardRequest, OccupyRewardResponse,
@@ -356,6 +356,27 @@ pub fn handle_turntable_complete_request(
         &format!("turntable:done:{}", req.EntityId),
     )
     .map_err(|e| e.to_string())?;
+    let cfg_id = state
+        .scene
+        .as_ref()
+        .and_then(|s| s.find_config_id_by_net_id(req.EntityId))
+        .or_else(|| i32::try_from(req.EntityId).ok())
+        .unwrap_or(0);
+    if cfg_id > 0 {
+        let mut events = EventQueue::new();
+        {
+            let mut qctx = state.quest_context(&mut events);
+            let cbs = quest_engine::action_callbacks();
+            let _ = quest_actions::apply_entity_state_change(
+                &mut qctx,
+                &cbs,
+                cfg_id,
+                "关卡.Common.状态.完成",
+            );
+            let _ = quest_engine::on_condition_state_changed(&mut qctx);
+        }
+        drain_event_queue_best_effort(&mut events, state);
+    }
     Ok(TurntableCompleteResponse {
         ErrCode: Some(ErrorCode::Success),
         EntityId: req.EntityId,
@@ -1437,21 +1458,150 @@ pub fn handle_place_item_on_board_request(
     state: &mut State,
     req: PlaceItemOnBoardRequest,
 ) -> Result<PlaceItemOnBoardResponse, String> {
+    let (board_net, board_cfg, item_cfg, map_id) = match state.scene.as_ref() {
+        Some(sc) => {
+            let b_cfg = sc
+                .find_config_id_by_net_id(req.TargetBoardEntityId)
+                .or_else(|| i32::try_from(req.TargetBoardEntityId).ok())
+                .unwrap_or(0);
+            let b_net = if sc.net_id_map.contains_key(&req.TargetBoardEntityId) {
+                req.TargetBoardEntityId
+            } else {
+                sc.find_entity_net_id_by_config_id(b_cfg)
+                    .unwrap_or(req.TargetBoardEntityId)
+            };
+            let i_cfg = sc
+                .find_config_id_by_net_id(req.PlacementEntityId)
+                .or_else(|| i32::try_from(req.PlacementEntityId).ok())
+                .unwrap_or(0);
+            (
+                b_net,
+                b_cfg,
+                i_cfg,
+                state.assets.resolve_map_config_id(sc.instance_id),
+            )
+        }
+        None => (
+            req.TargetBoardEntityId,
+            i32::try_from(req.TargetBoardEntityId).unwrap_or(0),
+            i32::try_from(req.PlacementEntityId).unwrap_or(0),
+            8,
+        ),
+    };
+    let pos_on_board = req.PosOnBoard.clone().unwrap_or_default();
     let key = format!(
         "misc:board_item:{}:{}",
         req.TargetBoardEntityId, req.PlacementEntityId
     );
     pb_kv::save_msg(&state.fs, &mut state.player_components.progress, &key, &req)
         .map_err(|e| e.to_string())?;
-    let _ = state.conn.push_msg(
-        MovePlacementNotify::MSG_ID,
-        &MovePlacementNotify {
-            TargetBoardEntityId: req.TargetBoardEntityId,
-            PlacementEntityId: req.PlacementEntityId,
-            PosRot: req.PosRot,
-            PosOnBoard: req.PosOnBoard,
-        },
-    );
+    if board_cfg > 0 && item_cfg > 0 {
+        if req.ToPlace != 0 {
+            state.player_components.progress.info.set_key_str(
+                &format!("jigsaw:place:{board_cfg}:{item_cfg}"),
+                &format!("{}:{}", pos_on_board.Row, pos_on_board.Column),
+            );
+        } else {
+            state
+                .player_components
+                .progress
+                .info
+                .set_key_str(&format!("jigsaw:place:{board_cfg}:{item_cfg}"), "");
+        }
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(sc) = state.scene.as_mut()
+        && let Some(st) = sc.entity_mut(board_net)
+    {
+        st.world_item
+            .board_occupied
+            .retain(|e| e.OccupyingEntityConfigId != item_cfg);
+        if req.ToPlace != 0 && item_cfg > 0 {
+            st.world_item.board_occupied.push(
+                sonoro_proto::pb::OccupiedBoardGridInfo {
+                    Pos: Some(pos_on_board.clone()),
+                    OccupyingEntityConfigId: item_cfg,
+                    EntityConfigType: 0,
+                },
+            );
+        }
+    }
+    let grid_info = sonoro_proto::pb::OccupiedBoardGridInfo {
+        Pos: Some(pos_on_board.clone()),
+        OccupyingEntityConfigId: item_cfg,
+        EntityConfigType: 0,
+    };
+    if req.ToPlace != 0 {
+        let _ = state.conn.push_msg(
+            sonoro_proto::pb::AddPlacementNotify::MSG_ID,
+            &sonoro_proto::pb::AddPlacementNotify {
+                GridInfo: Some(grid_info),
+                BoardEntityConfigId: board_cfg,
+            },
+        );
+    } else {
+        let _ = state.conn.push_msg(
+            sonoro_proto::pb::RemovePlacementFromBoardNotify::MSG_ID,
+            &sonoro_proto::pb::RemovePlacementFromBoardNotify {
+                GridInfo: Some(grid_info),
+                BoardEntityConfigId: board_cfg,
+            },
+        );
+    }
+    if req.ToPlace != 0
+        && board_cfg > 0
+        && item_cfg > 0
+        && let Some(resolved) =
+            level_play::resolve_entity_config(&state.assets, map_id, i64::from(board_cfg))
+        && let Some(jf) = resolved.components.extra.iter().find_map(|e| match e {
+            ExtraEntry::JigsawFoundation(j) => Some(j),
+            _ => None,
+        })
+    {
+        for mc in &jf.MatchedConfig {
+            let Some(mobj) = mc.as_object() else {
+                continue;
+            };
+            let t_row = mobj
+                .get("TargetIndex")
+                .and_then(|v| v.get("RowIndex"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(-1) as i32;
+            let t_col = mobj
+                .get("TargetIndex")
+                .and_then(|v| v.get("ColumnIndex"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(-1) as i32;
+            let item_match = mobj
+                .get("JigsawItemIds")
+                .and_then(|v| v.as_array())
+                .is_some_and(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_i64())
+                        .any(|id| id == i64::from(item_cfg))
+                });
+            if t_row == pos_on_board.Row && t_col == pos_on_board.Column && item_match
+                && let Some(acts) = mobj.get("Actions").and_then(|v| v.as_array())
+                && !acts.is_empty()
+            {
+                let mut events = EventQueue::new();
+                {
+                    let mut qctx = state.quest_context(&mut events);
+                    let _ = quest_engine::triggers::execute_entity_actions(
+                        &mut qctx,
+                        board_net,
+                        board_cfg,
+                        acts,
+                    );
+                }
+                drain_event_queue_best_effort(&mut events, state);
+            }
+        }
+    }
     let mut events = EventQueue::new();
     {
         let mut qctx = state.quest_context(&mut events);
@@ -1667,6 +1817,40 @@ pub fn handle_exhibition_item_save_request(
         &req,
     )
     .map_err(|e| e.to_string())?;
+    for bundle in &req.EntityItemBundleInfos {
+        let mut resolved_cfg_id = 0i32;
+        if let Some(scene) = state.scene.as_mut() {
+            let target_nid = if scene.entity(bundle.EntityId).is_some() {
+                Some(bundle.EntityId)
+            } else {
+                i32::try_from(bundle.EntityId)
+                    .ok()
+                    .and_then(|cid| scene.find_entity_net_id_by_config_id(cid))
+            };
+            if let Some(nid) = target_nid
+                && let Some(ent) = scene.entity_mut(nid)
+            {
+                resolved_cfg_id = ent.config.config_id;
+                ent.world_item.exhibition_item_id = Some(bundle.ItemId);
+            }
+        }
+        state.player_components.progress.info.set_key_int(
+            &format!("exhibit:{}", bundle.EntityId),
+            i64::from(bundle.ItemId),
+        );
+        if resolved_cfg_id > 0 {
+            state.player_components.progress.info.set_key_int(
+                &format!("exhibit:{resolved_cfg_id}"),
+                i64::from(bundle.ItemId),
+            );
+        }
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    super::world_puzzle::flush_quest_condition_changed(state);
     Ok(ExhibitionItemSaveResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -1790,13 +1974,150 @@ pub fn handle_foundation_request(
     state: &mut State,
     req: FoundationRequest,
 ) -> Result<FoundationResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("misc:foundation:{}", req.EntityId),
-        i64::from(req.ActiveOperate),
-    )
-    .map_err(|e| e.to_string())?;
+    let (found_cfg, item_cfg, inst_id, map_id) = match state.scene.as_ref() {
+        Some(sc) => {
+            let f_cfg = sc
+                .find_config_id_by_net_id(req.EntityId)
+                .or_else(|| i32::try_from(req.EntityId).ok())
+                .unwrap_or(0);
+            let i_cfg = sc
+                .find_config_id_by_net_id(req.AccusedEntityId)
+                .or_else(|| i32::try_from(req.AccusedEntityId).ok())
+                .unwrap_or(0);
+            (
+                f_cfg,
+                i_cfg,
+                sc.instance_id,
+                state.assets.resolve_map_config_id(sc.instance_id),
+            )
+        }
+        None => (
+            i32::try_from(req.EntityId).unwrap_or(0),
+            i32::try_from(req.AccusedEntityId).unwrap_or(0),
+            8,
+            8,
+        ),
+    };
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int(
+            &format!("misc:foundation:{}", req.EntityId),
+            i64::from(req.ActiveOperate),
+        );
+        if found_cfg > 0 && item_cfg > 0 {
+            if req.ActiveOperate != 0 {
+                info.set_key_int(&format!("foundation_match:{found_cfg}"), i64::from(item_cfg));
+                info.set_key_int(
+                    &format!("controlled_foundation:{item_cfg}"),
+                    i64::from(found_cfg),
+                );
+            } else {
+                info.set_key_int(&format!("foundation_match:{found_cfg}"), 0);
+                info.set_key_int(&format!("controlled_foundation:{item_cfg}"), 0);
+            }
+        }
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let mut match_index = 1i32;
+    let mut self_state_opt: Option<String> = None;
+    let mut item_state_opt: Option<String> = None;
+    if found_cfg > 0
+        && let Some(resolved) =
+            level_play::resolve_entity_config(&state.assets, map_id, i64::from(found_cfg))
+        && let Some(if2) = resolved.components.extra.iter().find_map(|e| match e {
+            ExtraEntry::ItemFoundation2(c) => Some(c),
+            _ => None,
+        })
+        && let Some(mcs) = if2
+            .Config
+            .as_ref()
+            .and_then(|c| c.get("MatchingConfigs"))
+            .and_then(|v| v.as_array())
+    {
+        let picked = mcs
+            .iter()
+            .enumerate()
+            .find(|(_, mc)| {
+                mc.get("Condition")
+                    .and_then(|c| c.get("EntityMatch"))
+                    .and_then(|em| em.get("EntityIds"))
+                    .and_then(|ids| ids.as_array())
+                    .is_some_and(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_i64())
+                            .any(|id| id == i64::from(item_cfg))
+                    })
+            })
+            .or_else(|| mcs.first().map(|mc| (0usize, mc)));
+        if let Some((idx, mc)) = picked {
+            match_index = (idx + 1) as i32;
+            if let Some(cb) = mc.get("Callback").and_then(|v| v.as_object()) {
+                if req.ActiveOperate != 0 {
+                    self_state_opt = cb
+                        .get("ChangeSelfState")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(ToString::to_string);
+                    item_state_opt = cb
+                        .get("ChangeItemState")
+                        .or_else(|| cb.get("ChangeAdsorbateState"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(ToString::to_string);
+                } else {
+                    self_state_opt = cb
+                        .get("ChangeSelfStateAfterDischarged")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(ToString::to_string);
+                    item_state_opt = cb
+                        .get("ChangeItemStateAfterDischarged")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(ToString::to_string);
+                }
+            }
+        }
+    }
+    if found_cfg > 0 && item_cfg > 0 {
+        let _ = state.conn.push_msg(
+            sonoro_proto::pb::BeControlledPosInFoundationNotify::MSG_ID,
+            &sonoro_proto::pb::BeControlledPosInFoundationNotify {
+                FoundationEntityId: if req.ActiveOperate != 0 {
+                    i64::from(found_cfg)
+                } else {
+                    0
+                },
+                BeControlledEntityId: i64::from(item_cfg),
+                InstId: inst_id,
+                MatchIndex: if req.ActiveOperate != 0 {
+                    match_index
+                } else {
+                    -1
+                },
+            },
+        );
+    }
+    let mut events = EventQueue::new();
+    {
+        let mut qctx = state.quest_context(&mut events);
+        let cbs = quest_engine::action_callbacks();
+        if let Some(s) = &self_state_opt {
+            let _ = quest_actions::apply_entity_state_change(&mut qctx, &cbs, found_cfg, s);
+        }
+        if let Some(s) = &item_state_opt
+            && item_cfg > 0
+        {
+            let _ = quest_actions::apply_entity_state_change(&mut qctx, &cbs, item_cfg, s);
+        }
+        let _ = quest_engine::on_condition_state_changed(&mut qctx);
+    }
+    drain_event_queue_best_effort(&mut events, state);
     Ok(FoundationResponse {
         ErrorCode: Some(ErrorCode::Success),
         ActiveOperate: req.ActiveOperate,
@@ -1989,6 +2310,120 @@ pub fn handle_pulling_foundation_request(
     let key = format!("misc:pull_foundation:{}", req.EntityId);
     pb_kv::save_msg(&state.fs, &mut state.player_components.progress, &key, &req)
         .map_err(|e| e.to_string())?;
+    let (found_cfg, found_net, item_cfg, inst_id, map_id) = match state.scene.as_ref() {
+        Some(sc) => {
+            let f_cfg = sc
+                .find_config_id_by_net_id(req.EntityId)
+                .or_else(|| i32::try_from(req.EntityId).ok())
+                .unwrap_or(0);
+            let f_net = if sc.net_id_map.contains_key(&req.EntityId) {
+                req.EntityId
+            } else {
+                sc.find_entity_net_id_by_config_id(f_cfg)
+                    .unwrap_or(req.EntityId)
+            };
+            let i_cfg = sc
+                .find_config_id_by_net_id(req.AccusedEntityId)
+                .or_else(|| i32::try_from(req.AccusedEntityId).ok())
+                .unwrap_or(0);
+            (
+                f_cfg,
+                f_net,
+                i_cfg,
+                sc.instance_id,
+                state.assets.resolve_map_config_id(sc.instance_id),
+            )
+        }
+        None => (
+            i32::try_from(req.EntityId).unwrap_or(0),
+            req.EntityId,
+            i32::try_from(req.AccusedEntityId).unwrap_or(0),
+            8,
+            8,
+        ),
+    };
+    let mut match_index = 1i32;
+    let mut self_state_opt: Option<String> = None;
+    let mut item_state_opt: Option<String> = None;
+    if found_cfg > 0
+        && let Some(resolved) =
+            level_play::resolve_entity_config(&state.assets, map_id, i64::from(found_cfg))
+        && let Some(pof) = resolved.components.extra.iter().find_map(|e| match e {
+            ExtraEntry::PullingObjectFoundation(p) => Some(p),
+            _ => None,
+        })
+        && let Some(mcs) = pof
+            .Config
+            .as_ref()
+            .and_then(|c| c.get("MatchingConfigs"))
+            .and_then(|v| v.as_array())
+    {
+        let picked = mcs
+            .iter()
+            .enumerate()
+            .find(|(_, mc)| {
+                mc.get("Condition")
+                    .and_then(|c| c.get("EntityMatch"))
+                    .and_then(|em| em.get("EntityIds"))
+                    .and_then(|ids| ids.as_array())
+                    .is_some_and(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_i64())
+                            .any(|id| id == i64::from(item_cfg))
+                    })
+            })
+            .or_else(|| mcs.first().map(|mc| (0usize, mc)));
+        if let Some((idx, mc)) = picked {
+            match_index = (idx + 1) as i32;
+            if let Some(cb) = mc.get("Callback").and_then(|v| v.as_object()) {
+                self_state_opt = cb
+                    .get("ChangeSelfState")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string);
+                item_state_opt = cb
+                    .get("ChangeItemState")
+                    .or_else(|| cb.get("ChangeAdsorbateState"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string);
+            }
+        }
+    }
+    if let Some(sc) = state.scene.as_mut()
+        && let Some(st) = sc.entity_mut(found_net)
+    {
+        st.world_item.pulling_foundation_present = true;
+        st.world_item.pulling_relation_id = item_cfg;
+        st.world_item.pulling_match_index = match_index;
+    }
+    if found_cfg > 0 && item_cfg > 0 {
+        let _ = state.conn.push_msg(
+            sonoro_proto::pb::ItemRelateFoundationNotify::MSG_ID,
+            &sonoro_proto::pb::ItemRelateFoundationNotify {
+                FoundationEntityId: i64::from(found_cfg),
+                InstId: inst_id,
+                Reason: Some(sonoro_proto::enums::ItemRelateFoundationReason::Normal),
+                MatchIndex: match_index,
+                ItemEntityId: i64::from(item_cfg),
+            },
+        );
+    }
+    let mut events = EventQueue::new();
+    {
+        let mut qctx = state.quest_context(&mut events);
+        let cbs = quest_engine::action_callbacks();
+        if let Some(s) = &self_state_opt {
+            let _ = quest_actions::apply_entity_state_change(&mut qctx, &cbs, found_cfg, s);
+        }
+        if let Some(s) = &item_state_opt
+            && item_cfg > 0
+        {
+            let _ = quest_actions::apply_entity_state_change(&mut qctx, &cbs, item_cfg, s);
+        }
+        let _ = quest_engine::on_condition_state_changed(&mut qctx);
+    }
+    drain_event_queue_best_effort(&mut events, state);
     Ok(PullingFoundationResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -2442,6 +2877,58 @@ pub fn handle_renju_exit_matched_action_request(
         &format!("misc:renju_exit:{}", req.EntityId),
     )
     .map_err(|e| e.to_string())?;
+    let (board_net, board_cfg, map_id) = match state.scene.as_ref() {
+        Some(sc) => {
+            let cfg = sc
+                .find_config_id_by_net_id(req.EntityId)
+                .or_else(|| i32::try_from(req.EntityId).ok())
+                .unwrap_or(0);
+            let net = if sc.net_id_map.contains_key(&req.EntityId) {
+                req.EntityId
+            } else {
+                sc.find_entity_net_id_by_config_id(cfg).unwrap_or(req.EntityId)
+            };
+            (net, cfg, state.assets.resolve_map_config_id(sc.instance_id))
+        }
+        None => (req.EntityId, i32::try_from(req.EntityId).unwrap_or(0), 8),
+    };
+    if board_cfg > 0
+        && let Some(resolved) =
+            level_play::resolve_entity_config(&state.assets, map_id, i64::from(board_cfg))
+        && let Some(jf) = resolved.components.extra.iter().find_map(|e| match e {
+            ExtraEntry::JigsawFoundation(j) => Some(j),
+            _ => None,
+        })
+        && let Some(exits) = jf
+            .CompleteCondition
+            .as_ref()
+            .and_then(|c| c.get("ExitMatchedConfig"))
+            .and_then(|v| v.as_array())
+    {
+        for ex in exits {
+            if let Some(acts) = ex.get("Actions").and_then(|v| v.as_array())
+                && !acts.is_empty()
+            {
+                let mut events = EventQueue::new();
+                {
+                    let mut qctx = state.quest_context(&mut events);
+                    let _ = quest_engine::triggers::execute_entity_actions(
+                        &mut qctx,
+                        board_net,
+                        board_cfg,
+                        acts,
+                    );
+                }
+                drain_event_queue_best_effort(&mut events, state);
+            }
+        }
+    }
+    let mut events = EventQueue::new();
+    {
+        let mut qctx = state.quest_context(&mut events);
+        let _ = quest_engine::on_condition_state_changed(&mut qctx);
+    }
+    drain_event_queue_best_effort(&mut events, state);
     Ok(RenjuExitMatchedActionResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -2451,16 +2938,55 @@ pub fn handle_renju_reset_request(
     state: &mut State,
     req: RenjuResetRequest,
 ) -> Result<RenjuResetResponse, String> {
-    state
-        .player_components
-        .progress
-        .info
-        .add_key_int(&format!("misc:renju_reset:{}", req.EntityId), 1);
-    state
-        .player_components
-        .progress
-        .save(&state.fs)
-        .map_err(|e| e.to_string())?;
+    let board_cfg = state
+        .scene
+        .as_ref()
+        .and_then(|s| s.find_config_id_by_net_id(req.EntityId))
+        .or_else(|| i32::try_from(req.EntityId).ok())
+        .unwrap_or(0);
+    {
+        let info = &mut state.player_components.progress.info;
+        info.add_key_int(&format!("misc:renju_reset:{}", req.EntityId), 1);
+        if board_cfg > 0 {
+            let pfx = format!("jigsaw:place:{board_cfg}:");
+            for kv in &mut info.dynamic.strs {
+                if kv.key.starts_with(&pfx) {
+                    kv.val.clear();
+                }
+            }
+        }
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(sc) = state.scene.as_mut() {
+        let board_net = if sc.net_id_map.contains_key(&req.EntityId) {
+            req.EntityId
+        } else {
+            sc.find_entity_net_id_by_config_id(board_cfg)
+                .unwrap_or(req.EntityId)
+        };
+        if let Some(st) = sc.entity_mut(board_net) {
+            st.world_item.board_occupied.clear();
+        }
+    }
+    if board_cfg > 0 {
+        let mut events = EventQueue::new();
+        {
+            let mut qctx = state.quest_context(&mut events);
+            let cbs = quest_engine::action_callbacks();
+            let _ = quest_actions::apply_entity_state_change(
+                &mut qctx,
+                &cbs,
+                board_cfg,
+                "关卡.Common.状态.常态",
+            );
+            let _ = quest_engine::on_condition_state_changed(&mut qctx);
+        }
+        drain_event_queue_best_effort(&mut events, state);
+    }
     Ok(RenjuResetResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -2602,6 +3128,52 @@ pub fn handle_vacuum_cleaner_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    let map_id = state
+        .scene
+        .as_ref()
+        .map(|s| state.assets.resolve_map_config_id(s.instance_id))
+        .unwrap_or(8);
+    let mut state_changes = Vec::new();
+    for raw_eid in &req.EntityIncIds {
+        let cfg_id = state
+            .scene
+            .as_ref()
+            .and_then(|s| s.find_config_id_by_net_id(*raw_eid))
+            .or_else(|| i32::try_from(*raw_eid).ok())
+            .unwrap_or(0);
+        if cfg_id <= 0 {
+            continue;
+        }
+        if let Some(resolved) =
+            level_play::resolve_entity_config(&state.assets, map_id, i64::from(cfg_id))
+        {
+            for entry in &resolved.components.extra {
+                if let ExtraEntry::InhaledItemComponent(ih) = entry
+                    && let Some(per) = &ih.InhaledPerResult
+                    && let Some(st) = per
+                        .get("ChangeSelfState")
+                        .or_else(|| per.get("ChangeState"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                {
+                    state_changes.push((cfg_id, st.to_string()));
+                    break;
+                }
+            }
+        }
+    }
+    if !state_changes.is_empty() {
+        let mut events = EventQueue::new();
+        {
+            let mut qctx = state.quest_context(&mut events);
+            let cbs = quest_engine::action_callbacks();
+            for (cfg_id, st) in &state_changes {
+                let _ = quest_actions::apply_entity_state_change(&mut qctx, &cbs, *cfg_id, st);
+            }
+            let _ = quest_engine::on_condition_state_changed(&mut qctx);
+        }
+        drain_event_queue_best_effort(&mut events, state);
+    }
     Ok(VacuumCleanerResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

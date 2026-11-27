@@ -344,13 +344,22 @@ pub fn reevaluate_in_range_triggers<S: PushSink + ?Sized>(
         if let Some(tpl) = ctx.assets.find_template_config(&lcfg.BlueprintType) {
             tpl.ComponentsData.merge_into(&mut components);
         }
-        let Some(trig) = components.TriggerComponent.as_ref() else {
-            continue;
-        };
-        if trig.Disabled.unwrap_or(false) {
-            continue;
+        let mut range_triggered = false;
+        if let Some(trig) = components.TriggerComponent.as_ref()
+            && !trig.Disabled.unwrap_or(false)
+        {
+            if handle_entity_range_trigger(ctx, eid, cfg_id, trig, true)? {
+                dirty = true;
+            }
+            range_triggered = true;
         }
-        if handle_entity_range_trigger(ctx, eid, cfg_id, trig, true)? {
+        if crate::helpers::roll_block::try_launch_for_trigger(ctx, "Range", cfg_id)? {
+            if !range_triggered
+                && let Some(scene) = ctx.scene.as_deref_mut()
+                && let Some(st) = scene.player_range_states.get_mut(&eid)
+            {
+                st.enter_fired = true;
+            }
             dirty = true;
         }
     }

@@ -1163,8 +1163,49 @@ pub fn handle_avoid_block_submit_over_node_request(
 
 pub fn handle_beam_cast_hit_player_request(
     state: &mut State,
-    _req: BeamCastHitPlayerRequest,
+    req: BeamCastHitPlayerRequest,
 ) -> Result<BeamCastHitPlayerResponse, String> {
+    let map_id = state
+        .scene
+        .as_ref()
+        .map(|s| state.assets.resolve_map_config_id(s.instance_id))
+        .unwrap_or(8);
+    let cfg_id = state
+        .scene
+        .as_ref()
+        .and_then(|s| s.find_config_id_by_net_id(req.EntityId))
+        .or_else(|| i32::try_from(req.EntityId).ok())
+        .unwrap_or(0);
+    if cfg_id > 0
+        && let Some(resolved) =
+            level_play::resolve_entity_config(&state.assets, map_id, i64::from(cfg_id))
+    {
+        for entry in &resolved.components.extra {
+            if let sonoro_gamesv_data::tables::entity_components::extra::ExtraEntry::BeamCastComponent(
+                bc,
+            ) = entry
+                && bc.Disabled != Some(true)
+                && !bc.TriggerActions.is_empty()
+            {
+                let mut events = EventQueue::new();
+                {
+                    let mut qctx = state.quest_context(&mut events);
+                    let mut cbs = quest_engine::action_callbacks();
+                    let _ = quest_actions::execute_state_actions_with_wait(
+                        &mut qctx,
+                        &mut cbs,
+                        0,
+                        0,
+                        cfg_id,
+                        &bc.TriggerActions,
+                    );
+                    let _ = quest_engine::events::on_condition_state_changed(&mut qctx);
+                }
+                super::super::connection::drain_event_queue_best_effort(&mut events, state);
+                break;
+            }
+        }
+    }
     let _ = state
         .player_components
         .progress
@@ -1553,6 +1594,11 @@ pub fn handle_quick_hack_skill_request(
 ) -> Result<QuickHackSkillResponse, String> {
     let mut cfg_id = req.EntityId;
     let mut net_id_opt = None;
+    let map_id = state
+        .scene
+        .as_ref()
+        .map(|s| state.assets.resolve_map_config_id(s.instance_id))
+        .unwrap_or(8);
     if let Some(scene) = state.scene.as_ref() {
         if let Some(cid) = scene.find_config_id_by_net_id(req.EntityId) {
             cfg_id = i64::from(cid);
@@ -1573,36 +1619,93 @@ pub fn handle_quick_hack_skill_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
-    if let (Some(scene), Some(net_id)) = (state.scene.as_mut(), net_id_opt) {
-        if let Some(upd) = scene.update_entity_state_tag(
-            &state.assets.tables.gameplay_tag_remap,
-            net_id,
-            "关卡.Common.状态.激活",
-        ) {
-            quest_actions::emit_entity_state_tag_update_checked(
-                scene,
-                Some(&state.assets),
-                &mut state.conn,
-                net_id,
-                upd,
-            );
+
+    let mut matched_actions = None;
+    let mut cur_state = state
+        .player_components
+        .quest
+        .info
+        .get_entity_state(cfg_id)
+        .map(|s| s.to_string());
+    if let Some(resolved) = level_play::resolve_entity_config(&state.assets, map_id, cfg_id) {
+        if cur_state.is_none() {
+            cur_state = resolved
+                .components
+                .EntityStateComponent
+                .as_ref()
+                .and_then(|e| e.State.clone());
         }
-        scene.mark_fsm_dirty(net_id, wake_reason::TAG | wake_reason::STATE);
+        let state_str = cur_state.as_deref().unwrap_or("关卡.Common.状态.常态");
+        for entry in &resolved.components.extra {
+            if let sonoro_gamesv_data::tables::entity_components::extra::ExtraEntry::QuickHackComponent(
+                qh,
+            ) = entry
+                && qh.Disabled != Some(true)
+                && let Some(skill) = qh.Skills.iter().find(|s| s.Id == req.SkillId)
+                && let Some(content) = skill
+                    .Content
+                    .iter()
+                    .find(|c| c.EntityState == state_str)
+                    .or_else(|| {
+                        skill
+                            .Content
+                            .iter()
+                            .find(|c| c.EntityState == "关卡.Common.状态.常态")
+                    })
+                    .or_else(|| skill.Content.first())
+            {
+                matched_actions = Some(content.Actions.clone());
+                break;
+            }
+        }
     }
-    if cfg_id > 0 {
-        state
-            .player_components
-            .quest
-            .info
-            .set_entity_state(cfg_id, "关卡.Common.状态.激活");
-        let _ = state.player_components.quest.save(&state.fs);
-        if let Ok(cid32) = i32::try_from(cfg_id) {
+
+    if let Some(acts) = matched_actions {
+        if !acts.is_empty() {
             let mut qctx = state.quest_context(events);
-            let _ = quest_engine::on_entity_state_changed(
+            let mut cbs = quest_engine::action_callbacks();
+            let _ = quest_actions::execute_state_actions_with_wait(
                 &mut qctx,
-                cid32,
-                "关卡.Common.状态.激活",
+                &mut cbs,
+                0,
+                0,
+                i32::try_from(cfg_id).unwrap_or(0),
+                &acts,
             );
+            let _ = quest_engine::on_condition_state_changed(&mut qctx);
+        }
+    } else {
+        if let (Some(scene), Some(net_id)) = (state.scene.as_mut(), net_id_opt) {
+            if let Some(upd) = scene.update_entity_state_tag(
+                &state.assets.tables.gameplay_tag_remap,
+                net_id,
+                "关卡.Common.状态.激活",
+            ) {
+                quest_actions::emit_entity_state_tag_update_checked(
+                    scene,
+                    Some(&state.assets),
+                    &mut state.conn,
+                    net_id,
+                    upd,
+                );
+            }
+            scene.mark_fsm_dirty(net_id, wake_reason::TAG | wake_reason::STATE);
+        }
+        if cfg_id > 0 {
+            state
+                .player_components
+                .quest
+                .info
+                .set_entity_state(cfg_id, "关卡.Common.状态.激活");
+            let _ = state.player_components.quest.save(&state.fs);
+            if let Ok(cid32) = i32::try_from(cfg_id) {
+                let mut qctx = state.quest_context(events);
+                let _ = quest_engine::on_entity_state_changed(
+                    &mut qctx,
+                    cid32,
+                    "关卡.Common.状态.激活",
+                );
+            }
         }
     }
     Ok(QuickHackSkillResponse {
