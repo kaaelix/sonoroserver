@@ -2044,6 +2044,15 @@ pub fn transition_to_scene<S: PushSink + ?Sized>(
         &last_path,
     )?;
 
+    crate::helpers::level_play::leave_off_map_level_plays(
+        ctx.assets,
+        ctx.fs,
+        ctx.sink,
+        ctx.scene.as_deref_mut(),
+        ctx.quest_comp,
+        target_dungeon_id,
+    )?;
+
     ctx.sink.push(
         LeaveSceneNotify::MSG_ID,
         &LeaveSceneNotify {

@@ -92,6 +92,14 @@ pub(crate) fn enqueue_scene_transfer(
         .scene
         .last_scene_info
         .instance_id = target_inst_id;
+    let _ = sonoro_gamesv_logic::helpers::level_play::leave_off_map_level_plays(
+        &state.assets,
+        &state.fs,
+        &mut state.conn,
+        state.scene.as_mut(),
+        &mut state.player_components.quest,
+        target_inst_id,
+    );
     let _ = state.conn.push_msg(
         LeaveSceneNotify::MSG_ID,
         &LeaveSceneNotify {

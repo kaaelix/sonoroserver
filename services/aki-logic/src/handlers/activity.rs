@@ -14,19 +14,21 @@ use crate::sqlite_store;
 const FAR_FUTURE: i64 = 4_070_908_800;
 
 const EXCLUDED_TYPES: &[i32] = &[
-    13, 18, 22, 30, 41, 42, 45, 50, 55, 57, 58, 61, 62, 69, 72, 76, 80, 82, 83, 91, 97, 103, 104,
-    107, 108, 111, 113, 117,
+    13, 18, 22, 30, 41, 42, 45, 50, 51, 55, 57, 58, 61, 62, 69, 72, 76, 80, 82, 83, 91, 97, 103,
+    104, 107, 108, 111, 113, 117,
 ];
 
 fn has_missing_build_asset(def: &ActivityConfigItem) -> bool {
-    def.tab_texture.iter().any(|tex| {
-        tex.contains("SignIn32")
-            || tex.contains("SignIn33")
-            || tex.contains("SignIn34")
-            || tex.contains("Activity32/")
-            || tex.contains("Activity33/")
-            || tex.contains("Activity34/")
-    })
+    // Legacy RoleTrial activities 100900001..100900006 reference RoleTrialInfo Id 1 which does not exist.
+    (100_900_001..=100_900_006).contains(&def.id)
+        || def.tab_texture.iter().any(|tex| {
+            tex.contains("SignIn32")
+                || tex.contains("SignIn33")
+                || tex.contains("SignIn34")
+                || tex.contains("Activity32/")
+                || tex.contains("Activity33/")
+                || tex.contains("Activity34/")
+        })
 }
 
 fn rogue_season_id_for_activity(activity_id: i32) -> i32 {

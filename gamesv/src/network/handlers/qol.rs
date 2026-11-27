@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use sonoro_gamesv_data::inline_tables::PayGiftCfg;
 use sonoro_gamesv_data::reward_index::composite_key;
 use sonoro_gamesv_data::Assets;
@@ -13,6 +15,7 @@ use sonoro_proto::pb::{
     BattlePassTaskRequest, BattlePassTaskResponse, BattlePassTaskTakeRequest,
     BattlePassTaskTakeResponse, BirthDayCardRoleRequest, BirthDayCardRoleResponse,
     BirthDayRewardRequest, BirthDayRewardResponse, ClientStorageInfoDataOneof,
+    EffectiveWeekCardInfoNotify,
     GachaAccumulateGroupInfo, GachaAccumulateInfo, GachaAccumulateInfoRequest,
     GachaAccumulateInfoResponse, GachaAccumulateRewardInfo, GachaAccumulateRewardRequest,
     GachaAccumulateRewardResponse, InfluenceInfo, InfluenceInfoRequest, InfluenceInfoResponse,
@@ -985,41 +988,137 @@ pub fn handle_month_card_request(
     })
 }
 
+const DAY_MS: i64 = 86_400_000;
+
+fn week_card_meta(assets: &Assets, wid: i32) -> (i32, i32) {
+    for row in assets.raw_json_cached("WeekCard").iter() {
+        if row.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(wid)) {
+            let pay_gift_id = row
+                .get("PayGiftId")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok())
+                .unwrap_or(if wid == 2 { 48 } else { 47 });
+            let days = row
+                .get("Days")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok())
+                .filter(|&d| d > 0)
+                .unwrap_or(15);
+            return (pay_gift_id, days);
+        }
+    }
+    match wid {
+        2 => (48, 15),
+        _ => (47, 15),
+    }
+}
+
+fn week_card_id_for_gift(assets: &Assets, gift_id: i32) -> Option<(i32, i32)> {
+    for row in assets.raw_json_cached("WeekCard").iter() {
+        if row.get("PayGiftId").and_then(|v| v.as_i64()) == Some(i64::from(gift_id)) {
+            let wid = row
+                .get("Id")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok())?;
+            let days = row
+                .get("Days")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok())
+                .filter(|&d| d > 0)
+                .unwrap_or(15);
+            return Some((wid, days));
+        }
+    }
+    match gift_id {
+        47 => Some((1, 15)),
+        48 => Some((2, 15)),
+        _ => None,
+    }
+}
+
+fn week_card_default_rewards() -> BTreeMap<i32, i32> {
+    BTreeMap::from([(3, 100), (2, 15_000)])
+}
+
+fn build_week_card_info(state: &State, wid: i32, now_ms: i64) -> WeekCardInfo {
+    let (pay_gift_id, days) = week_card_meta(&state.assets, wid);
+    let info = &state.player_components.progress.info;
+    let stored_buy_ms = info.get_key_int(&format!("week_card:buy_ms:{wid}"));
+    let stored_end_ms = info.get_key_int(&format!("week_card:end_ms:{wid}"));
+    let legacy_bought = info.get_key_int(&format!("paygift:{pay_gift_id}")) > 0;
+
+    let (buy_ms, end_ms) = if stored_end_ms > 0 {
+        let buy = if stored_buy_ms > 0 {
+            stored_buy_ms
+        } else {
+            now_ms
+        };
+        (buy, stored_end_ms)
+    } else if legacy_bought {
+        (now_ms, now_ms + i64::from(days) * DAY_MS)
+    } else {
+        (0, 0)
+    };
+
+    let bought = end_ms > 0;
+    let rewards = week_card_default_rewards();
+    let mut contents = Vec::with_capacity(3);
+    for day in 1..=3 {
+        let cid = wid * 100 + day;
+        let k = format!("week_card:{cid}");
+        let unlock_ms = if bought {
+            buy_ms + i64::from(day - 1) * DAY_MS
+        } else {
+            0
+        };
+        let status = if !bought {
+            0
+        } else if info.has_claim(&k) {
+            2
+        } else if now_ms >= unlock_ms {
+            1
+        } else {
+            0
+        };
+        contents.push(WeekCardContentInfo {
+            WeekCardContentId: cid,
+            UnlockDay: day,
+            RewardContent: rewards.clone(),
+            UnlockTimeStamp: unlock_ms,
+            Status: status,
+        });
+    }
+
+    WeekCardInfo {
+        WeekCardId: wid,
+        Days: days,
+        BuyTimeStamp: buy_ms,
+        EndTimeStamp: end_ms,
+        WeekCardContentInfos: contents,
+    }
+}
+
 pub fn handle_week_card_info_request(
     state: &mut State,
     req: WeekCardInfoRequest,
 ) -> Result<WeekCardInfoResponse, String> {
-    let now_s = energy::now_seconds();
-    let mut infos = Vec::new();
-    for wid in req.WeekCardIds {
-        let mut contents = Vec::new();
-        for day in 1..=3 {
-            let cid = wid * 100 + day;
-            let k = format!("week_card:{cid}");
-            contents.push(WeekCardContentInfo {
-                WeekCardContentId: cid,
-                UnlockDay: day,
-                Status: if state.player_components.progress.info.has_claim(&k) {
-                    2
-                } else {
-                    1
-                },
-                ..Default::default()
-            });
+    let now_ms = energy::now_seconds() * 1000;
+    let target_ids = if req.WeekCardIds.is_empty() && req.WeekCardId > 0 {
+        vec![req.WeekCardId]
+    } else {
+        req.WeekCardIds
+    };
+    let mut infos = Vec::with_capacity(target_ids.len());
+    for wid in target_ids {
+        if wid > 0 {
+            infos.push(build_week_card_info(state, wid, now_ms));
         }
-        infos.push(WeekCardInfo {
-            WeekCardId: wid,
-            Days: 7,
-            BuyTimeStamp: now_s,
-            EndTimeStamp: now_s + 7 * 86_400,
-            WeekCardContentInfos: contents,
-        });
     }
-    let first_info = infos.first().cloned().unwrap_or(WeekCardInfo {
+    let first_info = infos.first().cloned().unwrap_or_else(|| WeekCardInfo {
         WeekCardId: req.WeekCardId,
-        Days: 7,
-        BuyTimeStamp: now_s,
-        EndTimeStamp: now_s + 7 * 86_400,
+        Days: 0,
+        BuyTimeStamp: 0,
+        EndTimeStamp: 0,
         WeekCardContentInfos: Vec::new(),
     });
     Ok(WeekCardInfoResponse {
@@ -1399,11 +1498,44 @@ pub fn handle_pay_gift_request(
             .info
             .add_key_int("month_card:days", 30);
     }
+    let now_ms = energy::now_seconds() * 1000;
+    let wk_card = week_card_id_for_gift(&state.assets, req.Id);
+    if let Some((wid, days)) = wk_card {
+        let buy_key = format!("week_card:buy_ms:{wid}");
+        let end_key = format!("week_card:end_ms:{wid}");
+        let prev_end = state.player_components.progress.info.get_key_int(&end_key);
+        let duration_ms = i64::from(days) * DAY_MS;
+        let new_end = if prev_end > now_ms {
+            prev_end + duration_ms
+        } else {
+            state
+                .player_components
+                .progress
+                .info
+                .set_key_int(&buy_key, now_ms);
+            now_ms + duration_ms
+        };
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int(&end_key, new_end);
+    }
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    if let Some((wid, _)) = wk_card {
+        let wc_info = build_week_card_info(state, wid, now_ms);
+        state.conn.push(
+            EffectiveWeekCardInfoNotify::MSG_ID,
+            &EffectiveWeekCardInfoNotify {
+                WeekCardInfos: vec![wc_info.clone()],
+                Infos: Some(wc_info),
+            },
+        );
+    }
     let gift_cfg = state
         .assets
         .tables

@@ -1,6 +1,6 @@
 //! Store, PayShop, MonthCard, WeekCard, SignActivity, and Adventure handlers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sonoro_proto::PbMessage;
@@ -293,39 +293,68 @@ pub fn handle_month_card(player_id: i32, _payload: &[u8]) -> AkiResult {
 
 pub fn handle_week_card_info(player_id: i32, payload: &[u8]) -> AkiResult {
     let req = WeekCardInfoRequest::decode(payload).unwrap_or_default();
-    let now_s = unix_now();
+    let now_ms = unix_now() * 1000;
     let claims = if player_id > 0 {
         sqlite_store::get_activity_claims(player_id)
     } else {
         HashSet::new()
     };
+    let bought_map = if player_id > 0 {
+        sqlite_store::get_shop_bought_counts(player_id, 0)
+    } else {
+        HashMap::new()
+    };
+    let rewards = BTreeMap::from([(3, 100), (2, 15_000)]);
 
     let mut resp = WeekCardInfoResponse {
         ErrorCode: Some(ErrorCode::Success),
         ..Default::default()
     };
 
-    for wid in req.WeekCardIds {
+    let target_ids = if req.WeekCardIds.is_empty() && req.WeekCardId > 0 {
+        vec![req.WeekCardId]
+    } else {
+        req.WeekCardIds
+    };
+
+    for wid in target_ids {
+        let gift_id = if wid == 2 { 48 } else { 47 };
+        let bought = bought_map.get(&gift_id).copied().unwrap_or(0) > 0;
+        let (buy_ms, end_ms) = if bought {
+            (now_ms, now_ms + 15 * 86_400_000)
+        } else {
+            (0, 0)
+        };
         let mut content_infos = Vec::with_capacity(3);
         for day in 1..=3 {
             let cid = wid * 100 + day;
+            let unlock_ms = if bought {
+                buy_ms + i64::from(day - 1) * 86_400_000
+            } else {
+                0
+            };
+            let status = if !bought {
+                0
+            } else if claims.contains(&format!("week_card:{cid}")) {
+                2
+            } else if now_ms >= unlock_ms {
+                1
+            } else {
+                0
+            };
             content_infos.push(WeekCardContentInfo {
                 WeekCardContentId: cid,
                 UnlockDay: day,
-                UnlockTimeStamp: now_s,
-                Status: if claims.contains(&format!("week_card:{cid}")) {
-                    2
-                } else {
-                    1
-                },
-                ..Default::default()
+                RewardContent: rewards.clone(),
+                UnlockTimeStamp: unlock_ms,
+                Status: status,
             });
         }
         resp.WeekCardInfos.push(WeekCardInfo {
             WeekCardId: wid,
-            Days: 7,
-            BuyTimeStamp: now_s,
-            EndTimeStamp: now_s + 7 * 86_400,
+            Days: 15,
+            BuyTimeStamp: buy_ms,
+            EndTimeStamp: end_ms,
             WeekCardContentInfos: content_infos,
         });
     }
@@ -336,9 +365,9 @@ pub fn handle_week_card_info(player_id: i32, payload: &[u8]) -> AkiResult {
             .cloned()
             .unwrap_or_else(|| WeekCardInfo {
                 WeekCardId: req.WeekCardId,
-                Days: 7,
-                BuyTimeStamp: now_s,
-                EndTimeStamp: now_s + 7 * 86_400,
+                Days: 0,
+                BuyTimeStamp: 0,
+                EndTimeStamp: 0,
                 ..Default::default()
             }),
     );

@@ -54,12 +54,51 @@ fn has_missing_build_asset(act_id: i32) -> bool {
     )
 }
 
+fn has_valid_role_trial_config(assets: &Assets, act_id: i32) -> bool {
+    let raw = assets.raw_json_cached("RoleTrialActivity");
+    let Some(role_ids) = raw
+        .iter()
+        .filter_map(|v| v.as_object())
+        .find(|o| {
+            o.get("Id")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok())
+                == Some(act_id)
+        })
+        .and_then(|o| o.get("RoleIdList"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_i64().and_then(|n| i32::try_from(n).ok()))
+                .collect::<Vec<_>>()
+        })
+    else {
+        return false;
+    };
+    !role_ids.is_empty()
+        && role_ids
+            .iter()
+            .all(|rid| assets.tables.role_trial_info.get_data_by_id(rid).is_some())
+}
+
+fn has_unsupported_build_activity(assets: &Assets, act_id: i32) -> bool {
+    if has_missing_build_asset(act_id) {
+        return true;
+    }
+    let Some(def) = assets.tables.activity.get_data_by_id(&act_id) else {
+        return false;
+    };
+    def.Type == ActivityType::ConsumptiveActivity as i32
+        || (def.Type == ActivityType::RoleTrialActivity as i32
+            && !has_valid_role_trial_config(assets, act_id))
+}
+
 pub fn is_activity_unlocked(
     cond_ctx_opt: Option<&EvalContext<'_>>,
     assets: &Assets,
     act_id: i32,
 ) -> bool {
-    if has_missing_build_asset(act_id) {
+    if has_unsupported_build_activity(assets, act_id) {
         return false;
     }
     let Some(cond_ctx) = cond_ctx_opt else {
@@ -517,6 +556,7 @@ pub fn build_activity_list(
                 | 42
                 | 45
                 | 50
+                | 51
                 | 55
                 | 57
                 | 58

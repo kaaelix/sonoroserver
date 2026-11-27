@@ -9355,6 +9355,292 @@ fn audit_157_gm_panel_webview_close_bridge() {
     assert!(!html.contains("window.location.href = 'kuro://close'"));
 }
 
+#[test]
+fn audit_158_role_trial_and_consumptive_asset_exclusions() {
+    let h = TestHarness::new("audit_158_act_excl", Some(8));
+    // Type 51 ConsumptiveActivity (105100001 / 105100002) uses stripped UiItem_CumulativeShop prefab.
+    assert!(!activity::is_activity_unlocked(
+        None,
+        &h.state.assets,
+        105_100_001
+    ));
+    assert!(!activity::is_activity_unlocked(
+        None,
+        &h.state.assets,
+        105_100_002
+    ));
+    // Type 21 TowerGuideNew (100300002) remains unlocked.
+    assert!(activity::is_activity_unlocked(
+        None,
+        &h.state.assets,
+        100_300_002
+    ));
+    // Legacy RoleTrial activities 100900001..=100900006 reference RoleTrialInfo Id 1 (missing).
+    for legacy_id in 100_900_001..=100_900_006 {
+        assert!(
+            !activity::is_activity_unlocked(None, &h.state.assets, legacy_id),
+            "legacy RoleTrial {legacy_id} must be excluded"
+        );
+    }
+    // Live RoleTrial activities (e.g. 100900007) have valid RoleTrialInfo entries and stay unlocked.
+    assert!(activity::is_activity_unlocked(
+        None,
+        &h.state.assets,
+        100_900_007
+    ));
+
+    let list = activity::build_activity_list(
+        &h.state.assets,
+        &h.state.player_components.progress,
+        None,
+    );
+    assert!(!list.iter().any(|a| matches!(a.Id, 105_100_001 | 105_100_002)));
+    assert!(list.iter().any(|a| a.Id == 100_300_002));
+    assert!(
+        !list
+            .iter()
+            .any(|a| (100_900_001..=100_900_006).contains(&a.Id))
+    );
+    assert!(list.iter().any(|a| a.Id == 100_900_007));
+}
+
+#[test]
+fn audit_159_week_card_unbought_and_millisecond_purchase_lifecycle() {
+    use sonoro_proto::pb::{EffectiveWeekCardInfoNotify, PayGiftRequest};
+
+    let mut h = TestHarness::new("audit_159_week_card", Some(8));
+
+    // Unbought WeekCards must report BuyTimeStamp/EndTimeStamp == 0 so NewPlayerShop stays open via config.
+    let unbought = qol::handle_week_card_info_request(
+        &mut h.state,
+        WeekCardInfoRequest {
+            WeekCardIds: vec![1, 2],
+            ..Default::default()
+        },
+    )
+    .expect("unbought week card info");
+    assert_eq!(unbought.WeekCardInfos.len(), 2);
+    for wc in &unbought.WeekCardInfos {
+        assert_eq!(wc.Days, 15);
+        assert_eq!(wc.BuyTimeStamp, 0);
+        assert_eq!(wc.EndTimeStamp, 0);
+        assert_eq!(wc.WeekCardContentInfos.len(), 3);
+        for c in &wc.WeekCardContentInfos {
+            assert_eq!(c.Status, 0);
+            assert_eq!(c.UnlockTimeStamp, 0);
+            assert!(!c.RewardContent.is_empty());
+        }
+    }
+
+    // Purchasing GiftId 48 activates WeekCard 2 with Unix millisecond timestamps and notifies the client.
+    let buy_resp = qol::handle_pay_gift_request(
+        &mut h.state,
+        PayGiftRequest {
+            Id: 48,
+            ..Default::default()
+        },
+    )
+    .expect("buy week card gift 48");
+    assert_eq!(buy_resp.ErrorCode, Some(ErrorCode::Success));
+
+    let notifs: Vec<EffectiveWeekCardInfoNotify> =
+        h.drain_decoded(EffectiveWeekCardInfoNotify::MSG_ID);
+    assert_eq!(notifs.len(), 1);
+    let bought_card = notifs[0]
+        .WeekCardInfos
+        .iter()
+        .find(|w| w.WeekCardId == 2)
+        .expect("notified week card 2");
+    assert_eq!(bought_card.Days, 15);
+    assert!(bought_card.BuyTimeStamp > 1_000_000_000_000);
+    assert_eq!(
+        bought_card.EndTimeStamp - bought_card.BuyTimeStamp,
+        15 * 86_400_000
+    );
+    assert_eq!(bought_card.WeekCardContentInfos[0].Status, 1);
+    assert_eq!(bought_card.WeekCardContentInfos[1].Status, 0);
+
+    let after = qol::handle_week_card_info_request(
+        &mut h.state,
+        WeekCardInfoRequest {
+            WeekCardIds: vec![1, 2],
+            ..Default::default()
+        },
+    )
+    .expect("week card info after buy");
+    assert_eq!(after.WeekCardInfos[0].EndTimeStamp, 0);
+    assert_eq!(after.WeekCardInfos[1].EndTimeStamp, bought_card.EndTimeStamp);
+}
+
+#[test]
+fn audit_160_level_play_cross_map_cleanup_and_kill_progress_guard() {
+    use sonoro_proto::pb::{LeaveLevelPlayNotify, UpdateNodeProgressNotify};
+
+    let mut h = TestHarness::new("audit_160_lp_cleanup", Some(68));
+    // Simulate Map 8 Challenge 109000005 (entity 109005370.bytes) still marked entered when entering Map 68.
+    h.state
+        .player_components
+        .quest
+        .info
+        .progress
+        .entered_level_plays
+        .push(109_000_005);
+    h.drain_count();
+
+    level_play::leave_off_map_level_plays(
+        &h.state.assets,
+        &h.state.fs,
+        &mut h.state.conn,
+        h.state.scene.as_mut(),
+        &mut h.state.player_components.quest,
+        68,
+    )
+    .expect("leave off-map level plays");
+
+    let left: Vec<LeaveLevelPlayNotify> = h.drain_decoded(LeaveLevelPlayNotify::MSG_ID);
+    assert!(
+        left.iter().any(|n| n.Id == 109_000_005),
+        "cross-map transition to map 68 must leave map 8 LevelPlay 109000005: {left:?}"
+    );
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&109_000_005)
+    );
+
+    // On Map 1505, killing a monster referenced by LevelPlay 610800000 must NOT emit UpdateNodeProgressNotify
+    // when 610800000's behavior tree has never been sent to the client.
+    let mut h2 = TestHarness::new("audit_160_bt_guard", Some(1505));
+    let mut events = EventQueue::new();
+    entity_cmd::spawn_with_location(
+        &mut events,
+        h2.state.scene.as_mut().expect("scene"),
+        &h2.state.fs,
+        &h2.state.assets,
+        &mut h2.state.conn,
+        &h2.state.player_components.basic,
+        139_800_000,
+        Some(false),
+        Some(false),
+        Some(1505),
+        None,
+        true,
+    )
+    .expect("spawn ref monster");
+    let monster_net_id = h2
+        .state
+        .scene
+        .as_ref()
+        .expect("scene")
+        .find_entity_net_id_by_config_id(139_800_000)
+        .expect("monster net_id");
+    h2.drain_count();
+
+    {
+        let mut qctx = h2.state.quest_context(&mut events);
+        let mut lp_ctx =
+            level_play::LevelPlayContext::from_quest_ctx(&mut qctx).expect("lp ctx");
+        level_play::on_entity_killed(&mut lp_ctx, monster_net_id, Some(139_800_000))
+            .expect("on_entity_killed");
+    }
+
+    let updates: Vec<UpdateNodeProgressNotify> =
+        h2.drain_decoded(UpdateNodeProgressNotify::MSG_ID);
+    assert!(
+        !updates.iter().any(|u| u.TreeOwnerId == 610_800_000),
+        "must not push UpdateNodeProgressNotify before BehaviorTree 610800000 exists on client: {updates:?}"
+    );
+}
+
+#[test]
+fn audit_161_elevator_after_join_skips_same_floor_move_notify() {
+    use sonoro_gamesv_logic::component::entity::small::LiftComponent;
+    use sonoro_proto::pb::ElevatorMoveNotify;
+
+    let mut h = TestHarness::new("audit_161_elevator_nan", Some(8));
+    let mut events = EventQueue::new();
+    entity_cmd::spawn_with_location(
+        &mut events,
+        h.state.scene.as_mut().expect("scene"),
+        &h.state.fs,
+        &h.state.assets,
+        &mut h.state.conn,
+        &h.state.player_components.basic,
+        109_002_461,
+        Some(false),
+        Some(false),
+        Some(8),
+        None,
+        true,
+    )
+    .expect("spawn elevator");
+    let lift_net_id = h
+        .state
+        .scene
+        .as_ref()
+        .expect("scene")
+        .find_entity_net_id_by_config_id(109_002_461)
+        .expect("elevator net_id");
+
+    h.state
+        .player_components
+        .progress
+        .info
+        .set_key_int("elevator:109002461", 2);
+    if let Some(storage) = h
+        .state
+        .scene
+        .as_mut()
+        .expect("scene")
+        .entity_mut(lift_net_id)
+    {
+        storage.world_item.lift = Some(LiftComponent { location: 2 });
+    }
+    h.drain_count();
+
+    let fs_c = Arc::clone(&h.state.fs);
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut dummy_ev = EventQueue::new();
+        scene_logic::after_scene_join(None, &mut dummy_ev, &fs_c, &mut qctx, 1)
+            .expect("after_scene_join at floor 2");
+    }
+    let same_floor: Vec<ElevatorMoveNotify> = h.drain_decoded(ElevatorMoveNotify::MSG_ID);
+    assert!(
+        !same_floor.iter().any(|m| m.EntityId == lift_net_id),
+        "must skip redundant same-floor ElevatorMoveNotify on floor 2: {same_floor:?}"
+    );
+
+    if let Some(storage) = h
+        .state
+        .scene
+        .as_mut()
+        .expect("scene")
+        .entity_mut(lift_net_id)
+    {
+        storage.world_item.lift = Some(LiftComponent { location: 1 });
+    }
+    h.drain_count();
+
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut dummy_ev = EventQueue::new();
+        scene_logic::after_scene_join(None, &mut dummy_ev, &fs_c, &mut qctx, 1)
+            .expect("after_scene_join from floor 1 to 2");
+    }
+    let moved: Vec<ElevatorMoveNotify> = h.drain_decoded(ElevatorMoveNotify::MSG_ID);
+    assert!(
+        moved
+            .iter()
+            .any(|m| m.EntityId == lift_net_id && m.Location == 2),
+        "must sync ElevatorMoveNotify when elevator is still at floor 1: {moved:?}"
+    );
+}
+
 
 
 

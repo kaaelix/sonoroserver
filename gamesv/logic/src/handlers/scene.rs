@@ -224,9 +224,12 @@ fn push_stored_world_transform<S: PushSink + ?Sized>(
 fn push_stored_elevator_state<S: PushSink + ?Sized>(
     sink: &mut S,
     progress_info: &ProgressInfo,
-    config_id: i32,
-    net_id: i64,
+    storage: &mut crate::component::entity::EntityComponentStorage,
 ) {
+    let config_id = storage.config.config_id;
+    let Some(current_lift) = storage.world_item.lift else {
+        return;
+    };
     if config_id <= 0 {
         return;
     }
@@ -237,10 +240,16 @@ fn push_stored_elevator_state<S: PushSink + ?Sized>(
     let Ok(floor) = i32::try_from(raw) else {
         return;
     };
+    // Avoid re-sending ElevatorMoveNotify when the elevator is already at `floor`
+    // (`StartPosition == EndPosition` divides by zero -> NaN in `ElevatorNormalMoveStrategy`).
+    if floor <= 0 || current_lift.location == floor {
+        return;
+    }
+    storage.world_item.lift = Some(LiftComponent { location: floor });
     sink.push(
         ElevatorMoveNotify::MSG_ID,
         &ElevatorMoveNotify {
-            EntityId: net_id,
+            EntityId: storage.net_id,
             Location: floor,
             MoveType: None,
         },
@@ -1433,16 +1442,11 @@ pub fn after_scene_join<S: PushSink + ?Sized>(
     qctx.sink
         .push(AfterJoinSceneNotify::MSG_ID, &AfterJoinSceneNotify::default());
     if let Some(progress) = qctx.progress_comp.as_deref()
-        && let Some(scene) = qctx.scene.as_deref()
+        && let Some(scene) = qctx.scene.as_deref_mut()
     {
-        for storage in &scene.entities {
+        for storage in &mut scene.entities {
             if storage.config.entity_type == EntityType::SceneItem {
-                push_stored_elevator_state(
-                    qctx.sink,
-                    &progress.info,
-                    storage.config.config_id,
-                    storage.net_id,
-                );
+                push_stored_elevator_state(qctx.sink, &progress.info, storage);
             }
         }
     }
@@ -2924,8 +2928,10 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
                     },
                 );
             }
-            if item.lift_target_floor.is_none() {
-                push_stored_elevator_state(sink, &progress_comp.info, cfg_id, net_id);
+            if item.lift_target_floor.is_none()
+                && let Some(storage) = scene.entity_mut(net_id)
+            {
+                push_stored_elevator_state(sink, &progress_comp.info, storage);
             }
             if let Some(flip_type) = item.gravity_type {
                 sink.push(

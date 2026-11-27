@@ -2607,7 +2607,9 @@ fn check_level_play_kill_progress<S: PushSink + ?Sized>(
                 matched_kill_nodes.push(node.clone());
             } else {
                 all_targets_cleared = false;
-                if let Some(progress) = build_lp_kill_progress(ctx, lp, node) {
+                if ctx.scene.sent_lp_bt_trees.contains(&lp_id)
+                    && let Some(progress) = build_lp_kill_progress(ctx, lp, node)
+                {
                     ctx.sink.push(
                         UpdateNodeProgressNotify::MSG_ID,
                         &UpdateNodeProgressNotify {
@@ -3360,7 +3362,54 @@ pub fn sync_dungeon_level_plays<S: PushSink + ?Sized>(
     Ok(())
 }
 
+pub fn leave_off_map_level_plays<S: PushSink + ?Sized>(
+    assets: &Assets,
+    fs: &FileSystem,
+    sink: &mut S,
+    mut scene_opt: Option<&mut Scene>,
+    quest_comp: &mut PlayerQuestComponent,
+    target_instance_id: i32,
+) -> io::Result<()> {
+    let entered_snap = quest_comp.info.progress.entered_level_plays.clone();
+    let mut dirty = false;
+    for lp_id in entered_snap {
+        let should_leave = quest_comp.info.completed_level_plays.contains(&lp_id)
+            || !assets
+                .tables
+                .level_play_data
+                .get_data_by_id(&lp_id)
+                .is_some_and(|lp| matches_scene_instance(assets, &lp, target_instance_id));
+        if !should_leave {
+            continue;
+        }
+        if let Some(scene) = scene_opt.as_deref_mut() {
+            scene.sent_lp_bt_trees.remove(&lp_id);
+            scene.lp_timers.cancel_quest(lp_id);
+            scene.lp_fail_timers.cancel_quest(lp_id);
+            scene.release_occupations_for_tree(lp_id, i64::from(lp_id));
+            scene.remove_bt_timers_for_owner(lp_id);
+        }
+        sink.push(LeaveLevelPlayNotify::MSG_ID, &LeaveLevelPlayNotify { Id: lp_id });
+        if remove_int_value(&mut quest_comp.info.progress.entered_level_plays, lp_id) {
+            dirty = true;
+        }
+    }
+    if dirty {
+        quest_comp.save(fs)?;
+    }
+    Ok(())
+}
+
 pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut LevelPlayContext<'_, S>) -> io::Result<()> {
+    let target_inst_id = ctx.scene.instance_id;
+    leave_off_map_level_plays(
+        ctx.assets,
+        ctx.fs,
+        ctx.sink,
+        Some(&mut *ctx.scene),
+        ctx.quest_comp,
+        target_inst_id,
+    )?;
     ensure_active_timers_scheduled(ctx)?;
     let pos = current_player_pos(ctx);
     let entered_snap = ctx.quest_comp.info.progress.entered_level_plays.clone();
