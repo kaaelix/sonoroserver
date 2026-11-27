@@ -246,7 +246,7 @@ fn read_array_from_assets_db(table_name: &str) -> Option<Vec<Value>> {
         }
     }
     let mut stmt = conn
-        .prepare_cached("SELECT data FROM kv_int WHERE table_name = ?1")
+        .prepare_cached("SELECT data FROM kv_int WHERE tbl = ?1")
         .ok()?;
     let rows = stmt
         .query_map(rusqlite::params![table_name], |row| row.get::<_, String>(0))
@@ -600,4 +600,18 @@ fn load_activities(dir: &Path) -> Vec<ActivityConfigItem> {
         });
     }
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_kv_int_drop_packages_from_assets_db_without_bindata() {
+        let drops = load_drop_packages(Path::new("/root/wuwa-server/assets/NonExistentBinData"));
+        assert!(
+            !drops.is_empty(),
+            "DropPackage in kv_int must load from assets.db when BinData dir is absent"
+        );
+    }
 }

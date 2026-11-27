@@ -118,7 +118,40 @@ pub struct AssetsDb {
 }
 
 impl AssetsDb {
+    /// Returns `true` if `db_path` exists and matches a sibling `assets.version.json` fast stamp.
+    fn is_prebuilt_version_fresh(db_path: &Path) -> bool {
+        let Ok(meta) = std::fs::metadata(db_path) else {
+            return false;
+        };
+        if !meta.is_file() || meta.len() < 4096 {
+            return false;
+        }
+        let version_path = db_path.with_file_name("assets.version.json");
+        let Ok(raw) = std::fs::read_to_string(version_path) else {
+            return false;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return false;
+        };
+        if v.get("size").and_then(|s| s.as_u64()) != Some(meta.len()) {
+            return false;
+        }
+        let Some(expected_mtime_ns) = v.get("mtime_ns").and_then(|m| m.as_u64()) else {
+            return false;
+        };
+        let Ok(modified) = meta.modified() else {
+            return false;
+        };
+        let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) else {
+            return false;
+        };
+        dur.as_nanos() == u128::from(expected_mtime_ns)
+    }
+
     pub fn ensure_built(db_path: &Path) -> Result<(), String> {
+        if Self::is_prebuilt_version_fresh(db_path) {
+            return Ok(());
+        }
         let script = Path::new("scripts/build_assets_db.py");
         if script.exists() {
             let status = Command::new("python3")

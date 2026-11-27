@@ -142,6 +142,36 @@ def collect_bindata_stamps(bindata_dir: str) -> dict[str, tuple[int, int]]:
     return stamps
 
 
+def _matches_prebuilt_version_stamp(db_path: str) -> bool:
+    """Keep prebuilt release assets.db when sibling assets.version.json matches size and mtime/sha256."""
+    import hashlib
+    import json
+
+    version_path = os.path.join(os.path.dirname(db_path) or ".", "assets.version.json")
+    if not os.path.isfile(version_path):
+        return False
+    try:
+        with open(version_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        st = os.stat(db_path)
+        expected_size = meta.get("size")
+        if not isinstance(expected_size, int) or expected_size != st.st_size:
+            return False
+        expected_mtime_ns = meta.get("mtime_ns")
+        if isinstance(expected_mtime_ns, int) and expected_mtime_ns == st.st_mtime_ns:
+            return True
+        expected_sha = meta.get("sha256")
+        if not isinstance(expected_sha, str) or len(expected_sha) != 64:
+            return False
+        h = hashlib.sha256()
+        with open(db_path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest().lower() == expected_sha.lower()
+    except Exception:
+        return False
+
+
 def is_db_fresh(db_path: str, bindata_dir: str) -> bool:
     if not os.path.exists(db_path) or os.path.getsize(db_path) < 4096:
         return False
@@ -153,6 +183,9 @@ def is_db_fresh(db_path: str, bindata_dir: str) -> bool:
         if not row or row[0] != SCHEMA_VERSION:
             conn.close()
             return False
+        if _matches_prebuilt_version_stamp(db_path):
+            conn.close()
+            return True
         cur.execute("SELECT name, mtime_ns, size FROM _file_stamps")
         db_stamps = {r[0]: (int(r[1]), int(r[2])) for r in cur.fetchall()}
         conn.close()
