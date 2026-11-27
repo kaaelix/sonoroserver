@@ -1024,15 +1024,15 @@ pub struct NpcPerformComponent {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct PasserbyNpcSpawnComponent {
     #[serde(default)]
-    pub MoveConfig: Option<crate::tables::EmptyObj>,
+    pub MoveConfig: Option<serde_json::Value>,
     #[serde(default)]
     pub NpcMaterialDa: Option<String>,
     #[serde(default)]
-    pub SourceConfig: Option<crate::tables::EmptyObj>,
+    pub SourceConfig: Option<serde_json::Value>,
     #[serde(default)]
-    pub SpawnConfig: Option<crate::tables::EmptyObj>,
+    pub SpawnConfig: Option<serde_json::Value>,
     #[serde(default)]
-    pub VisibleConditions: Option<crate::tables::EmptyObj>,
+    pub VisibleConditions: Option<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]
@@ -1530,25 +1530,33 @@ pub struct TimelineTrackControlComponent {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct TrampleComponent {
     #[serde(default)]
-    pub Condition: Option<crate::tables::EmptyObj>,
+    pub Condition: Option<serde_json::Value>,
     #[serde(default)]
     pub Disabled: Option<bool>,
     #[serde(default)]
     pub DownTime: Option<f64>,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub EnterActions: Vec<serde_json::Value>,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub ExitActions: Vec<serde_json::Value>,
     #[serde(default)]
     pub IsResetGear: Option<bool>,
     #[serde(default)]
-    pub Match: Option<crate::tables::EmptyObj>,
+    pub Match: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "super::super::de_null_default")]
+    pub MatchRoleOption: Vec<serde_json::Value>,
     #[serde(default)]
-    pub ShowLandTipRadius: Option<crate::tables::EmptyObj>,
+    pub RayDetectionCondition: Option<serde_json::Value>,
+    #[serde(default)]
+    pub ShowLandTipRadius: Option<serde_json::Value>,
     #[serde(default)]
     pub StayTime: Option<f64>,
     #[serde(default)]
     pub StopTeleControlMove: Option<bool>,
     #[serde(default)]
-    pub TrampleTipOption: Option<crate::tables::EmptyObj>,
+    pub TrampleTipOption: Option<serde_json::Value>,
     #[serde(default)]
-    pub UpTime: Option<i64>,
+    pub UpTime: Option<f64>,
 }
 
 #[allow(non_snake_case)]

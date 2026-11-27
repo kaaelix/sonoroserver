@@ -515,28 +515,42 @@ fn is_valid_admin(key: &str) -> bool {
     timing_safe_equal(key.as_bytes(), admin_secret().as_bytes())
 }
 
-fn lookup_player_sign_token(target_id: i32) -> Option<String> {
-    if target_id <= 0 {
-        return None;
-    }
-    if let Ok(conn) = SqliteConnection::open("state/gamesv.db")
-        && let Ok(val) = conn.query_row(
-            "SELECT val FROM player_kv WHERE player_id = ?1 AND ns = 'gm' AND k = 'sign_token' LIMIT 1",
-            [target_id],
-            |row| row.get::<_, String>(0),
-        )
-        && val.len() >= 16
-    {
-        return Some(val);
-    }
-
-    let content = fs::read_to_string(format!("state/player/{target_id}/progress_info")).ok()?;
+fn extract_sign_token_from_progress_info(content: &str) -> Option<String> {
     let marker = ".key = \"gm:sign_token\", .val = \"";
     let idx = content.find(marker)?;
     let rest = &content[idx + marker.len()..];
     let end = rest.find('"')?;
     let val = &rest[..end];
     (val.len() >= 16).then(|| val.to_string())
+}
+
+fn lookup_player_sign_token(target_id: i32) -> Option<String> {
+    if target_id <= 0 {
+        return None;
+    }
+    if let Ok(conn) = SqliteConnection::open("state/gamesv.db") {
+        if let Ok(val) = conn.query_row(
+            "SELECT val FROM player_kv WHERE player_id = ?1 AND ns = 'gm' AND k = 'sign_token' LIMIT 1",
+            [target_id],
+            |row| row.get::<_, String>(0),
+        ) && val.len() >= 16
+        {
+            return Some(val);
+        }
+        let rel = format!("player/{target_id}/progress_info");
+        if let Ok(blob) = conn.query_row(
+            "SELECT content FROM state_files WHERE path = ?1 LIMIT 1",
+            [&rel],
+            |row| row.get::<_, Vec<u8>>(0),
+        ) && let Ok(text) = std::str::from_utf8(&blob)
+            && let Some(val) = extract_sign_token_from_progress_info(text)
+        {
+            return Some(val);
+        }
+    }
+
+    let content = fs::read_to_string(format!("state/player/{target_id}/progress_info")).ok()?;
+    extract_sign_token_from_progress_info(&content)
 }
 
 fn rotate_player_sign_token(target_id: i32) -> Result<String, String> {

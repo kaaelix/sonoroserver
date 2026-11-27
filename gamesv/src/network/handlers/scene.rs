@@ -61,6 +61,26 @@ pub fn handle_update_scene_date_request(
     events: &mut EventQueue,
     req: UpdateSceneDateRequest,
 ) -> Result<UpdateSceneDateResponse, String> {
+    let is_ambient_tick = matches!(
+        req.Reason,
+        None | Some(sonoro_proto::enums::SceneDateUpdateReason::TimeFlowAuto)
+    );
+    let clock_locked_for_ambient = is_ambient_tick
+        && (state.player_components.quest.info.env.time_locked
+            || !sonoro_gamesv_logic::helpers::condition::is_function_open(
+                &state.eval_context(),
+                10018,
+            ));
+    if clock_locked_for_ambient && req.AddDays == 0 {
+        let day = state
+            .scene
+            .as_ref()
+            .map_or(1u32, |s| s.instance.map_time.day);
+        return Ok(UpdateSceneDateResponse {
+            ErrorCode: Some(ErrorCode::Success),
+            CurrDate: day,
+        });
+    }
     let mut hour = req.Hour;
     let mut minute = req.Minute;
     if req.AddDays != 0

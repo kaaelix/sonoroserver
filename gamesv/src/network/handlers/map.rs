@@ -563,6 +563,60 @@ pub fn handle_mul_explore_score_reward_request(
     })
 }
 
+struct RangeEntityResolved {
+    cfg_id: i32,
+    trample: Option<sonoro_gamesv_data::tables::entity_components::extra::TrampleComponent>,
+    trigger: Option<sonoro_gamesv_data::tables::entity_components::trigger::TriggerComponent>,
+}
+
+fn merge_trample_component(
+    base: &mut sonoro_gamesv_data::tables::entity_components::extra::TrampleComponent,
+    overlay: &sonoro_gamesv_data::tables::entity_components::extra::TrampleComponent,
+) {
+    if overlay.Condition.is_some() {
+        base.Condition = overlay.Condition.clone();
+    }
+    if overlay.Disabled.is_some() {
+        base.Disabled = overlay.Disabled;
+    }
+    if overlay.DownTime.is_some() {
+        base.DownTime = overlay.DownTime;
+    }
+    if !overlay.EnterActions.is_empty() {
+        base.EnterActions = overlay.EnterActions.clone();
+    }
+    if !overlay.ExitActions.is_empty() {
+        base.ExitActions = overlay.ExitActions.clone();
+    }
+    if overlay.IsResetGear.is_some() {
+        base.IsResetGear = overlay.IsResetGear;
+    }
+    if overlay.Match.is_some() {
+        base.Match = overlay.Match.clone();
+    }
+    if !overlay.MatchRoleOption.is_empty() {
+        base.MatchRoleOption = overlay.MatchRoleOption.clone();
+    }
+    if overlay.RayDetectionCondition.is_some() {
+        base.RayDetectionCondition = overlay.RayDetectionCondition.clone();
+    }
+    if overlay.ShowLandTipRadius.is_some() {
+        base.ShowLandTipRadius = overlay.ShowLandTipRadius.clone();
+    }
+    if overlay.StayTime.is_some() {
+        base.StayTime = overlay.StayTime;
+    }
+    if overlay.StopTeleControlMove.is_some() {
+        base.StopTeleControlMove = overlay.StopTeleControlMove;
+    }
+    if overlay.TrampleTipOption.is_some() {
+        base.TrampleTipOption = overlay.TrampleTipOption.clone();
+    }
+    if overlay.UpTime.is_some() {
+        base.UpTime = overlay.UpTime;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn track_range_area(
     state: &mut State,
@@ -573,7 +627,7 @@ fn track_range_area(
     trigger_events: bool,
     out_results: &mut BTreeMap<i32, ErrorCode>,
     progress_dirty: &mut bool,
-) -> Result<(), String> {
+) -> Result<RangeEntityResolved, String> {
     let mut area_id = 0i32;
     let mut resolved_in_world = false;
     let mut has_range_comp = false;
@@ -585,6 +639,7 @@ fn track_range_area(
     let mut resolved_gravity_dir: Option<[f32; 3]> = None;
     let mut has_roll_block = false;
     let mut cfg_id = i32::try_from(range_entity_id).unwrap_or(0);
+    let mut trample_comp = None;
     let mut trigger_comp = None;
     let mut client_trigger_comp = None;
 
@@ -643,11 +698,13 @@ fn track_range_area(
             trigger_comp = components.TriggerComponent.clone();
             has_air_passage = lcfg.BlueprintType.contains("AirPassage");
             has_roll_block = lcfg.BlueprintType.contains("RollBlock");
-            for entry in components.extra.iter().chain(components.template_extra.iter()) {
+            for entry in components.template_extra.iter().chain(components.extra.iter()) {
                 match entry {
                     ExtraEntry::TrampleComponent(tc) => {
-                        if !tc.Disabled.unwrap_or(false) {
-                            has_trample = true;
+                        if let Some(ref mut existing) = trample_comp {
+                            merge_trample_component(existing, tc);
+                        } else {
+                            trample_comp = Some((**tc).clone());
                         }
                     }
                     ExtraEntry::AirPassageComponent(_) => has_air_passage = true,
@@ -656,12 +713,24 @@ fn track_range_area(
                     | ExtraEntry::RollBlockItemComponent(_) => has_roll_block = true,
                     ExtraEntry::ClientTriggerComponent(ct) => {
                         client_trigger_comp = Some((**ct).clone());
-                        if !ct.Disabled.unwrap_or(false) && components.SplineComponent.is_some() {
-                            has_air_passage = true;
-                        }
                     }
                     _ => {}
                 }
+            }
+            if trample_comp
+                .as_ref()
+                .is_some_and(|tc| tc.Disabled.unwrap_or(false))
+            {
+                trample_comp = None;
+            } else if trample_comp.is_some() {
+                has_trample = true;
+            }
+            if client_trigger_comp
+                .as_ref()
+                .is_some_and(|ct| !ct.Disabled.unwrap_or(false))
+                && components.SplineComponent.is_some()
+            {
+                has_air_passage = true;
             }
         }
         if resolved_in_world || is_player_range {
@@ -760,7 +829,11 @@ fn track_range_area(
     {
         save_map_info(state)?;
     }
-    Ok(())
+    Ok(RangeEntityResolved {
+        cfg_id,
+        trample: trample_comp,
+        trigger: trigger_comp,
+    })
 }
 
 pub fn handle_player_access_range_request(
@@ -775,7 +848,7 @@ pub fn handle_player_access_range_request(
     );
     let mut results = BTreeMap::new();
     let mut progress_dirty = false;
-    track_range_area(
+    let _ = track_range_area(
         state,
         events,
         req.RangeEntityId,
@@ -817,7 +890,7 @@ pub fn handle_entity_access_range_request(
     );
     let mut range_results = BTreeMap::new();
     let mut progress_dirty = false;
-    track_range_area(
+    let resolved = track_range_area(
         state,
         events,
         req.EntityId,
@@ -828,9 +901,26 @@ pub fn handle_entity_access_range_request(
         &mut progress_dirty,
     )?;
 
+    let (prev_count, prev_trample_down, role_nid) = state
+        .scene
+        .as_ref()
+        .map_or((0usize, false, 0i64), |scene| {
+            let (cnt, down) = scene.entity(req.EntityId).map_or((0usize, false), |ent| {
+                (
+                    usize::from(ent.world_item.in_range_entity_len),
+                    ent.world_item.trample_down,
+                )
+            });
+            (cnt, down, scene.current_role_entity_id())
+        });
+
     let next_val = i64::from(is_enter);
     let mut infos = Vec::with_capacity(req.EntitiesToCheck.len());
-    for eid in req.EntitiesToCheck {
+    let mut has_non_role = false;
+    for &eid in &req.EntitiesToCheck {
+        if role_nid > 0 && eid != role_nid {
+            has_non_role = true;
+        }
         let ekey = format!("range:ent:{}:{eid}", req.EntityId);
         if state.player_components.progress.info.get_key_int(&ekey) != next_val {
             state
@@ -846,7 +936,10 @@ pub fn handle_entity_access_range_request(
             let wi = &mut ent.world_item;
             if is_enter {
                 let n = usize::from(wi.in_range_entity_len).min(wi.in_range_entity_ids.len());
-                if !wi.in_range_entity_ids[..n].contains(&eid) && n < wi.in_range_entity_ids.len() {
+                if eid > 0
+                    && !wi.in_range_entity_ids[..n].contains(&eid)
+                    && n < wi.in_range_entity_ids.len()
+                {
                     wi.in_range_entity_ids[n] = eid;
                     wi.in_range_entity_len += 1;
                 }
@@ -869,6 +962,50 @@ pub fn handle_entity_access_range_request(
             RangeType: req.RangeType,
             AcessRangeResults: range_results.clone(),
         });
+    }
+
+    let next_count = state
+        .scene
+        .as_ref()
+        .and_then(|s| s.entity(req.EntityId))
+        .map_or(0usize, |ent| usize::from(ent.world_item.in_range_entity_len));
+
+    if let Some(ref tc) = resolved.trample {
+        let should_press = is_enter && next_count > 0 && !prev_trample_down;
+        let should_release = !is_enter && next_count == 0 && prev_trample_down;
+        if should_press || should_release {
+            let mut qctx = state.quest_context(events);
+            if quest_engine::triggers::handle_entity_trample_transition(
+                &mut qctx,
+                req.EntityId,
+                resolved.cfg_id,
+                tc,
+                should_press,
+            )
+            .map_err(|e| e.to_string())?
+            {
+                progress_dirty = true;
+            }
+        }
+    } else if let Some(ref trig) = resolved.trigger
+        && !trig.Disabled.unwrap_or(false)
+    {
+        let should_fire = (is_enter && prev_count == 0 && next_count > 0)
+            || (!is_enter && prev_count > 0 && next_count == 0);
+        if should_fire && has_non_role {
+            let mut qctx = state.quest_context(events);
+            if quest_engine::triggers::handle_entity_range_trigger(
+                &mut qctx,
+                req.EntityId,
+                resolved.cfg_id,
+                trig,
+                is_enter,
+            )
+            .map_err(|e| e.to_string())?
+            {
+                progress_dirty = true;
+            }
+        }
     }
 
     if progress_dirty {

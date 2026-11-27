@@ -60,9 +60,9 @@ use crate::templates::{player_entity_templates, role_entity_templates};
 const LAHAI_ROI_DUNGEON_ID: i32 = 906;
 const ROULETTE_SLOT_COUNT: usize = 8;
 /// Most entities the world spawner keeps in a scene.
-const SCENE_ENTITY_CAP: usize = 240;
+const SCENE_ENTITY_CAP: usize = 320;
 /// Headroom reserved above `SCENE_ENTITY_CAP` for priority world entities (beacons, chests, NPCs, puzzles).
-const SCENE_PRIORITY_CAP: usize = 320;
+const SCENE_PRIORITY_CAP: usize = 420;
 
 fn ensure_valid_formation(
     formation_info: &mut sonoro_gamesv_fs::formation_info::FormationInfo,
@@ -1563,7 +1563,7 @@ pub fn handle_spatial_spawns_check<S: PushSink + ?Sized>(
     loc: [f32; 3],
     events: &mut EventQueue,
     scene: &mut Scene,
-    scene_comp: Option<&mut PlayerSceneComponent>,
+    mut scene_comp: Option<&mut PlayerSceneComponent>,
     fs: &FileSystem,
     assets: &Assets,
     sink: &mut S,
@@ -1573,8 +1573,8 @@ pub fn handle_spatial_spawns_check<S: PushSink + ?Sized>(
     echo_comp: &mut PlayerEchoComponent,
     map_comp: &mut PlayerMapComponent,
     quest_comp: &mut PlayerQuestComponent,
-    guide_comp: Option<&mut PlayerGuideComponent>,
-    mail_comp: Option<&mut PlayerMailComponent>,
+    mut guide_comp: Option<&mut PlayerGuideComponent>,
+    mut mail_comp: Option<&mut PlayerMailComponent>,
     progress_comp: &mut PlayerProgressComponent,
     role_comp: &mut PlayerRoleComponent,
     activity_notify: Option<ActivityNotifyFn<S>>,
@@ -1585,7 +1585,7 @@ pub fn handle_spatial_spawns_check<S: PushSink + ?Sized>(
             fs,
             sink,
             scene,
-            scene_comp,
+            scene_comp: scene_comp.as_deref_mut(),
             events,
             basic_comp,
             inventory_comp,
@@ -1594,15 +1594,15 @@ pub fn handle_spatial_spawns_check<S: PushSink + ?Sized>(
             map_comp,
             quest_comp,
             role_comp: Some(role_comp),
-            guide_comp,
-            mail_comp,
+            guide_comp: guide_comp.as_deref_mut(),
+            mail_comp: mail_comp.as_deref_mut(),
             progress_comp: Some(progress_comp),
             activity_notify,
         };
         level_play::on_player_move(&mut lp_ctx, loc[0], loc[1], loc[2])?;
     }
 
-    spawn_nearby_world_entities(
+    let spawned_members = spawn_nearby_world_entities(
         events,
         scene,
         fs,
@@ -1620,7 +1620,35 @@ pub fn handle_spatial_spawns_check<S: PushSink + ?Sized>(
         20000.0,
         64,
         now_millis(),
-    )
+    )?;
+    if !spawned_members.is_empty() {
+        let mut qctx = QuestContext {
+            assets,
+            fs,
+            sink,
+            scene: Some(scene),
+            scene_comp,
+            events,
+            basic_comp,
+            inventory_comp,
+            weapon_comp,
+            echo_comp,
+            map_comp,
+            quest_comp,
+            role_comp: Some(role_comp),
+            guide_comp,
+            mail_comp,
+            progress_comp: Some(progress_comp),
+            activity_notify,
+        };
+        for member_cfg_id in spawned_members {
+            let _ = quest_engine::events::evaluate_entity_group_triggers_for_member(
+                &mut qctx,
+                member_cfg_id,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2007,6 +2035,109 @@ fn passes_entity_visible_conditions(
     }
 }
 
+fn is_npc_world_entity(assets: &Assets, cfg: &LevelEntityConfig) -> bool {
+    let Some(bp) = assets.indexes.find_blueprint_config(&assets.tables, &cfg.BlueprintType) else {
+        return false;
+    };
+    bp.EntityLogic == EntityLogic::Npc
+        || matches!(
+            bp.EntityType,
+            BpEntityType::ElementalNpc
+                | BpEntityType::Npc
+                | BpEntityType::Npc2
+                | BpEntityType::NpcMonster
+                | BpEntityType::PasserbyNpc
+                | BpEntityType::RewardNpc
+                | BpEntityType::SimpleNPc
+                | BpEntityType::SpawnPasserbyNpc
+                | BpEntityType::TuanziNpc
+        )
+}
+
+/// Collects up to 6 closest visible `PasserbyNpcSpawnComponent` indices within `r2`.
+#[allow(clippy::too_many_arguments)]
+fn collect_nearby_passerby_spawners(
+    assets: &Assets,
+    scene: &Scene,
+    quest_info: &QuestInfo,
+    eval_ctx: &EvalContext<'_>,
+    active_quest_targets: &HashSet<i32>,
+    map_id: i32,
+    player_loc: [f32; 3],
+    r2: f32,
+) -> Vec<(f32, u32)> {
+    let mut nearby = Vec::new();
+    for &cfg_idx in assets.indexes.passerby_spawner_indices_for_map(map_id) {
+        if let Some(meta) = assets.indexes.quick_entity_meta(cfg_idx) {
+            let cfg_id32 = i32::try_from(meta.entity_id).unwrap_or(0);
+            let is_quest_target = cfg_id32 > 0 && active_quest_targets.contains(&cfg_id32);
+            let explicitly_shown =
+                cfg_id32 > 0 && quest_info.world.shown_entities.contains(&cfg_id32);
+            if (meta.in_sleep || meta.is_hidden) && !explicitly_shown && !is_quest_target {
+                continue;
+            }
+            if quest_engine::should_hide_world_entity(quest_info, active_quest_targets, cfg_id32) {
+                continue;
+            }
+        }
+        let Some(cfg) = assets.get_level_entity_by_idx(cfg_idx) else {
+            continue;
+        };
+        if !quest_actions::entity_data_layers_active(assets, quest_info, scene.instance_id, &cfg) {
+            continue;
+        }
+        let Some(pos) = entity_world_pos(&cfg) else {
+            continue;
+        };
+        let dx = pos[0] - player_loc[0];
+        let dy = pos[1] - player_loc[1];
+        let dz = pos[2] - player_loc[2];
+        let dist2 = dx * dx + dy * dy + dz * dz;
+        if dist2 > r2 {
+            continue;
+        }
+        let cfg_id32 = i32::try_from(cfg.EntityId).unwrap_or(0);
+        let is_quest_target = cfg_id32 > 0 && active_quest_targets.contains(&cfg_id32);
+        let explicitly_shown =
+            cfg_id32 > 0 && quest_info.world.shown_entities.contains(&cfg_id32);
+        if (cfg.InSleep || cfg.IsHidden) && !explicitly_shown && !is_quest_target {
+            continue;
+        }
+        if quest_engine::should_hide_world_entity(quest_info, active_quest_targets, cfg_id32) {
+            continue;
+        }
+        let tpl_opt = assets.find_template_config(&cfg.BlueprintType);
+        let base_disabled = cfg
+            .ComponentsData
+            .BaseInfoComponent
+            .as_ref()
+            .and_then(|bi| bi.Disabled)
+            .or_else(|| {
+                tpl_opt
+                    .as_ref()
+                    .and_then(|tpl| tpl.ComponentsData.BaseInfoComponent.as_ref())
+                    .and_then(|tbi| tbi.Disabled)
+            });
+        if base_disabled.unwrap_or(false) && !explicitly_shown && !is_quest_target {
+            continue;
+        }
+        if !passes_entity_visible_conditions(
+            assets,
+            eval_ctx,
+            &cfg,
+            tpl_opt.as_deref(),
+            is_quest_target,
+            explicitly_shown,
+        ) {
+            continue;
+        }
+        nearby.push((dist2, cfg_idx));
+    }
+    nearby.sort_by(|a, b| a.0.total_cmp(&b.0));
+    nearby.truncate(6);
+    nearby
+}
+
 #[allow(clippy::too_many_arguments)]
 fn consider_spawn_candidates(
     assets: &Assets,
@@ -2018,6 +2149,7 @@ fn consider_spawn_candidates(
     player_loc: [f32; 3],
     r2: f32,
     indices: &[u32],
+    npc_buf: &mut Vec<SpawnCandidate>,
     priority_buf: &mut Vec<SpawnCandidate>,
     best_buf: &mut Vec<SpawnCandidate>,
     cap: usize,
@@ -2066,14 +2198,19 @@ fn consider_spawn_candidates(
         let is_quest_target = cfg_id32 > 0 && active_quest_targets.contains(&cfg_id32);
         let explicitly_shown =
             cfg_id32 > 0 && quest_info.world.shown_entities.contains(&cfg_id32);
-        let is_priority = is_quest_target || is_priority_world_entity(assets, &cfg);
+        let is_npc = is_npc_world_entity(assets, &cfg);
+        let is_priority = is_quest_target || is_npc || is_priority_world_entity(assets, &cfg);
         if !is_priority
             && !explicitly_shown
             && !within_client_aoi_z(client_aoi_radii(assets, &cfg).1, dz)
         {
             continue;
         }
-        if is_priority {
+        if is_npc {
+            if npc_buf.len() >= 96 && npc_buf.last().is_some_and(|l| dist2 >= l.dist2) {
+                continue;
+            }
+        } else if is_priority {
             if priority_buf.len() >= 96 && priority_buf.last().is_some_and(|l| dist2 >= l.dist2) {
                 continue;
             }
@@ -2130,7 +2267,9 @@ fn consider_spawn_candidates(
             z: pos[2],
             dist2,
         };
-        if is_priority {
+        if is_npc {
+            insert_spawn_candidate(npc_buf, 96, cand);
+        } else if is_priority {
             insert_spawn_candidate(priority_buf, 96, cand);
         } else {
             insert_spawn_candidate(best_buf, cap, cand);
@@ -2336,6 +2475,7 @@ struct PendingWorldSpawn {
     state_tag_upd: Option<crate::scene::StateTagUpdate>,
     lift_target_floor: Option<i32>,
     is_lift: bool,
+    is_passerby_spawner: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2357,8 +2497,8 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
     radius: f32,
     max_count: usize,
     now_ms: i64,
-) -> io::Result<()> {
-    let need_evict = scene.entities.len() >= 200;
+) -> io::Result<Vec<i32>> {
+    let need_evict = scene.entities.len() >= 280;
 
     let mut active_quest_targets = HashSet::new();
     collect_active_target_entity_ids(assets, quest_comp, Some(progress_comp), &mut active_quest_targets);
@@ -2375,7 +2515,7 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
             24000.0,
             true,
         );
-        if scene.entities.len() >= 215 {
+        if scene.entities.len() >= 300 {
             evict_distant_ambient_entities(
                 scene,
                 fs,
@@ -2388,7 +2528,7 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
                 true,
             );
         }
-        if scene.entities.len() >= 230 {
+        if scene.entities.len() >= 320 {
             evict_distant_ambient_entities(
                 scene,
                 fs,
@@ -2397,72 +2537,118 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
                 &quest_comp.info,
                 &active_quest_targets,
                 player_loc,
-                32000.0,
+                22000.0,
                 false,
             );
         }
     }
 
-    let cap = max_count.min(40);
+    let cap = max_count.min(48);
+    let mut npc_buf = Vec::new();
     let mut priority_buf = Vec::new();
     let mut best_buf = Vec::new();
     let r2 = radius * radius;
     let map_id = assets.resolve_map_config_id(scene.instance_id);
 
-    let mut eval_ctx =
-        EvalContext::new(basic_comp, echo_comp, inventory_comp, map_comp, quest_comp);
-    eval_ctx.assets = Some(assets);
-    eval_ctx.role_comp = Some(role_comp);
-    eval_ctx.weapon_comp = Some(weapon_comp);
-    eval_ctx.progress_comp = Some(progress_comp);
-    eval_ctx.scene = Some(scene);
+    let nearby_passerby_spawners = {
+        let mut eval_ctx =
+            EvalContext::new(basic_comp, echo_comp, inventory_comp, map_comp, quest_comp);
+        eval_ctx.assets = Some(assets);
+        eval_ctx.role_comp = Some(role_comp);
+        eval_ctx.weapon_comp = Some(weapon_comp);
+        eval_ctx.progress_comp = Some(progress_comp);
+        eval_ctx.scene = Some(scene);
 
-    if let Some(CellRange {
-        min_x,
-        max_x,
-        min_y,
-        max_y,
-    }) = asset_indexes::spatial_cell_range(player_loc[0], player_loc[1], radius)
-    {
-        for cx in min_x..=max_x {
-            for cy in min_y..=max_y {
-                let cell_indices = assets.indexes.spawnable_indices_for_map_cell(map_id, cx, cy);
-                if cell_indices.is_empty() {
-                    continue;
+        if let Some(CellRange {
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        }) = asset_indexes::spatial_cell_range(player_loc[0], player_loc[1], radius)
+        {
+            for cx in min_x..=max_x {
+                for cy in min_y..=max_y {
+                    let cell_indices = assets.indexes.spawnable_indices_for_map_cell(map_id, cx, cy);
+                    if cell_indices.is_empty() {
+                        continue;
+                    }
+                    consider_spawn_candidates(
+                        assets,
+                        scene,
+                        &quest_comp.info,
+                        &eval_ctx,
+                        &active_quest_targets,
+                        now_ms,
+                        player_loc,
+                        r2,
+                        cell_indices,
+                        &mut npc_buf,
+                        &mut priority_buf,
+                        &mut best_buf,
+                        cap,
+                    );
                 }
-                consider_spawn_candidates(
-                    assets,
-                    scene,
-                    &quest_comp.info,
-                    &eval_ctx,
-                    &active_quest_targets,
-                    now_ms,
-                    player_loc,
-                    r2,
-                    cell_indices,
-                    &mut priority_buf,
-                    &mut best_buf,
-                    cap,
-                );
             }
+        } else {
+            consider_spawn_candidates(
+                assets,
+                scene,
+                &quest_comp.info,
+                &eval_ctx,
+                &active_quest_targets,
+                now_ms,
+                player_loc,
+                r2,
+                assets.indexes.spawnable_indices_for_map(map_id),
+                &mut npc_buf,
+                &mut priority_buf,
+                &mut best_buf,
+                cap,
+            );
         }
-    } else {
-        consider_spawn_candidates(
+
+        collect_nearby_passerby_spawners(
             assets,
             scene,
             &quest_comp.info,
             &eval_ctx,
             &active_quest_targets,
-            now_ms,
+            map_id,
             player_loc,
             r2,
-            assets.indexes.spawnable_indices_for_map(map_id),
-            &mut priority_buf,
-            &mut best_buf,
-            cap,
-        );
+        )
+    };
+
+    for (_, cfg_idx) in nearby_passerby_spawners {
+        if scene.entities.len() >= SCENE_PRIORITY_CAP {
+            break;
+        }
+        if let Some(spawner_cfg) = assets.get_level_entity_by_idx(cfg_idx) {
+            let _ = entity_cmd::spawn_passerby_npcs_for_spawner(
+                scene,
+                fs,
+                assets,
+                sink,
+                &spawner_cfg,
+                None,
+            );
+        }
     }
 
+    if npc_buf.len() > SCENE_PRIORITY_CAP.saturating_sub(scene.entities.len()) {
+        make_room_for_candidates(
+            scene,
+            fs,
+            assets,
+            sink,
+            &quest_comp.info,
+            &active_quest_targets,
+            player_loc,
+            SCENE_PRIORITY_CAP,
+            false,
+            &mut npc_buf,
+        );
+    }
     if priority_buf.len() > SCENE_PRIORITY_CAP.saturating_sub(scene.entities.len()) {
         make_room_for_candidates(
             scene,
@@ -2494,6 +2680,7 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
 
     let mut pending = Vec::new();
     for (pool, pool_cap) in [
+        (npc_buf, SCENE_PRIORITY_CAP),
         (priority_buf, SCENE_PRIORITY_CAP),
         (best_buf, SCENE_ENTITY_CAP),
     ] {
@@ -2591,6 +2778,8 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
                     Some(progress_comp),
                     cfg.EntityId,
                 )?;
+                let is_passerby_spawner = merged_comps
+                    .has_extra(ExtraKind::PasserbyNpcSpawnComponent);
                 pending.push(PendingWorldSpawn {
                     handle: spawned_ent,
                     entity_id: cfg.EntityId,
@@ -2601,6 +2790,7 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
                     state_tag_upd,
                     lift_target_floor,
                     is_lift,
+                    is_passerby_spawner,
                 });
             } else {
                 pending.push(PendingWorldSpawn {
@@ -2613,6 +2803,8 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
                     state_tag_upd: None,
                     lift_target_floor,
                     is_lift,
+                    is_passerby_spawner: merged_comps
+                        .has_extra(ExtraKind::PasserbyNpcSpawnComponent),
                 });
             }
         }
@@ -2633,11 +2825,34 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
     .map(|h| h.net_id)
     .collect();
 
+    let mut group_trigger_members = Vec::new();
     for item in pending {
         if !published_handles.contains(&item.handle.net_id) {
             continue;
         }
+        if item.is_passerby_spawner
+            && let Some(spawner_cfg) = assets.find_level_entity(item.source_map_id, item.entity_id)
+        {
+            let _ = entity_cmd::spawn_passerby_npcs_for_spawner(
+                scene,
+                fs,
+                assets,
+                sink,
+                &spawner_cfg,
+                None,
+            );
+        }
         if let (Some(cfg_id), Some(net_id)) = (item.cfg_id, item.net_id) {
+            if item.is_lift
+                || assets.indexes.entity_groups_by_member.contains_key(
+                    &sonoro_gamesv_data::asset_indexes::MapEntityKey {
+                        map_id,
+                        entity_id: i64::from(cfg_id),
+                    },
+                )
+            {
+                group_trigger_members.push(cfg_id);
+            }
             if !item.is_lift {
                 push_stored_world_transform(scene, sink, &progress_comp.info, cfg_id, net_id);
             }
@@ -2733,5 +2948,5 @@ fn spawn_nearby_world_entities<S: PushSink + ?Sized>(
             }
         }
     }
-    Ok(())
+    Ok(group_trigger_members)
 }

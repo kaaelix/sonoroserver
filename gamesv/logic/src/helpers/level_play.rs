@@ -833,15 +833,22 @@ fn is_quest_checking_level_play<S: PushSink + ?Sized>(
     false
 }
 
-fn eval_level_play_open_condition<S: PushSink + ?Sized>(
+pub fn is_parkour_challenge_lp(lp_id: i32) -> bool {
+    matches!(
+        lp_id,
+        124_000_078..=124_000_081 | 135_000_010 | 135_000_011
+    )
+}
+
+fn eval_level_play_condition_block<S: PushSink + ?Sized>(
     ctx: &LevelPlayContext<'_, S>,
-    lp: &LevelPlayData,
+    cond_val_opt: Option<&Value>,
     player_pos_opt: Option<[f32; 3]>,
 ) -> bool {
-    let Some(open_val) = lp.Data.LevelPlayOpenCondition.as_ref() else {
+    let Some(cond_val) = cond_val_opt else {
         return true;
     };
-    let Some(obj) = open_val.as_object() else {
+    let Some(obj) = cond_val.as_object() else {
         return true;
     };
     let Some(conds) = obj.get("Conditions").and_then(Value::as_array) else {
@@ -872,6 +879,14 @@ fn eval_level_play_open_condition<S: PushSink + ?Sized>(
     !is_or
 }
 
+fn eval_level_play_open_condition<S: PushSink + ?Sized>(
+    ctx: &LevelPlayContext<'_, S>,
+    lp: &LevelPlayData,
+    player_pos_opt: Option<[f32; 3]>,
+) -> bool {
+    eval_level_play_condition_block(ctx, lp.Data.LevelPlayOpenCondition.as_ref(), player_pos_opt)
+}
+
 fn can_enter_level_play<S: PushSink + ?Sized>(
     ctx: &LevelPlayContext<'_, S>,
     lp: &LevelPlayData,
@@ -884,27 +899,65 @@ fn can_enter_level_play<S: PushSink + ?Sized>(
     if !matches_scene_instance(ctx.assets, lp, ctx.scene.instance_id) {
         return false;
     }
-    if lp.Data.Type != "Quest" {
-        if !ctx
-            .quest_comp
-            .info
-            .has_finished_quest(crate::helpers::quest_engine::PROLOGUE_QUEST_ID)
-        {
-            return false;
-        }
-        if !eval_level_play_open_condition(ctx, lp, player_pos_opt) {
-            return false;
-        }
-        return true;
-    }
-    if ctx
+    let explicitly_activated = ctx
         .progress_comp
         .as_deref()
         .is_some_and(|pc| pc.info.get_key_int(&format!("lp_state:{lp_id}")) == 2)
-    {
-        return true;
+        || is_quest_checking_level_play(ctx, lp_id);
+
+    if lp.Data.Type == "Quest" {
+        return explicitly_activated;
     }
-    is_quest_checking_level_play(ctx, lp_id)
+    if !explicitly_activated && ctx.scene.suppressed_auto_enter_lps.contains(&lp_id) {
+        return false;
+    }
+    if !explicitly_activated && lp.Data.Key.starts_with("玩法样例") {
+        return false;
+    }
+    if !ctx
+        .quest_comp
+        .info
+        .has_finished_quest(crate::helpers::quest_engine::PROLOGUE_QUEST_ID)
+    {
+        return false;
+    }
+
+    let active_type = lp
+        .Data
+        .LevelPlayActive
+        .as_ref()
+        .map_or(0, |act| act.ActiveType);
+    if !explicitly_activated {
+        match active_type {
+            // 1 = Action, 4 = UI: never auto-entered passively on proximity.
+            1 | 4 => return false,
+            // 2 = System: only open automatically for unlocked system events (e.g. Parkour).
+            2 => {
+                if !is_parkour_challenge_lp(lp_id)
+                    || !condition::is_parkour_unlocked(&ctx.make_eval_context())
+                {
+                    return false;
+                }
+            }
+            // 3 = Condition: ActiveCondition must hold in addition to OpenCondition.
+            3 => {
+                let active_cond = lp
+                    .Data
+                    .LevelPlayActive
+                    .as_ref()
+                    .and_then(|act| act.ActiveCondition.as_ref());
+                if !eval_level_play_condition_block(ctx, active_cond, player_pos_opt) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !eval_level_play_open_condition(ctx, lp, player_pos_opt) {
+        return false;
+    }
+    true
 }
 
 fn is_lp_child_quest_satisfied_now<S: PushSink + ?Sized>(
@@ -959,7 +1012,7 @@ fn push_level_play_behavior_tree_info<S: PushSink + ?Sized>(
                 timer_infos.push(TimerInfoPb {
                     TimerType: timer_type.as_bytes().to_vec(),
                     NodeId: node.id,
-                    EndTime: due_ms / 1000,
+                    EndTime: due_ms,
                     PauseTime: 0,
                 });
             }
@@ -995,7 +1048,7 @@ fn push_level_play_behavior_tree_info<S: PushSink + ?Sized>(
                 timer_infos.push(TimerInfoPb {
                     TimerType: timer_type.as_bytes().to_vec(),
                     NodeId: node.id,
-                    EndTime: due_ms / 1000,
+                    EndTime: due_ms,
                     PauseTime: 0,
                 });
             }
@@ -1258,7 +1311,7 @@ fn push_lp_timer_info<S: PushSink + ?Sized>(
             TimerInfo: Some(TimerInfoPb {
                 TimerType: timer_type.as_bytes().to_vec(),
                 NodeId: node_id,
-                EndTime: due_ms / 1000,
+                EndTime: due_ms,
                 PauseTime: 0,
             }),
         },
@@ -3537,6 +3590,31 @@ pub fn on_player_move<S: PushSink + ?Sized>(
         enter_and_start_level_play(ctx, &lp, Some(player_pos), &mut dirty_entered)?;
     }
 
+    // Clear leave-suppression once player walks outside LeaveRadius.
+    let suppress_snap: Vec<i32> = ctx.scene.suppressed_auto_enter_lps.iter().copied().collect();
+    for lp_id in suppress_snap {
+        if let Some(lp) = ctx.assets.tables.level_play_data.get_data_by_id(&lp_id)
+            && let Some(anchor) = resolve_level_play_anchor_pos(ctx, &lp)
+        {
+            let enter_r = if lp.Data.EnterRadius > 0 {
+                lp.Data.EnterRadius as f32
+            } else {
+                3000.0
+            };
+            let leave_r = if lp.Data.LeaveRadius > 0 {
+                lp.Data.LeaveRadius as f32
+            } else {
+                enter_r + 1500.0
+            };
+            let dx = x - anchor[0];
+            let dy = y - anchor[1];
+            let dz = z - anchor[2];
+            if (dx * dx + dy * dy + dz * dz) > (leave_r * leave_r) {
+                ctx.scene.suppressed_auto_enter_lps.remove(&lp_id);
+            }
+        }
+    }
+
     // Also evaluate non-spawnable map LevelPlay anchors (`LevelPlayEntityId`) within 3D EnterRadius.
     let non_spawnable_indices: Vec<usize> = ctx
         .assets
@@ -3662,6 +3740,164 @@ pub fn on_player_move<S: PushSink + ?Sized>(
     Ok(())
 }
 
+fn clear_lp_bt_booted<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+    lp_id: i32,
+    dirty_pc: &mut bool,
+) {
+    let Some(pc) = ctx.progress_comp.as_deref_mut() else {
+        return;
+    };
+    if pc.info.remove_claim(&format!("lp_bt:{lp_id}")) {
+        *dirty_pc = true;
+    }
+}
+
+fn is_lp_descendant_or_self(nodes: &[NodeEntry], node_id: i32, ancestor_id: i32) -> bool {
+    if ancestor_id <= 0 {
+        return true;
+    }
+    let mut cur = node_id;
+    let mut depth = 0usize;
+    while cur > 0 && depth < 64 {
+        if cur == ancestor_id {
+            return true;
+        }
+        let Some(node) = find_lp_node_by_id(nodes, cur) else {
+            break;
+        };
+        cur = node.parent_id;
+        depth += 1;
+    }
+    false
+}
+
+fn collect_check_entity_state_ids(node: &NodeEntry, out: &mut Vec<i32>) {
+    let Some(cond) = quest_engine::get_child_condition_pub(&node.data) else {
+        return;
+    };
+    if json_str(cond.get("Type")) != Some("CheckEntityState") {
+        return;
+    }
+    if let Some(eid) = json_int(cond.get("EntityId"))
+        && eid > 0
+        && !out.contains(&eid)
+    {
+        out.push(eid);
+    }
+    if let Some(arr) = cond.get("Conditions").and_then(Value::as_array) {
+        for item in arr {
+            if let Some(eid) = json_int(item.get("EntityId"))
+                && eid > 0
+                && !out.contains(&eid)
+            {
+                out.push(eid);
+            }
+        }
+    }
+}
+
+fn reset_lp_entities_on_cleanup<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+    lp_id: i32,
+    nodes_to_reset: &[&NodeEntry],
+    despawn_all_sleep_children: bool,
+    preserved_awake_ids: &HashSet<i32>,
+) -> io::Result<()> {
+    let mut state_entity_ids = Vec::new();
+    let mut cbs = quest_engine::action_callbacks::<S>();
+    let mut despawn_cfg_ids = Vec::new();
+
+    for node in nodes_to_reset {
+        collect_check_entity_state_ids(node, &mut state_entity_ids);
+        if !despawn_all_sleep_children
+            && let Some(arr) = node.data.get("EnterActions").and_then(Value::as_array)
+        {
+            for act in arr {
+                if json_str(act.get("Name")) == Some("AwakeEntity")
+                    && let Some(ids) = act
+                        .get("Params")
+                        .and_then(|p| p.get("EntityIds"))
+                        .and_then(Value::as_array)
+                {
+                    for v in ids {
+                        if let Some(cid) = json_int(Some(v))
+                            && cid > 0
+                            && !preserved_awake_ids.contains(&cid)
+                            && !despawn_cfg_ids.contains(&cid)
+                        {
+                            despawn_cfg_ids.push(cid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    {
+        let mut qctx = ctx.as_quest_ctx();
+        for &eid in &state_entity_ids {
+            if qctx
+                .quest_comp
+                .info
+                .get_entity_state(i64::from(eid))
+                .is_some_and(|st| st != "关卡.Common.状态.常态" && st != "关卡.Common.状态.完成")
+            {
+                let _ = quest_actions::apply_entity_state_change(
+                    &mut qctx,
+                    &mut cbs,
+                    eid,
+                    "关卡.Common.状态.常态",
+                );
+            }
+        }
+    }
+
+    if despawn_all_sleep_children
+        && let Some(lp) = ctx.assets.tables.level_play_data.get_data_by_id(&lp_id)
+    {
+        for child_key in &lp.Data.Children {
+            let Some(cid) = child_key
+                .rsplit('_')
+                .next()
+                .and_then(|s| s.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            if cid > 0
+                && !preserved_awake_ids.contains(&cid)
+                && !despawn_cfg_ids.contains(&cid)
+            {
+                despawn_cfg_ids.push(cid);
+            }
+        }
+    }
+
+    if despawn_cfg_ids.is_empty() {
+        return Ok(());
+    }
+
+    let sleep_net_ids: Vec<i64> = ctx
+        .scene
+        .entities
+        .iter()
+        .filter(|ent| {
+            let cid = ent.config.config_id;
+            cid > 0
+                && despawn_cfg_ids.contains(&cid)
+                && ctx
+                    .assets
+                    .find_level_entity(ctx.scene.instance_id, i64::from(cid))
+                    .is_some_and(|cfg| cfg.InSleep)
+        })
+        .map(|ent| ent.net_id)
+        .collect();
+    for nid in sleep_net_ids {
+        remove_entity_from_scene_and_notify(ctx, nid);
+    }
+    Ok(())
+}
+
 pub fn on_level_play_enabled<S: PushSink + ?Sized>(
     ctx: &mut LevelPlayContext<'_, S>,
     level_play_id: i32,
@@ -3679,12 +3915,41 @@ pub fn on_level_play_enabled<S: PushSink + ?Sized>(
             pc.info.set_key_int(&lp_state_key, 0);
             pc_dirty = true;
         }
+        clear_lp_bt_booted(ctx, level_play_id, &mut pc_dirty);
         ctx.scene.lp_timers.cancel_quest(level_play_id);
         ctx.scene.fail_timers.cancel_quest(level_play_id);
         ctx.scene.lp_fail_timers.cancel_quest(level_play_id);
+        ctx.scene.remove_bt_timers_for_owner(level_play_id);
         ctx.scene
             .release_occupations_for_tree(level_play_id, i64::from(level_play_id));
         ctx.scene.clear_save_nodes_for_owner(level_play_id);
+
+        let nodes = ctx
+            .assets
+            .level_play_nodes
+            .get_owner_nodes(level_play_id)
+            .unwrap_or_default();
+        let node_refs: Vec<&NodeEntry> = nodes.iter().collect();
+        for &node in &node_refs {
+            if is_lp_node_active(ctx.progress_comp.as_deref(), level_play_id, node.id) {
+                let mut qctx = ctx.as_quest_ctx();
+                quest_engine::remove_do_interact_options_for_bt_node(
+                    &mut qctx,
+                    BtType::BtTypeLevelPlay,
+                    level_play_id,
+                    node.id,
+                );
+            }
+            clear_lp_node_finished(ctx, level_play_id, node.id, &mut pc_dirty);
+        }
+        let _ = reset_lp_entities_on_cleanup(
+            ctx,
+            level_play_id,
+            &node_refs,
+            true,
+            &HashSet::new(),
+        );
+
         let mut dirty = false;
         if remove_int_value(
             &mut ctx.quest_comp.info.progress.entered_level_plays,
@@ -4076,14 +4341,31 @@ pub fn on_bt_rollback_with_select<S: PushSink + ?Sized>(
             latest_ckpt_id = node.id;
         }
     }
-    if latest_ckpt_id == 0 && reason != FailReason::DefaultFail {
+    if (latest_ckpt_id == 0 || reason == FailReason::GiveUpFail) && reason != FailReason::DefaultFail {
+        if reason == FailReason::GiveUpFail {
+            ctx.scene.suppressed_auto_enter_lps.insert(lp_id);
+            ctx.sink.push(
+                BtRollbackNotify::MSG_ID,
+                &BtRollbackNotify {
+                    BtRollbackInfo: None,
+                    FailReason: Some(reason),
+                    TreeIncId: i64::from(lp_id),
+                    TreeOwnerId: lp_id,
+                    FailNodeId: fail_node_id,
+                },
+            );
+        }
         on_level_play_enabled(ctx, lp_id, false)?;
         return Ok(());
     }
 
     let mut dirty_pc = false;
+    let mut reset_nodes = Vec::new();
+    let mut preserved_awake_ids = HashSet::new();
     for node in nodes.iter() {
         let was_active = is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id);
+        let in_reset_subtree = is_lp_descendant_or_self(&nodes, node.id, latest_ckpt_id)
+            || node.id >= latest_ckpt_id;
         if was_active {
             let mut qctx = ctx.as_quest_ctx();
             quest_engine::remove_do_interact_options_for_bt_node(
@@ -4094,10 +4376,35 @@ pub fn on_bt_rollback_with_select<S: PushSink + ?Sized>(
             );
             set_lp_node_active(ctx, lp_id, node.id, false, &mut dirty_pc);
         }
-        if node.id >= latest_ckpt_id {
+        if in_reset_subtree {
             clear_lp_node_finished(ctx, lp_id, node.id, &mut dirty_pc);
+            reset_nodes.push(node);
+        } else if let Some(arr) = node.data.get("EnterActions").and_then(Value::as_array) {
+            for act in arr {
+                if json_str(act.get("Name")) == Some("AwakeEntity")
+                    && let Some(ids) = act
+                        .get("Params")
+                        .and_then(|p| p.get("EntityIds"))
+                        .and_then(Value::as_array)
+                {
+                    for v in ids {
+                        if let Some(cid) = json_int(Some(v))
+                            && cid > 0
+                        {
+                            preserved_awake_ids.insert(cid);
+                        }
+                    }
+                }
+            }
         }
     }
+    let _ = reset_lp_entities_on_cleanup(
+        ctx,
+        lp_id,
+        &reset_nodes,
+        false,
+        &preserved_awake_ids,
+    );
     if dirty_pc && let Some(pc) = ctx.progress_comp.as_deref_mut() {
         pc.save(ctx.fs)?;
     }

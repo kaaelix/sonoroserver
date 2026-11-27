@@ -787,6 +787,207 @@ pub fn spawn_synthetic_template_entity<S: PushSink + ?Sized>(
     Some(handle.net_id)
 }
 
+fn spline_start_location(spline_cfg: &LevelEntityConfig) -> Option<[f32; 3]> {
+    let base_pos = asset_indexes::entity_world_pos(spline_cfg)?;
+    let yaw_rad = asset_indexes::entity_world_rot(spline_cfg)[2].to_radians();
+    let spline_opt = spline_cfg
+        .ComponentsData
+        .SplineComponent
+        .as_ref()
+        .and_then(|s| s.Option.as_ref());
+    let points = spline_opt
+        .and_then(|o| o.get("Points"))
+        .and_then(Value::as_array)?;
+    if points.len() < 2 {
+        return None;
+    }
+    let p0 = points[0].get("Position");
+    let ox = p0
+        .and_then(|v| v.get("X"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as f32;
+    let oy = p0
+        .and_then(|v| v.get("Y"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as f32;
+    let oz = p0
+        .and_then(|v| v.get("Z"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as f32;
+    let (sin_y, cos_y) = yaw_rad.sin_cos();
+    Some([
+        base_pos[0] + ox * cos_y - oy * sin_y,
+        base_pos[1] + ox * sin_y + oy * cos_y,
+        base_pos[2] + oz,
+    ])
+}
+
+/// Spawns ambient `PasserbyNpc` pedestrians along configured spline routes for a
+/// `PasserbyNpcSpawnComponent` spawner entity (`Gameplay581`).
+pub fn spawn_passerby_npcs_for_spawner<S: PushSink + ?Sized>(
+    scene: &mut Scene,
+    fs: &FileSystem,
+    assets: &Assets,
+    sink: &mut S,
+    spawner_cfg: &LevelEntityConfig,
+    filter_spline_id: Option<i32>,
+) -> Vec<i64> {
+    let Ok(spawner_cfg_id) = i32::try_from(spawner_cfg.EntityId) else {
+        return Vec::new();
+    };
+    if spawner_cfg_id <= 0 {
+        return Vec::new();
+    }
+    let tpl_holder = assets.find_template_config(&spawner_cfg.BlueprintType);
+    let comp = spawner_cfg
+        .ComponentsData
+        .find_extra_entry(ExtraKind::PasserbyNpcSpawnComponent)
+        .or_else(|| {
+            tpl_holder
+                .as_ref()
+                .and_then(|t| t.ComponentsData.find_extra_entry(ExtraKind::PasserbyNpcSpawnComponent))
+        });
+    let Some(ExtraEntry::PasserbyNpcSpawnComponent(sp_comp)) = comp else {
+        return Vec::new();
+    };
+    let Some(template_ids) = sp_comp
+        .SourceConfig
+        .as_ref()
+        .and_then(|v| v.get("TemplateIds"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let template_strs: Vec<&str> = template_ids
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if template_strs.is_empty() {
+        return Vec::new();
+    }
+    let Some(routes) = sp_comp
+        .MoveConfig
+        .as_ref()
+        .and_then(|v| v.get("Routes"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let max_spawn = sp_comp
+        .SpawnConfig
+        .as_ref()
+        .and_then(|v| v.get("MaxSpawnCount"))
+        .and_then(Value::as_i64)
+        .unwrap_or(2)
+        .clamp(1, 4) as usize;
+    let initial_target = if filter_spline_id.is_some() {
+        max_spawn
+    } else {
+        max_spawn.min(routes.len()).min(2)
+    };
+
+    let active_total = scene
+        .entities
+        .iter()
+        .filter(|e| e.world_item.npc_spawn_id == spawner_cfg_id)
+        .count();
+    if active_total >= initial_target {
+        return Vec::new();
+    }
+
+    let now_ms = now_millis();
+    let mut spawned = Vec::new();
+    let mut remaining = initial_target - active_total;
+    for (idx, route) in routes.iter().enumerate() {
+        if remaining == 0 {
+            break;
+        }
+        let Some(spline_id) = route
+            .get("SplineEntityId")
+            .and_then(Value::as_i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .filter(|&id| id > 0)
+        else {
+            continue;
+        };
+        if let Some(want_sid) = filter_spline_id
+            && spline_id != want_sid
+        {
+            continue;
+        }
+        let already_on_route = scene.entities.iter().any(|e| {
+            e.world_item.npc_spawn_id == spawner_cfg_id && e.world_item.npc_spline_id == spline_id
+        });
+        if already_on_route {
+            continue;
+        }
+        let Some(spline_cfg) = assets.find_level_entity(scene.instance_id, i64::from(spline_id))
+        else {
+            continue;
+        };
+        let Some(location) = spline_start_location(&spline_cfg) else {
+            continue;
+        };
+        let rotation = asset_indexes::entity_world_rot(&spline_cfg);
+        let tpl_name = template_strs[(spawner_cfg_id as usize + idx) % template_strs.len()];
+        let Some(bp) = assets.find_blueprint_config(tpl_name) else {
+            continue;
+        };
+        if bp.EntityLogic != EntityLogic::Npc {
+            continue;
+        }
+        let Some(tpl) = assets.find_template_config(tpl_name) else {
+            continue;
+        };
+        let base_info = tpl.ComponentsData.BaseInfoComponent.as_ref();
+        let property_id = base_info.and_then(|i| i.EntityPropertyId).unwrap_or(2);
+        let mut storage = EntityComponentStorage::new(
+            0,
+            ConfigComponent {
+                camp: base_info.and_then(|i| i.Camp).unwrap_or(2),
+                config_id: tpl.Id,
+                config_type: ConfigType::Template,
+                entity_type: EntityType::Npc,
+                state: EntityState::Default,
+            },
+        );
+        storage.position = Some(PositionComponent { location, rotation });
+        storage.visible = true;
+        storage.actor_visible = true;
+        storage.buffs = Some(FightBuffComponent::default());
+        storage.attribute = Some(crate::component::entity::AttributeComponent::create(
+            &assets.tables.get_props(property_id),
+        ));
+        storage.world_item.sub_entity_type = crate::component::entity::resolve_npc_sub_entity_type(
+            assets,
+            base_info,
+            tpl_name,
+        );
+        if storage.world_item.sub_entity_type == 0 {
+            storage.world_item.sub_entity_type = 2;
+        }
+        storage.world_item.npc_spline_id = spline_id;
+        storage.world_item.npc_spawn_id = spawner_cfg_id;
+
+        let handle = scene.spawn(storage);
+        let _ = scene.save_entity(fs, handle);
+        if let Some(ent) = scene.entity(handle.net_id) {
+            let pb = ent.to_proto(assets, now_ms);
+            sink.push(
+                EntityAddNotify::MSG_ID,
+                &EntityAddNotify {
+                    EntityPbs: vec![pb],
+                    RemoveTagIds: false,
+                },
+            );
+            spawned.push(handle.net_id);
+            remaining -= 1;
+        }
+    }
+    spawned
+}
+
 #[allow(clippy::too_many_arguments)]
 const WORLD_SPAWN_BATCH_SIZE: usize = 25;
 
@@ -1190,18 +1391,11 @@ fn spawn_with_location_internal<S: PushSink + ?Sized>(
         storage.world_item.drop_present = true;
     }
     if spawn_base.entity_type == EntityType::Npc {
-        if let Some(nt) = base_info.Category.as_ref().and_then(|c| c.NpcType) {
-            storage.world_item.sub_entity_type = nt;
-        } else if blueprint_config.EntityType
-            == sonoro_gamesv_data::tables::blueprint_config::EntityType::PasserbyNpc
-        {
-            storage.world_item.sub_entity_type = 2;
-        } else if matches!(
-            entity_config.BlueprintType.as_str(),
-            "SimpleNpc" | "SimpleNPc"
-        ) {
-            storage.world_item.sub_entity_type = 1;
-        }
+        storage.world_item.sub_entity_type = crate::component::entity::resolve_npc_sub_entity_type(
+            assets,
+            Some(&base_info),
+            &entity_config.BlueprintType,
+        );
     }
     if components_data.RangeComponent.is_some() {
         storage.world_item.range_present = true;

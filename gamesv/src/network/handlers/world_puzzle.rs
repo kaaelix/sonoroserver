@@ -139,9 +139,19 @@ use super::super::connection::drain_event_queue_best_effort;
 use super::State;
 
 fn flush_quest_condition_changed(state: &mut State) {
+    flush_quest_condition_and_group_triggers(state, None);
+}
+
+fn flush_quest_condition_and_group_triggers(state: &mut State, member_config_id: Option<i32>) {
     let mut events = EventQueue::new();
     {
         let mut qctx = state.quest_context(&mut events);
+        if let Some(cfg_id) = member_config_id
+            && cfg_id > 0
+        {
+            let _ =
+                quest_engine::events::evaluate_entity_group_triggers_for_member(&mut qctx, cfg_id);
+        }
         let _ = quest_engine::on_condition_state_changed(&mut qctx);
     }
     drain_event_queue_best_effort(&mut events, state);
@@ -921,6 +931,7 @@ pub fn handle_monster_patrol_point_reached_request(
 
 pub fn handle_vfx_npc_patrol_finish_request(
     state: &mut State,
+    _events: &mut EventQueue,
     req: VfxNpcPatrolFinishRequest,
 ) -> Result<VfxNpcPatrolFinishResponse, String> {
     pb_kv::persist_claim(
@@ -929,6 +940,23 @@ pub fn handle_vfx_npc_patrol_finish_request(
         &format!("vfx_patrol:fin:{}", req.EntityId),
     )
     .map_err(|e| e.to_string())?;
+    let mut removed_pb = None;
+    if let Some(scene) = state.scene.as_mut()
+        && let Some(ent) = scene.entity(req.EntityId)
+        && ent.world_item.npc_spawn_id != 0
+        && scene.remove(&state.fs, req.EntityId).is_ok()
+    {
+        removed_pb = Some(EntityRemoveNotify {
+            IsRemove: true,
+            RemoveInfos: vec![EntityRemoveInfo {
+                EntityId: req.EntityId,
+                Type: Some(sonoro_proto::enums::ERemoveEntityType::RemoveTypeNormal),
+            }],
+        });
+    }
+    if let Some(notify) = removed_pb {
+        let _ = state.conn.push_msg(EntityRemoveNotify::MSG_ID, &notify);
+    }
     Ok(VfxNpcPatrolFinishResponse {
         Code: Some(ErrorCode::Success),
     })
@@ -1253,7 +1281,7 @@ pub fn handle_elevator_state_change_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
-    flush_quest_condition_changed(state);
+    flush_quest_condition_and_group_triggers(state, Some(config_id));
     if !matches!(req.State, None | Some(sonoro_proto::enums::ElevatorState::End))
         && req.TagState > 0
         && prev_location != req.TagState
@@ -3611,6 +3639,7 @@ pub fn handle_action_reset_pos_pre_performance_end_request(
 
 pub fn handle_access_passerby_npc_spawner_request(
     state: &mut State,
+    _events: &mut EventQueue,
     req: AccessPasserbyNpcSpawnerRequest,
 ) -> Result<AccessPasserbyNpcSpawnerResponse, String> {
     pb_kv::persist_int(
@@ -3620,6 +3649,30 @@ pub fn handle_access_passerby_npc_spawner_request(
         i64::from(req.SplineConfigId),
     )
     .map_err(|e| e.to_string())?;
+    if !req.IsSplneNotValid
+        && let Some(scene) = state.scene.as_mut()
+    {
+        let cfg_id = scene
+            .entity(req.EntityId)
+            .map(|e| e.config.config_id)
+            .or_else(|| i32::try_from(req.EntityId).ok())
+            .unwrap_or(0);
+        if cfg_id > 0
+            && let Some(spawner_cfg) = state
+                .assets
+                .find_level_entity(scene.instance_id, i64::from(cfg_id))
+        {
+            let filter_spline = (req.SplineConfigId > 0).then_some(req.SplineConfigId);
+            let _ = sonoro_gamesv_logic::commands::entity::spawn_passerby_npcs_for_spawner(
+                scene,
+                &state.fs,
+                &state.assets,
+                &mut state.conn,
+                &spawner_cfg,
+                filter_spline,
+            );
+        }
+    }
     Ok(AccessPasserbyNpcSpawnerResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

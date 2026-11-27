@@ -118,6 +118,7 @@ pub struct AssetIndexes {
     pub entity_meta_by_idx: Vec<EntityQuickMeta>,
     pub spawnables_by_map_cell: SpanTable<SpatialCellKey>,
     pub spawnables_by_map: SpanTable<i32>,
+    pub passerby_spawners_by_map: SpanTable<i32>,
     pub teleporters_by_map: SpanTable<i32>,
     pub teleporters_by_area: SpanTable<i32>,
     pub level_plays_by_entity: SpanTable<i32>,
@@ -232,6 +233,10 @@ impl AssetIndexes {
 
     pub fn spawnable_indices_for_map(&self, map_id: i32) -> &[u32] {
         self.spawnables_by_map.get(map_id)
+    }
+
+    pub fn passerby_spawner_indices_for_map(&self, map_id: i32) -> &[u32] {
+        self.passerby_spawners_by_map.get(map_id)
     }
 
     pub fn find_blueprint_config<'a>(
@@ -559,6 +564,9 @@ fn build_level_entity_indexes_from_db(
     out.entity_by_id = SpanTable::from_pairs(id_pairs);
     out.spawnables_by_map_cell = SpanTable::from_pairs(cell_pairs);
     out.spawnables_by_map = SpanTable::from_pairs(map_pairs);
+    if let Ok(sp_rows) = db.query_passerby_spawner_rows() {
+        out.passerby_spawners_by_map = SpanTable::from_pairs(sp_rows);
+    }
     if let Ok(group_rows) = db.query_entity_group_rows() {
         for (map_id, group_entity_id, raw) in group_rows {
             if let Ok(cfg) = serde_json::from_str::<LevelEntityConfig>(&raw)
@@ -617,6 +625,7 @@ fn build_level_entity_indexes(
     let mut id_pairs = Vec::with_capacity(items.len());
     let mut cell_pairs = Vec::new();
     let mut map_pairs = Vec::new();
+    let mut passerby_pairs = Vec::new();
     for (idx, cfg) in items.iter().enumerate() {
         let idx_u32 = idx as u32;
         out.entity_meta_by_idx[idx] = EntityQuickMeta {
@@ -632,6 +641,12 @@ fn build_level_entity_indexes(
             })
             .or_insert(idx_u32);
         id_pairs.push((cfg.EntityId, idx_u32));
+        if cfg
+            .ComponentsData
+            .has_extra(ExtraKind::PasserbyNpcSpawnComponent)
+        {
+            passerby_pairs.push((cfg.MapId, idx_u32));
+        }
         if let Some(ExtraEntry::EntityGroupComponent(egc)) =
             cfg.ComponentsData.find_extra_entry(ExtraKind::EntityGroupComponent)
         {
@@ -656,6 +671,7 @@ fn build_level_entity_indexes(
     out.entity_by_id = SpanTable::from_pairs(id_pairs);
     out.spawnables_by_map_cell = SpanTable::from_pairs(cell_pairs);
     out.spawnables_by_map = SpanTable::from_pairs(map_pairs);
+    out.passerby_spawners_by_map = SpanTable::from_pairs(passerby_pairs);
 }
 
 fn build_teleporter_index(items: &[Teleporter], out: &mut AssetIndexes) {

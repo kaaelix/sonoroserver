@@ -9,7 +9,7 @@ use sonoro_gamesv_logic::helpers::level_play::LevelPlayEventKind;
 use sonoro_gamesv_logic::helpers::quest_actions;
 use sonoro_gamesv_logic::helpers::quest_engine;
 use sonoro_gamesv_logic::helpers::reward::RewardItem;
-use sonoro_gamesv_logic::helpers::{consume, energy, level_play, pb_kv, reward};
+use sonoro_gamesv_logic::helpers::{condition, consume, energy, level_play, pb_kv, reward};
 use sonoro_proto::enums::{BathCameraType, ConsumptiveTaskType, ErrorCode, GiantEcoNetStatus};
 use sonoro_proto::pb::{
     ActivityBuyItem, ActivityFirstReadRequest, ActivityFirstReadResponse,
@@ -2305,10 +2305,25 @@ pub fn handle_open_system_board_result_request(
     })
 }
 
+fn parkour_lp_id_for_challenge(challenge_id: i32) -> i32 {
+    match challenge_id {
+        1 => 124_000_078,
+        2 => 124_000_079,
+        3 => 124_000_080,
+        4 => 124_000_081,
+        5 => 135_000_011,
+        6 => 135_000_010,
+        _ => 0,
+    }
+}
+
 pub fn handle_parkour_challenge_request(
     state: &mut State,
     _req: ParkourChallengeRequest,
 ) -> Result<ParkourChallengeResponse, String> {
+    if !condition::is_parkour_unlocked(&state.eval_context()) {
+        return Ok(ParkourChallengeResponse::default());
+    }
     let pc = &state.player_components.progress.info;
     let open_ids: Vec<i32> = (1..=6).collect();
     let challenges = (1..=6)
@@ -2340,6 +2355,22 @@ pub fn handle_parkour_challenge_trans_request(
     state: &mut State,
     req: ParkourChallengeTransRequest,
 ) -> Result<ParkourChallengeTransResponse, String> {
+    if !condition::is_parkour_unlocked(&state.eval_context()) {
+        return Ok(ParkourChallengeTransResponse {
+            ErrorCode: Some(ErrorCode::ErrActivityNotOpenTip),
+        });
+    }
+    let lp_id = parkour_lp_id_for_challenge(req.ChallengeId);
+    if lp_id > 0 {
+        if let Some(scene) = state.scene.as_mut() {
+            scene.suppressed_auto_enter_lps.remove(&lp_id);
+        }
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int(&format!("lp_state:{lp_id}"), 2);
+    }
     pb_kv::persist_int(
         &state.fs,
         &mut state.player_components.progress,

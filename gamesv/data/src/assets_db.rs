@@ -750,6 +750,22 @@ impl AssetsDb {
         Ok(out)
     }
 
+    pub fn query_passerby_spawner_rows(&self) -> Result<Vec<(i32, u32)>, SqliteError> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stmt = guard.conn.prepare_cached(
+            "SELECT map_id, idx FROM level_entities WHERE data LIKE '%PasserbyNpcSpawnComponent%'",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push((row.get(0)?, row.get(1)?));
+        }
+        Ok(out)
+    }
+
     /// Collects all FunctionIds unlocked by `OpenSystemFunction` node actions.
     pub fn query_action_opened_function_ids(&self) -> Result<Vec<i32>, SqliteError> {
         fn collect(val: &serde_json::Value, out: &mut HashSet<i32>) {

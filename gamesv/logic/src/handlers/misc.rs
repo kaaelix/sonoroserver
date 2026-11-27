@@ -201,47 +201,14 @@ fn build_unlock_eval_context<'a>(
     eval_ctx
 }
 
-pub fn is_level_play_open_globally(
+fn eval_non_spatial_provide_block(
     eval_ctx: &condition::EvalContext<'_>,
-    lp: &sonoro_gamesv_data::tables::level_play_data::LevelPlayData,
+    cond_val_opt: Option<&serde_json::Value>,
 ) -> bool {
-    let lp_id = lp.LevelPlayId;
-    if lp_id <= 0 {
-        return false;
-    }
-    if eval_ctx.quest_comp.info.completed_level_plays.contains(&lp_id)
-        || eval_ctx
-            .quest_comp
-            .info
-            .progress
-            .entered_level_plays
-            .contains(&lp_id)
-    {
-        return true;
-    }
-    if lp.Data.Type == "Quest" {
-        return true;
-    }
-    let lp_inst_or_level = if lp.Data.InstanceId != 0 {
-        lp.Data.InstanceId
-    } else {
-        lp.Data.LevelId
-    };
-    let lp_map = eval_ctx
-        .assets
-        .map_or(lp_inst_or_level, |a| a.resolve_map_config_id(lp_inst_or_level));
-    if (lp.Data.Type == "RebornBoss" || lp_map == 8)
-        && !eval_ctx
-            .quest_comp
-            .info
-            .has_finished_quest(quest_engine::PROLOGUE_QUEST_ID)
-    {
-        return false;
-    }
-    let Some(open_val) = lp.Data.LevelPlayOpenCondition.as_ref() else {
+    let Some(cond_val) = cond_val_opt else {
         return true;
     };
-    let Some(obj) = open_val.as_object() else {
+    let Some(obj) = cond_val.as_object() else {
         return true;
     };
     let Some(conds) = obj
@@ -268,6 +235,60 @@ pub fn is_level_play_open_globally(
         }
     }
     !is_or
+}
+
+pub fn is_level_play_open_globally(
+    eval_ctx: &condition::EvalContext<'_>,
+    lp: &sonoro_gamesv_data::tables::level_play_data::LevelPlayData,
+) -> bool {
+    let lp_id = lp.LevelPlayId;
+    if lp_id <= 0 {
+        return false;
+    }
+    if eval_ctx.quest_comp.info.completed_level_plays.contains(&lp_id)
+        || eval_ctx
+            .quest_comp
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&lp_id)
+    {
+        return true;
+    }
+    if lp.Data.Type == "Quest" {
+        return true;
+    }
+    if lp.Data.Key.starts_with("玩法样例") {
+        return false;
+    }
+    if crate::helpers::level_play::is_parkour_challenge_lp(lp_id)
+        && !condition::is_parkour_unlocked(eval_ctx)
+    {
+        return false;
+    }
+    let lp_inst_or_level = if lp.Data.InstanceId != 0 {
+        lp.Data.InstanceId
+    } else {
+        lp.Data.LevelId
+    };
+    let lp_map = eval_ctx
+        .assets
+        .map_or(lp_inst_or_level, |a| a.resolve_map_config_id(lp_inst_or_level));
+    if (lp.Data.Type == "RebornBoss" || lp_map == 8)
+        && !eval_ctx
+            .quest_comp
+            .info
+            .has_finished_quest(quest_engine::PROLOGUE_QUEST_ID)
+    {
+        return false;
+    }
+    if let Some(act) = lp.Data.LevelPlayActive.as_ref()
+        && act.ActiveType == 3
+        && !eval_non_spatial_provide_block(eval_ctx, act.ActiveCondition.as_ref())
+    {
+        return false;
+    }
+    eval_non_spatial_provide_block(eval_ctx, lp.Data.LevelPlayOpenCondition.as_ref())
 }
 
 pub fn is_entity_blocked_by_locked_level_play(
@@ -401,7 +422,7 @@ pub fn build_map_mark_info_notify(
             mark.ObjectType == 19 || mark.ObjectType == 28 || mark.ObjectType == 29;
         let is_teleporter = mark.ObjectType == 5 || mark.ObjectType == 6;
 
-        if is_boss_or_challenge {
+        if !is_teleporter {
             if mark.ShowCondition > 0 && !condition::eval_condition_group(&eval_ctx, mark.ShowCondition) {
                 continue;
             }
@@ -415,6 +436,9 @@ pub fn build_map_mark_info_notify(
             {
                 continue;
             }
+        }
+
+        if is_boss_or_challenge {
             if seen_show.insert(mark.MarkId) {
                 show_marks.push(MapMarkShowInfo {
                     MarkId: mark.MarkId,

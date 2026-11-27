@@ -7009,3 +7009,674 @@ fn audit_144_explore_teleporter_index_and_udp_kcp_burst_reconnect() {
     srv_handle.abort();
 }
 
+#[test]
+fn audit_145_trample_leisure_parkour_stop_and_challenge_unlocks() {
+    use crate::network::handlers::{events_misc, map, quest};
+    use sonoro_gamesv_logic::helpers::condition;
+    use sonoro_proto::enums::{ElevatorState, RangeType, TrampleGearTransition};
+    use sonoro_proto::pb::{
+        BtGiveUpRequest, EntityAccessRangeRequest, ParkourChallengeRequest,
+        ParkourChallengeTransRequest, TrampleGearTransitionNotify,
+    };
+
+    let _ = ElevatorState::End;
+    let mut h = TestHarness::new("audit_145_trample_parkour", Some(8));
+    let mut events = EventQueue::default();
+    {
+        let sc = h.state.scene.as_mut().expect("scene");
+        let role_ent = sc
+            .spawn_with_net_id(
+                110_201,
+                EntityComponentStorage::new(
+                    110_201,
+                    ConfigComponent {
+                        camp: 1,
+                        config_id: 1102,
+                        entity_type: EntityType::Player,
+                        config_type: ConfigType::Character,
+                        state: EntityState::Default,
+                    },
+                ),
+            )
+            .expect("spawn active role 1102");
+        sc.formation_info.cur_formation = 0;
+        sc.formation_info.formations[0] = Formation {
+            cur_role: 1102,
+            name: None,
+            roles: [
+                Some(FormationRole {
+                    role_id: 1102,
+                    entity_id: role_ent.net_id,
+                    ..Default::default()
+                }),
+                None,
+                None,
+            ],
+        };
+    }
+    let _ = events.drain_all().count();
+    h.state
+        .player_components
+        .quest
+        .info
+        .finished_quests
+        .push(quest_engine::PROLOGUE_QUEST_ID);
+
+    // 1. TrampleComponent pressure plate (Gameplay541, 122006969) emits Down/Up transitions cleanly.
+    entity_cmd::spawn_with_location(
+        &mut events,
+        h.state.scene.as_mut().unwrap(),
+        &h.state.fs,
+        &h.state.assets,
+        &mut h.state.conn,
+        &h.state.player_components.basic,
+        122_006_969,
+        Some(false),
+        Some(false),
+        Some(8),
+        None,
+        true,
+    )
+    .expect("spawn trample 122006969");
+    let trample_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(122_006_969)
+        .expect("trample spawned");
+    let role_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .current_role_entity_id();
+    assert!(role_nid > 0, "notify_join_scene must spawn active role entity");
+    h.drain_count();
+    let _ = events.drain_all().count();
+
+    let _ = map::handle_entity_access_range_request(
+        &mut h.state,
+        &mut events,
+        EntityAccessRangeRequest {
+            EntityId: trample_nid,
+            RangeType: Some(RangeType::RangeEnter),
+            EntitiesToCheck: vec![role_nid],
+        },
+    )
+    .expect("trample enter");
+    let _ = events.drain_all().count();
+    assert!(
+        h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .entity(trample_nid)
+            .unwrap()
+            .world_item
+            .trample_down,
+        "TrampleComponent must enter pressed state on RangeEnter"
+    );
+    let trample_down_notifs: Vec<TrampleGearTransitionNotify> =
+        h.drain_decoded(TrampleGearTransitionNotify::MSG_ID);
+    assert!(trample_down_notifs.iter().any(|n| {
+        n.TrampleGearEntiyId == trample_nid
+            && n.TrampleGearTransition == Some(TrampleGearTransition::Down)
+    }));
+
+    let _ = map::handle_entity_access_range_request(
+        &mut h.state,
+        &mut events,
+        EntityAccessRangeRequest {
+            EntityId: trample_nid,
+            RangeType: Some(RangeType::RangeLeave),
+            EntitiesToCheck: vec![role_nid],
+        },
+    )
+    .expect("trample leave non-reset");
+    let _ = events.drain_all().count();
+    assert!(
+        h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .entity(trample_nid)
+            .unwrap()
+            .world_item
+            .trample_down,
+        "TrampleComponent 122006969 overrides IsResetGear=false and stays pressed on RangeLeave"
+    );
+
+    // 1b. Default Gameplay541 (102002394, IsResetGear=true from template) emits both Down and Up transitions.
+    entity_cmd::spawn_with_location(
+        &mut events,
+        h.state.scene.as_mut().unwrap(),
+        &h.state.fs,
+        &h.state.assets,
+        &mut h.state.conn,
+        &h.state.player_components.basic,
+        102_002_394,
+        Some(false),
+        Some(false),
+        Some(8),
+        None,
+        true,
+    )
+    .expect("spawn trample 102002394");
+    let reset_trample_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(102_002_394)
+        .expect("reset trample spawned");
+    h.drain_count();
+    let _ = events.drain_all().count();
+
+    let _ = map::handle_entity_access_range_request(
+        &mut h.state,
+        &mut events,
+        EntityAccessRangeRequest {
+            EntityId: reset_trample_nid,
+            RangeType: Some(RangeType::RangeEnter),
+            EntitiesToCheck: vec![role_nid],
+        },
+    )
+    .expect("reset trample enter");
+    let _ = events.drain_all().count();
+    assert!(
+        h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .entity(reset_trample_nid)
+            .unwrap()
+            .world_item
+            .trample_down,
+        "TrampleComponent 102002394 must enter pressed state on RangeEnter"
+    );
+    let _ = h.drain_decoded::<TrampleGearTransitionNotify>(TrampleGearTransitionNotify::MSG_ID);
+
+    let _ = map::handle_entity_access_range_request(
+        &mut h.state,
+        &mut events,
+        EntityAccessRangeRequest {
+            EntityId: reset_trample_nid,
+            RangeType: Some(RangeType::RangeLeave),
+            EntitiesToCheck: vec![role_nid],
+        },
+    )
+    .expect("reset trample leave");
+    let _ = events.drain_all().count();
+    assert!(
+        !h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .entity(reset_trample_nid)
+            .unwrap()
+            .world_item
+            .trample_down,
+        "TrampleComponent 102002394 must release on RangeLeave"
+    );
+    let trample_up_notifs: Vec<TrampleGearTransitionNotify> =
+        h.drain_decoded(TrampleGearTransitionNotify::MSG_ID);
+    assert!(trample_up_notifs.iter().any(|n| {
+        n.TrampleGearEntiyId == reset_trample_nid
+            && n.TrampleGearTransition == Some(TrampleGearTransition::Up)
+    }));
+
+    // 2. 3D LeisureInteract safety covers Bounce/Swing/Slide while keeping Catapult entity-only.
+    for opt_type in ["Bounce", "Slide", "Soar2", "PainCoveringHead", "WindProtagonistParkour1"] {
+        let act = serde_json::json!({
+            "Name": "LeisureInteract",
+            "Params": { "Option": { "Type": opt_type } }
+        });
+        assert!(
+            quest_engine::triggers::is_safe_bt_leisure_interact(&act),
+            "LeisureInteract {opt_type} must be BT-safe"
+        );
+    }
+    for opt_type in ["Swing", "MotorEnterSlide", "FoxPushBox"] {
+        let with_id = serde_json::json!({
+            "Name": "LeisureInteract",
+            "Params": { "Option": { "Type": opt_type, "EntityId": 12345 } }
+        });
+        assert!(
+            quest_engine::triggers::is_safe_bt_leisure_interact(&with_id),
+            "LeisureInteract {opt_type} with EntityId must be BT-safe"
+        );
+        let without_id = serde_json::json!({
+            "Name": "LeisureInteract",
+            "Params": { "Option": { "Type": opt_type } }
+        });
+        assert!(
+            !quest_engine::triggers::is_safe_bt_leisure_interact(&without_id),
+            "LeisureInteract {opt_type} without EntityId must not be BT-safe"
+        );
+    }
+    let catapult = serde_json::json!({
+        "Name": "LeisureInteract",
+        "Params": { "Option": { "Type": "Catapult" } }
+    });
+    assert!(!quest_engine::triggers::is_safe_bt_leisure_interact(&catapult));
+
+    // 3. Parkour challenges & gameplay samples stay locked early game (before Function 10053 + Condition 13000010).
+    assert!(!condition::is_parkour_unlocked(&h.state.eval_context()));
+    let locked_pk = events_misc::handle_parkour_challenge_request(&mut h.state, ParkourChallengeRequest {})
+        .expect("parkour req while locked");
+    assert!(locked_pk.Challenges.is_empty());
+    let lp_parkour = h
+        .state
+        .assets
+        .tables
+        .level_play_data
+        .get_data_by_id(&124_000_079)
+        .expect("lp 124000079");
+    assert!(!misc_logic::is_level_play_open_globally(
+        &h.state.eval_context(),
+        &lp_parkour,
+    ));
+    let lp_sample = h
+        .state
+        .assets
+        .tables
+        .level_play_data
+        .get_data_by_id(&610_000_000)
+        .expect("lp 610000000");
+    assert!(!misc_logic::is_level_play_open_globally(
+        &h.state.eval_context(),
+        &lp_sample,
+    ));
+    assert!(misc_logic::is_entity_blocked_by_locked_level_play(
+        &h.state.eval_context(),
+        8,
+        124_003_592,
+    ));
+    let mm_locked = misc_logic::build_map_mark_info_notify(
+        &h.state.assets,
+        &h.state.player_components.map,
+        &h.state.player_components.basic,
+        &h.state.player_components.quest,
+    );
+    assert!(
+        !mm_locked.ShowMarkIds.iter().any(|m| m.MarkId == 10001),
+        "Parkour MapMark 10001 must stay hidden before Parkour unlocks"
+    );
+
+    // 4. Unlock Parkour (Func 10053 + Quest 139000029 finished + Lv 14), enter 124000079, and verify GiveUp stops it cleanly.
+    h.state
+        .player_components
+        .basic
+        .info
+        .attributes
+        .level = 14;
+    h.state
+        .player_components
+        .quest
+        .info
+        .unlocked_systems
+        .push(10053);
+    h.state
+        .player_components
+        .quest
+        .info
+        .finished_quests
+        .push(139_000_029);
+    assert!(condition::is_parkour_unlocked(&h.state.eval_context()));
+    assert!(misc_logic::is_level_play_open_globally(
+        &h.state.eval_context(),
+        &lp_parkour,
+    ));
+    let mm_unlocked = misc_logic::build_map_mark_info_notify(
+        &h.state.assets,
+        &h.state.player_components.map,
+        &h.state.player_components.basic,
+        &h.state.player_components.quest,
+    );
+    assert!(mm_unlocked.ShowMarkIds.iter().any(|m| m.MarkId == 10001));
+
+    let trans_resp = events_misc::handle_parkour_challenge_trans_request(
+        &mut h.state,
+        ParkourChallengeTransRequest { ChallengeId: 2 },
+    )
+    .expect("parkour trans 2");
+    assert_eq!(trans_resp.ErrorCode, Some(ErrorCode::Success));
+
+    {
+        let mut sc = h.state.scene.take().unwrap();
+        let mut lp_ctx = level_play::LevelPlayContext {
+            assets: &h.state.assets,
+            fs: &h.state.fs,
+            sink: &mut h.state.conn,
+            scene: &mut sc,
+            scene_comp: Some(&mut h.state.player_components.scene),
+            events: &mut events,
+            basic_comp: &mut h.state.player_components.basic,
+            inventory_comp: &mut h.state.player_components.inventory,
+            weapon_comp: &mut h.state.player_components.weapon,
+            echo_comp: &mut h.state.player_components.echo,
+            map_comp: &mut h.state.player_components.map,
+            quest_comp: &mut h.state.player_components.quest,
+            role_comp: Some(&mut h.state.player_components.role),
+            guide_comp: Some(&mut h.state.player_components.guide),
+            mail_comp: Some(&mut h.state.player_components.mail),
+            progress_comp: Some(&mut h.state.player_components.progress),
+            activity_notify: None,
+        };
+        level_play::on_player_move(&mut lp_ctx, -37326.62, 114371.23, 4541.35)
+            .expect("enter parkour 124000079");
+        h.state.scene = Some(sc);
+    }
+    let _ = events.drain_all().count();
+    assert!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&124_000_079),
+        "Parkour 124000079 must enter once unlocked and triggered"
+    );
+
+    quest::handle_bt_give_up_request(
+        &mut h.state,
+        &mut events,
+        BtGiveUpRequest {
+            TreeOwnerId: 124_000_079,
+            TreeIncId: 0,
+            NodeId: 0,
+        },
+    )
+    .expect("give up parkour 124000079");
+    let _ = events.drain_all().count();
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&124_000_079),
+        "BtGiveUpRequest must exit Parkour challenge even when SaveConfig checkpoint exists"
+    );
+    assert!(
+        h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .suppressed_auto_enter_lps
+            .contains(&124_000_079)
+    );
+}
+
+#[test]
+fn audit_146_elevator_airwall_jinzhou_npcs_tower_and_tod_lock() {
+    use crate::network::handlers::{scene as scene_handler, tower, world_puzzle};
+    use sonoro_proto::enums::{ElevatorState, SceneDateUpdateReason};
+    use sonoro_proto::pb::{
+        AccessPasserbyNpcSpawnerRequest, ElevatorStateChangeRequest, TowerRequest,
+        TowerSeasonUpdateRequest, UpdateSceneDateRequest, VfxNpcPatrolFinishRequest,
+    };
+
+    let mut h = TestHarness::new("audit_146_world_fixes", Some(8));
+    let mut events = EventQueue::default();
+    h.state
+        .player_components
+        .quest
+        .info
+        .finished_quests
+        .push(quest_engine::PROLOGUE_QUEST_ID);
+
+    // 1. Spawning near Elevator 109002461 fires EntityGroup 109900001 and closes AirWall 109900000.
+    {
+        let mut sc = h.state.scene.take().unwrap();
+        scene_logic::handle_spatial_spawns_check(
+            [-31895.0, 120726.0, 4876.0],
+            &mut events,
+            &mut sc,
+            Some(&mut h.state.player_components.scene),
+            &h.state.fs,
+            &h.state.assets,
+            &mut h.state.conn,
+            &mut h.state.player_components.basic,
+            &mut h.state.player_components.inventory,
+            &mut h.state.player_components.weapon,
+            &mut h.state.player_components.echo,
+            &mut h.state.player_components.map,
+            &mut h.state.player_components.quest,
+            Some(&mut h.state.player_components.guide),
+            Some(&mut h.state.player_components.mail),
+            &mut h.state.player_components.progress,
+            &mut h.state.player_components.role,
+            None,
+        )
+        .expect("spawn near elevator 109002461");
+        h.state.scene = Some(sc);
+    }
+    let _ = events.drain_all().count();
+    let lift_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(109_002_461)
+        .expect("lift 109002461 spawned");
+    assert!(
+        h.state
+            .scene
+            .as_ref()
+            .unwrap()
+            .find_entity_net_id_by_config_id(109_900_000)
+            .is_some(),
+        "AirWall 109900000 must spawn near lift"
+    );
+    assert_eq!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_entity_state(109_900_000),
+        Some("关卡.Common.状态.常态"),
+        "Elevator Floor 1 must close AirWall 109900000 on spawn"
+    );
+
+    world_puzzle::handle_elevator_state_change_request(
+        &mut h.state,
+        ElevatorStateChangeRequest {
+            EntityId: lift_nid,
+            TagState: 2,
+            State: Some(ElevatorState::End),
+        },
+    )
+    .expect("move elevator to floor 2");
+    assert_eq!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_entity_state(109_900_000),
+        Some("关卡.Common.状态.激活"),
+        "Moving elevator to Floor 2 must activate AirWall 109900000"
+    );
+    world_puzzle::handle_elevator_state_change_request(
+        &mut h.state,
+        ElevatorStateChangeRequest {
+            EntityId: lift_nid,
+            TagState: 1,
+            State: Some(ElevatorState::End),
+        },
+    )
+    .expect("move elevator back to floor 1");
+    assert_eq!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_entity_state(109_900_000),
+        Some("关卡.Common.状态.常态"),
+        "Returning elevator to Floor 1 must re-close AirWall 109900000"
+    );
+    h.drain_count();
+
+    // 2. Jinzhou NPCs (SimpleNPC216 SubEntityType == 1) and Gameplay581 PasserbyNpc spawner (SubEntityType == 2).
+    {
+        let mut sc = h.state.scene.take().unwrap();
+        scene_logic::handle_spatial_spawns_check(
+            [-43200.0, 96000.0, 1000.0],
+            &mut events,
+            &mut sc,
+            Some(&mut h.state.player_components.scene),
+            &h.state.fs,
+            &h.state.assets,
+            &mut h.state.conn,
+            &mut h.state.player_components.basic,
+            &mut h.state.player_components.inventory,
+            &mut h.state.player_components.weapon,
+            &mut h.state.player_components.echo,
+            &mut h.state.player_components.map,
+            &mut h.state.player_components.quest,
+            Some(&mut h.state.player_components.guide),
+            Some(&mut h.state.player_components.mail),
+            &mut h.state.player_components.progress,
+            &mut h.state.player_components.role,
+            None,
+        )
+        .expect("spawn in Jinzhou");
+        h.state.scene = Some(sc);
+    }
+    let _ = events.drain_all().count();
+    let sc_ref = h.state.scene.as_ref().unwrap();
+    let simple_nid = sc_ref
+        .find_entity_net_id_by_config_id(11_000_339)
+        .expect("SimpleNPC216 11000339 must spawn in Jinzhou");
+    let simple_pb = sc_ref
+        .entity(simple_nid)
+        .unwrap()
+        .to_proto(&h.state.assets, 0);
+    assert_eq!(
+        simple_pb.SubEntityType, 1,
+        "SimpleNPC216 must emit SubEntityType=1"
+    );
+    assert!(
+        sc_ref
+            .entities
+            .iter()
+            .any(|e| e.world_item.npc_spawn_id == 11_000_704),
+        "Jinzhou Gameplay581 spawner 11000704 must auto-spawn PasserbyNpc pedestrians"
+    );
+    world_puzzle::handle_access_passerby_npc_spawner_request(
+        &mut h.state,
+        &mut events,
+        AccessPasserbyNpcSpawnerRequest {
+            EntityId: 11_000_704,
+            SplineConfigId: 140_800_452,
+            IsSplneNotValid: false,
+        },
+    )
+    .expect("spawn passerby on spline 140800452");
+    let walker_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .entities
+        .iter()
+        .find(|e| e.world_item.npc_spawn_id == 11_000_704 && e.world_item.npc_spline_id == 140_800_452)
+        .map(|e| e.net_id)
+        .expect("PasserbyNpc spawned for spline 140800452");
+    world_puzzle::handle_vfx_npc_patrol_finish_request(
+        &mut h.state,
+        &mut events,
+        VfxNpcPatrolFinishRequest {
+            EntityId: walker_nid,
+        },
+    )
+    .expect("finish passerby patrol");
+    assert!(h.state.scene.as_ref().unwrap().entity(walker_nid).is_none());
+    h.drain_count();
+
+    // 3. Tower MaxUnlockDifficulty stays 0 while Function 10055 is locked, then announces 1 once.
+    let t_locked = tower::handle_tower_request(&mut h.state, TowerRequest {}).expect("tower locked");
+    assert_eq!(t_locked.TowerInfo.unwrap().MaxUnlockDifficulty, 0);
+    let ts_locked = tower::handle_tower_season_update_request(&mut h.state, TowerSeasonUpdateRequest {})
+        .expect("season update locked");
+    assert_eq!(ts_locked.MaxUnlockDifficulty, 0);
+
+    h.state.player_components.basic.info.attributes.level = 15;
+    let ts_first = tower::handle_tower_season_update_request(&mut h.state, TowerSeasonUpdateRequest {})
+        .expect("season update first unlock");
+    assert_eq!(ts_first.MaxUnlockDifficulty, 1);
+    let ts_second = tower::handle_tower_season_update_request(&mut h.state, TowerSeasonUpdateRequest {})
+        .expect("season update repeat must not re-open banner");
+    assert_eq!(ts_second.MaxUnlockDifficulty, 0);
+
+    // 4. TOD TimeFlowAuto must not darken early-game sky before Function 10018 unlocks, and SetTime defers past PlayFlow.
+    let before_hr = h.state.scene.as_ref().unwrap().instance.map_time.hour;
+    scene_handler::handle_update_scene_date_request(
+        &mut h.state,
+        &mut events,
+        UpdateSceneDateRequest {
+            AddDays: 0,
+            Hour: 22,
+            Minute: 30,
+            Reason: Some(SceneDateUpdateReason::TimeFlowAuto),
+        },
+    )
+    .expect("time flow auto before 10018");
+    assert_eq!(
+        h.state.scene.as_ref().unwrap().instance.map_time.hour,
+        before_hr,
+        "TimeFlowAuto drift must stay locked until Function 10018 (TimeOfDay) unlocks"
+    );
+
+    if let Some(sc) = h.state.scene.as_mut() {
+        sc.clear_active_flow();
+        sc.clear_pending_flows();
+    }
+    let mut cbs = quest_engine::action_callbacks();
+    let flow_then_time = vec![
+        serde_json::json!({
+            "Name": "PlayFlow",
+            "Params": { "FlowListName": "剧情_新主线_CE版_序章", "FlowId": 1, "StateId": 18 }
+        }),
+        serde_json::json!({
+            "Name": "SetTime",
+            "Params": { "Hour": 19, "Min": 30, "ShowUi": false }
+        }),
+    ];
+    execute_action_list(
+        &mut h.state.quest_context(&mut events),
+        &mut cbs,
+        139_000_027,
+        223,
+        &flow_then_time,
+    )
+    .expect("defer SetTime past PlayFlow");
+    assert_ne!(
+        h.state.scene.as_ref().unwrap().instance.map_time.hour,
+        19,
+        "SetTime after sync PlayFlow must NOT apply before the flow ends"
+    );
+    while let Some(sc) = h.state.scene.as_ref()
+        && sc.active_flow_inc_id != 0
+    {
+        let inc = sc.active_flow_inc_id;
+        let _ = crate::network::handlers::flow::handle_flow_end_request(
+            &mut h.state,
+            &mut events,
+            sonoro_proto::pb::FlowEndRequest {
+                FlowIncId: inc,
+                OptionInfos: BTreeMap::new(),
+                IsSkip: true,
+                ..Default::default()
+            },
+        )
+        .expect("end flow");
+        let _ = events.drain_all().count();
+    }
+    assert_eq!(h.state.scene.as_ref().unwrap().instance.map_time.hour, 19);
+}
+
+

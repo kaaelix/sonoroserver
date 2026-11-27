@@ -9,7 +9,7 @@ use sonoro_gamesv_data::GameConfig;
 use sonoro_gamesv_data::asset_indexes::{entity_world_pos, entity_world_rot};
 use sonoro_gamesv_data::lazy_flow_store;
 use sonoro_gamesv_data::lazy_node_store::NodeEntry;
-use sonoro_gamesv_data::tables::entity_components::extra::ClientTriggerComponent;
+use sonoro_gamesv_data::tables::entity_components::extra::{ClientTriggerComponent, TrampleComponent};
 use sonoro_gamesv_data::tables::entity_components::range::ShapeConfig;
 use sonoro_gamesv_data::tables::entity_components::trigger::TriggerComponent;
 use sonoro_gamesv_data::tables::quest_data::DataEntry as QuestDataEntry;
@@ -18,7 +18,7 @@ use sonoro_gamesv_fs::inventory_info::InventoryInfo;
 use sonoro_gamesv_fs::quest_info::{ActiveQuest, QuestInfo};
 use sonoro_proto::enums::{
     BtType, ChildQuestNodeStatus, EAttributeType, GameCtxType, NodeStatus, QuestFocusReason,
-    QuestState,
+    QuestState, TrampleGearTransition,
 };
 use sonoro_proto::pb::{
     ActionGroupNodeActionCtxPb, BehaviorTreeCtxPb, BehaviorTreeInfoNotify,
@@ -33,7 +33,8 @@ use sonoro_proto::pb::{
     InteractProgress, KillProgress, LevelEventNotify, NodeInfo, NodeInfoExtraInfoOneof,
     QuestBranchUpdateNotify, QuestFinishListNotify, QuestInfo as PbQuestInfo,
     QuestListNotify, QuestReadyListNotify, QuestShowListNotify, SuccessNodeActionCtxPb,
-    TimerInfoPb, TraceQuestNotify, TreeInfo, UpdateChildQuestNodeStatusNotify,
+    TimerInfoPb, TraceQuestNotify, TrampleActivateCtxPb, TrampleDeActiveCtxPb,
+    TrampleGearTransitionNotify, TreeInfo, UpdateChildQuestNodeStatusNotify,
     UpdateGroupFormationNotify, UpdateNodeProgressNotify, UpdateNodeStatusNotify,
     UseItemProgress,
 };
@@ -210,6 +211,98 @@ pub fn handle_entity_range_trigger<S: PushSink + ?Sized>(
         }
     }
     Ok(progress_dirty)
+}
+
+/// Processes a `TrampleComponent` press (`Down` / `EnterActions`) or release (`Up` / `ExitActions`).
+pub fn handle_entity_trample_transition<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    entity_id: i64,
+    cfg_id: i32,
+    trample: &TrampleComponent,
+    is_enter: bool,
+) -> io::Result<bool> {
+    if trample.Disabled.unwrap_or(false) {
+        return Ok(false);
+    }
+    let Some(scene) = ctx.scene.as_deref_mut() else {
+        return Ok(false);
+    };
+    let Some(ent) = scene.entity(entity_id) else {
+        return Ok(false);
+    };
+    let was_down = ent.world_item.trample_down;
+    if is_enter {
+        if was_down {
+            return Ok(false);
+        }
+        if let Some(cond) = &trample.Condition
+            && cond.is_object()
+            && cond
+                .get("Conditions")
+                .and_then(Value::as_array)
+                .is_some_and(|arr| !arr.is_empty())
+        {
+            let mut eval_ctx = ctx.make_eval_context();
+            eval_ctx.self_entity_config_id = cfg_id;
+            if !condition::eval_inline_condition_block(&eval_ctx, cond) {
+                return Ok(false);
+            }
+        }
+        if let Some(scene) = ctx.scene.as_deref_mut()
+            && let Some(ent) = scene.entity_mut(entity_id)
+        {
+            ent.world_item.trample_down = true;
+        }
+        ctx.sink.push(
+            TrampleGearTransitionNotify::MSG_ID,
+            &TrampleGearTransitionNotify {
+                TrampleGearTransition: Some(TrampleGearTransition::Down),
+                TrampleGearEntiyId: entity_id,
+            },
+        );
+        let entity_ctx = scene_entity_ctx(ctx, entity_id, cfg_id);
+        if !trample.EnterActions.is_empty() {
+            push_entity_level_events(
+                ctx,
+                GameCtxType::TrampleActiveActionCtx,
+                GameCtxPbCtxInfoOneof::TrampleActiveAction(TrampleActivateCtxPb {
+                    EntityCtx: entity_ctx,
+                }),
+                &trample.EnterActions,
+            );
+            execute_entity_actions(ctx, entity_id, cfg_id, &trample.EnterActions)?;
+        }
+        return Ok(true);
+    }
+
+    if !was_down || !trample.IsResetGear.unwrap_or(true) {
+        return Ok(false);
+    }
+    if let Some(scene) = ctx.scene.as_deref_mut()
+        && let Some(ent) = scene.entity_mut(entity_id)
+    {
+        ent.world_item.trample_down = false;
+    }
+    ctx.sink.push(
+        TrampleGearTransitionNotify::MSG_ID,
+        &TrampleGearTransitionNotify {
+            TrampleGearTransition: Some(TrampleGearTransition::Up),
+            TrampleGearEntiyId: entity_id,
+        },
+    );
+    let entity_ctx = scene_entity_ctx(ctx, entity_id, cfg_id);
+    if !trample.ExitActions.is_empty() {
+        push_entity_level_events(
+            ctx,
+            GameCtxType::TrampleDeActiveActionCtx,
+            GameCtxPbCtxInfoOneof::TrampleDeActiveAction(TrampleDeActiveCtxPb {
+                EntityCtx: entity_ctx,
+            }),
+            &trample.ExitActions,
+        );
+        execute_entity_actions(ctx, entity_id, cfg_id, &trample.ExitActions)?;
+    }
+    Ok(true)
 }
 
 pub fn reevaluate_in_range_triggers<S: PushSink + ?Sized>(
@@ -1319,7 +1412,7 @@ pub fn build_tree_info<S: PushSink + ?Sized>(
             timer_infos.push(TimerInfoPb {
                 TimerType: b"WaitTime".to_vec(),
                 NodeId: nid,
-                EndTime: due_ms / 1000,
+                EndTime: due_ms,
                 PauseTime: 0,
             });
         }
@@ -1761,6 +1854,8 @@ pub fn is_client_action_name_registered(name: &str) -> bool {
     CLIENT_EXECUTABLE_BT_ACTIONS.binary_search(&name).is_ok()
 }
 
+/// Returns whether a `LeisureInteract` action can execute on the client without an owning
+/// trigger/entity runtime context (`TriggerContext` / `EntityContext`).
 pub fn is_safe_bt_leisure_interact(act: &Value) -> bool {
     let Some(Value::Object(params)) = act.get("Params") else {
         return false;
@@ -1774,20 +1869,77 @@ pub fn is_safe_bt_leisure_interact(act: &Value) -> bool {
     if option_type == "SitDown" || option_type == "SitOnGround" {
         return json_int(params.get("SceneEntity")).unwrap_or(0) > 0;
     }
-    if option_type == "MotorEnterSlide" {
+    if matches!(option_type, "MotorEnterSlide" | "Swing" | "FoxPushBox") {
         return json_int(option.get("EntityId")).unwrap_or(0) > 0;
+    }
+    if option_type == "FoxReversePush" {
+        return json_int(option.get("SplineEntityId")).unwrap_or(0) > 0;
+    }
+    if option_type == "ParticipateGroupPatrol" {
+        return json_int(option.get("GroupAiEntityId")).unwrap_or(0) > 0;
     }
     matches!(
         option_type,
         "CustomSkill"
             | "GetUp"
             | "FailurePose"
+            | "PainCoveringHead"
             | "Soar"
+            | "Soar2"
+            | "MotorSoar"
+            | "StandControl"
             | "StandControl2"
-            | "MoneHackingDoor"
+            | "Bounce"
+            | "MotorBounce"
+            | "SwingGetUp"
+            | "Slide"
+            | "LandSlide"
             | "LandSlideEnd"
+            | "GetOffMotorcycle"
+            | "FaithJump"
+            | "HookLock"
+            | "KiteHook"
+            | "MoneHackingDoor"
             | "Glide"
+            | "GameplayPose1"
+            | "GameplayPose2"
+            | "GameplayPose3"
+            | "WindProtagonistParkour1"
+            | "WindProtagonistParkour2"
+            | "WindProtagonistParkour3"
+            | "WindProtagonistParkour4"
+            | "WindProtagonistParkour5"
+            | "QiuyuanLongPressQinggong"
+            | "QiuyuanQinggongEnd"
+            | "QiuyuanQinggongExploration1"
+            | "QiuyuanQinggongExploration2"
+            | "QiuyuanQinggongExploration3"
+            | "QiuyuanQinggongExploration4"
+            | "QiuyuanQinggongStraight"
+            | "QiuyuanQinggongHovering"
+            | "SunPalaceInteract"
+            | "FoxPickUp"
+            | "FoxPutDown"
+            | "FoxAutoJump"
     )
+}
+
+/// Entity-owned trigger/interact contexts provide `TriggerEntityId` / `EntityId`, allowing
+/// catapult leisure interactions in addition to context-independent options.
+pub fn is_safe_entity_leisure_interact(act: &Value) -> bool {
+    if is_safe_bt_leisure_interact(act) {
+        return true;
+    }
+    let Some(Value::Object(params)) = act.get("Params") else {
+        return false;
+    };
+    let Some(Value::Object(option)) = params.get("Option") else {
+        return false;
+    };
+    let Some(option_type) = json_str(option.get("Type")) else {
+        return false;
+    };
+    matches!(option_type, "Catapult" | "SuperCatapult" | "MotorCatapult")
 }
 
 fn is_client_executable_bt_action<S: PushSink + ?Sized>(
@@ -1889,7 +2041,14 @@ fn is_client_executable_entity_action<S: PushSink + ?Sized>(
     ctx: &QuestContext<'_, S>,
     act: &Value,
 ) -> bool {
-    json_str(act.get("Name")) != Some("PlayFlow") && is_client_executable_bt_action(ctx, act)
+    let name = json_str(act.get("Name"));
+    if name == Some("PlayFlow") {
+        return false;
+    }
+    if name == Some("LeisureInteract") {
+        return is_safe_entity_leisure_interact(act);
+    }
+    is_client_executable_bt_action(ctx, act)
 }
 
 /// `EntityCtx` of the scene entity `entity_id`, or of the one spawned from `cfg_id` when

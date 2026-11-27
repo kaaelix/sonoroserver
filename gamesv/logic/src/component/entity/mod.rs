@@ -35,6 +35,42 @@ pub use part::PartComponent;
 pub use small::*;
 pub use tag::TagComponent;
 
+/// Resolves client `SubEntityType` (1 = SimpleNpc, 2 = PasserbyNpc) across level overrides,
+/// template configs, and blueprint entity types.
+pub fn resolve_npc_sub_entity_type(
+    assets: &Assets,
+    base_info: Option<&sonoro_gamesv_data::tables::entity_components::base_info::BaseInfoComponent>,
+    blueprint_type: &str,
+) -> i32 {
+    if let Some(nt) = base_info.and_then(|bi| bi.Category.as_ref()).and_then(|c| c.NpcType) {
+        return nt;
+    }
+    if let Some(tpl) = assets.find_template_config(blueprint_type)
+        && let Some(nt) = tpl
+            .ComponentsData
+            .BaseInfoComponent
+            .as_ref()
+            .and_then(|bi| bi.Category.as_ref())
+            .and_then(|c| c.NpcType)
+    {
+        return nt;
+    }
+    if let Some(bp) = assets.indexes.find_blueprint_config(&assets.tables, blueprint_type) {
+        match bp.EntityType {
+            sonoro_gamesv_data::tables::blueprint_config::EntityType::SimpleNPc => return 1,
+            sonoro_gamesv_data::tables::blueprint_config::EntityType::PasserbyNpc => return 2,
+            _ => {}
+        }
+    }
+    if matches!(blueprint_type, "SimpleNpc" | "SimpleNPc") {
+        1
+    } else if blueprint_type == "PasserbyNpc" {
+        2
+    } else {
+        0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WorldItemState {
     pub gravity: Option<GravityComponent>,
@@ -82,6 +118,7 @@ pub struct WorldItemState {
     pub in_range_player_id: i32,
     pub trigger_count: i32,
     pub exit_trigger_count: i32,
+    pub trample_down: bool,
 }
 
 impl Default for WorldItemState {
@@ -131,6 +168,7 @@ impl Default for WorldItemState {
             in_range_player_id: 0,
             trigger_count: 0,
             exit_trigger_count: 0,
+            trample_down: false,
         }
     }
 }
@@ -236,21 +274,11 @@ impl EntityComponentStorage {
             self.world_item.sub_entity_type
         } else if self.config.entity_type == EntityType::Npc {
             if let Some(le) = assets.find_level_entity_any_map(i64::from(self.config.config_id)) {
-                if let Some(nt) = le
-                    .ComponentsData
-                    .BaseInfoComponent
-                    .as_ref()
-                    .and_then(|bi| bi.Category.as_ref())
-                    .and_then(|cat| cat.NpcType)
-                {
-                    nt
-                } else if le.BlueprintType == "SimpleNpc" || le.BlueprintType == "SimpleNPc" {
-                    1
-                } else if le.BlueprintType == "PasserbyNpc" {
-                    2
-                } else {
-                    0
-                }
+                resolve_npc_sub_entity_type(
+                    assets,
+                    le.ComponentsData.BaseInfoComponent.as_ref(),
+                    &le.BlueprintType,
+                )
             } else {
                 0
             }

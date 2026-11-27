@@ -1027,8 +1027,43 @@ pub fn on_entity_state_changed<S: PushSink + ?Sized>(
     Ok(())
 }
 
+fn resolve_entity_state_for_group_cond<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    map_id: i32,
+    eid: i64,
+) -> String {
+    if let Some(saved) = ctx.quest_comp.info.get_entity_state(eid)
+        && !saved.is_empty()
+    {
+        return saved.to_string();
+    }
+    if let Some(lcfg) = ctx.assets.find_level_entity(map_id, eid) {
+        if let Some(st) = lcfg
+            .ComponentsData
+            .EntityStateComponent
+            .as_ref()
+            .and_then(|esc| esc.State.as_deref())
+            .filter(|s| !s.is_empty())
+        {
+            return st.to_string();
+        }
+        if let Some(tpl) = ctx.assets.find_template_config(&lcfg.BlueprintType)
+            && let Some(st) = tpl
+                .ComponentsData
+                .EntityStateComponent
+                .as_ref()
+                .and_then(|esc| esc.State.as_deref())
+                .filter(|s| !s.is_empty())
+        {
+            return st.to_string();
+        }
+    }
+    "关卡.Common.状态.常态".to_string()
+}
+
 fn eval_entity_group_condition<S: PushSink + ?Sized>(
     ctx: &QuestContext<'_, S>,
+    map_id: i32,
     gc: &Map<String, Value>,
 ) -> bool {
     let Some(Value::Array(conds)) = gc.get("Conditions") else {
@@ -1048,11 +1083,7 @@ fn eval_entity_group_condition<S: PushSink + ?Sized>(
         let Some(want) = json_str(eobj.get("State")) else {
             continue;
         };
-        let cur = ctx
-            .quest_comp
-            .info
-            .get_entity_state(i64::from(eid))
-            .unwrap_or("关卡.Common.状态.常态");
+        let cur = resolve_entity_state_for_group_cond(ctx, map_id, i64::from(eid));
         if cur == want {
             matched += 1;
         }
@@ -1061,7 +1092,9 @@ fn eval_entity_group_condition<S: PushSink + ?Sized>(
     matched >= need
 }
 
-fn evaluate_entity_group_triggers_for_member<S: PushSink + ?Sized>(
+/// Evaluates `EntityGroupComponent` `StateTriggers` and `FinishState` for all groups
+/// watching `member_cfg_id`.
+pub fn evaluate_entity_group_triggers_for_member<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     member_cfg_id: i32,
 ) -> io::Result<bool> {
@@ -1096,23 +1129,35 @@ fn evaluate_entity_group_triggers_for_member<S: PushSink + ?Sized>(
     let mut cbs = super::action_callbacks::<S>();
     for spec in specs {
         let gid = spec.group_entity_id;
-        if let Some(Value::Array(triggers)) = spec.component.StateTriggers.as_ref().map(|v| Value::Array(v.clone())).as_ref() {
+        let gid32 = i32::try_from(gid).unwrap_or(0);
+        if let Some(triggers) = spec.component.StateTriggers.as_ref() {
             for (idx, trig) in triggers.iter().enumerate() {
                 let Some(tobj) = trig.as_object() else {
                     continue;
                 };
-                let is_match = tobj
-                    .get("GroupCondition")
-                    .and_then(Value::as_object)
-                    .is_some_and(|gc| eval_entity_group_condition(ctx, gc));
+                let gc_opt = tobj.get("GroupCondition").and_then(Value::as_object);
+                let cond_opt = tobj.get("Condition").filter(|c| c.is_object());
+                if gc_opt.is_none() && cond_opt.is_none() {
+                    continue;
+                }
+                let gc_ok = gc_opt.is_none_or(|gc| eval_entity_group_condition(ctx, map_id, gc));
+                let cond_ok = cond_opt.is_none_or(|cond| {
+                    let mut eval_ctx = ctx.make_eval_context();
+                    eval_ctx.self_entity_config_id = gid32;
+                    condition::eval_inline_condition_block(&eval_ctx, cond)
+                });
+                let is_match = gc_ok && cond_ok;
+
+                let active_key = format!("eg_trig_act:{gid}:{idx}");
+                let legacy_claim_key = format!("eg_trig:{gid}:{idx}");
+                let was_active = ctx.progress_comp.as_deref().is_some_and(|pc| {
+                    pc.info.get_key_int(&active_key) == 1 || pc.info.has_claim(&legacy_claim_key)
+                });
                 if is_match {
-                    let already = ctx
-                        .progress_comp
-                        .as_deref()
-                        .is_some_and(|pc| pc.info.has_claim(&format!("eg_trig:{gid}:{idx}")));
-                    if !already {
+                    if !was_active {
                         if let Some(pc) = ctx.progress_comp.as_deref_mut() {
-                            pc.info.mark_claim(&format!("eg_trig:{gid}:{idx}"));
+                            pc.info.set_key_int(&active_key, 1);
+                            let _ = pc.info.mark_claim(&legacy_claim_key);
                             pc.save(ctx.fs)?;
                         }
                         if let Some(Value::Array(acts)) = tobj.get("SuccessActions") {
@@ -1120,15 +1165,22 @@ fn evaluate_entity_group_triggers_for_member<S: PushSink + ?Sized>(
                             changed = true;
                         }
                     }
-                } else if let Some(Value::Array(fail_acts)) = tobj.get("FailActions")
-                    && !fail_acts.is_empty()
-                {
-                    let was_triggered = ctx
-                        .progress_comp
-                        .as_deref()
-                        .is_some_and(|pc| pc.info.has_claim(&format!("eg_trig:{gid}:{idx}")));
-                    if was_triggered {
-                        quest_actions::execute_action_list(ctx, &mut cbs, 0, idx as i32, fail_acts)?;
+                } else if was_active {
+                    if let Some(pc) = ctx.progress_comp.as_deref_mut() {
+                        pc.info.set_key_int(&active_key, 0);
+                        let _ = pc.info.remove_claim(&legacy_claim_key);
+                        pc.save(ctx.fs)?;
+                    }
+                    if let Some(Value::Array(fail_acts)) = tobj.get("FailActions")
+                        && !fail_acts.is_empty()
+                    {
+                        quest_actions::execute_action_list(
+                            ctx,
+                            &mut cbs,
+                            0,
+                            idx as i32,
+                            fail_acts,
+                        )?;
                         changed = true;
                     }
                 }
@@ -1137,7 +1189,7 @@ fn evaluate_entity_group_triggers_for_member<S: PushSink + ?Sized>(
 
         if let Some(fs_obj) = spec.component.FinishState.as_ref().and_then(Value::as_object)
             && let Some(gc) = fs_obj.get("GroupCondition").and_then(Value::as_object)
-            && eval_entity_group_condition(ctx, gc)
+            && eval_entity_group_condition(ctx, map_id, gc)
             && ctx.quest_comp.info.get_entity_state(gid) != Some("关卡.Common.状态.完成")
         {
             ctx.quest_comp
@@ -3341,7 +3393,7 @@ pub fn on_bt_set_timer_info<S: PushSink + ?Sized>(
             TimerInfo: Some(TimerInfoPb {
                 TimerType: bt.timer_type.into_bytes(),
                 NodeId: bt.node_id,
-                EndTime: bt.end_time_ms / 1000,
+                EndTime: bt.end_time_ms,
                 PauseTime: bt.pause_time_ms,
             }),
         },

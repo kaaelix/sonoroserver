@@ -95,7 +95,7 @@ async fn main() -> ExitCode {
 
     tracing::info!(%address, "config server is listening");
 
-    let app = serve::router(AppState { fs });
+    let app = serve::router(AppState::new(fs));
     if let Err(err) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await

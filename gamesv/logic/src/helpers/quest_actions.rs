@@ -72,7 +72,7 @@ fn is_deferred_weather_action(act: &Value) -> bool {
     };
     matches!(
         json_str(obj.get("Name")),
-        Some("SetWeather" | "SetWeatherLockState")
+        Some("SetWeather" | "SetWeatherLockState" | "SetTime" | "SetTimeLockState")
     )
 }
 
@@ -1019,6 +1019,21 @@ pub fn push_func_open<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>) {
             player_id,
         );
     }
+    if !is_client_time_locked(ctx)
+        && let Some(prog) = ctx.progress_comp.as_deref_mut()
+        && prog.info.get_key_int("tod:unlocked_pushed") == 0
+    {
+        prog.info.set_key_int("tod:unlocked_pushed", 1);
+        let _ = prog.save(ctx.fs);
+        ctx.sink.push(
+            TimeLockInfoNotify::MSG_ID,
+            &TimeLockInfoNotify {
+                IsLock: false,
+                Hour: -1,
+                Minute: -1,
+            },
+        );
+    }
 }
 
 pub fn unlock_teleporter<S: PushSink + ?Sized>(
@@ -1427,6 +1442,11 @@ pub fn apply_set_time<S: PushSink + ?Sized>(
     Ok(())
 }
 
+pub fn is_client_time_locked<S: PushSink + ?Sized>(ctx: &QuestContext<'_, S>) -> bool {
+    ctx.quest_comp.info.env.time_locked
+        || !crate::helpers::condition::is_function_open(&ctx.make_eval_context(), 10018)
+}
+
 pub fn apply_time_lock_state<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     locked: bool,
@@ -1446,10 +1466,11 @@ pub fn apply_time_lock_state<S: PushSink + ?Sized>(
         scene.instance.map_time.owner_clock_time_span = now_millis();
         scene.save_instance(ctx.fs)?;
     }
+    let effective_lock = is_client_time_locked(ctx);
     ctx.sink.push(
         TimeLockInfoNotify::MSG_ID,
         &TimeLockInfoNotify {
-            IsLock: locked,
+            IsLock: effective_lock,
             Hour: i64::from(ctx.quest_comp.info.env.time_lock_hour),
             Minute: i64::from(ctx.quest_comp.info.env.time_lock_minute),
         },
@@ -2212,13 +2233,27 @@ pub fn sync_world_state_on_join<S: PushSink + ?Sized>(
             },
         );
     }
-    if ctx.quest_comp.info.env.time_locked {
+    if is_client_time_locked(ctx) {
+        let (hour, min) = if ctx.quest_comp.info.env.time_locked {
+            (
+                ctx.quest_comp.info.env.time_lock_hour,
+                ctx.quest_comp.info.env.time_lock_minute,
+            )
+        } else {
+            ctx.scene.as_deref().map_or(
+                (
+                    ctx.quest_comp.info.env.time_lock_hour,
+                    ctx.quest_comp.info.env.time_lock_minute,
+                ),
+                |s| (s.instance.map_time.hour, s.instance.map_time.minute),
+            )
+        };
         ctx.sink.push(
             TimeLockInfoNotify::MSG_ID,
             &TimeLockInfoNotify {
                 IsLock: true,
-                Hour: i64::from(ctx.quest_comp.info.env.time_lock_hour),
-                Minute: i64::from(ctx.quest_comp.info.env.time_lock_minute),
+                Hour: i64::from(hour),
+                Minute: i64::from(min),
             },
         );
     }

@@ -3,38 +3,160 @@
 use std::sync::Arc;
 
 use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::extract::State;
-use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sonoro_common::FileSystem;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::encryption::encrypt_aes256_cbc_base64;
 
 const AES_KEY_SIZE: usize = 32;
 const AES_IV_SIZE: usize = 16;
+const DEFAULT_GM_UPSTREAM: &str = "127.0.0.1:13101";
+const GM_PROXY_MAX_BODY: usize = 128 * 1024;
 
 /// Shared application state for `cfgsv`.
 #[derive(Clone)]
 pub struct AppState {
     pub fs: Arc<FileSystem>,
+    pub gm_upstream: String,
 }
 
-/// Builds the Axum router serving config endpoints.
+impl AppState {
+    pub fn new(fs: Arc<FileSystem>) -> Self {
+        let gm_upstream = std::env::var("GM_HTTP_UPSTREAM")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| String::from(DEFAULT_GM_UPSTREAM));
+        Self { fs, gm_upstream }
+    }
+}
+
+/// Builds the Axum router serving config endpoints and proxying `/gm` requests to `gamesv`.
 pub fn router(state: AppState) -> Router {
     Router::new().fallback(handle_request).with_state(state)
 }
 
-async fn handle_request(State(state): State<AppState>, method: Method, uri: Uri) -> Response {
+fn is_gm_proxy_path(path: &str) -> bool {
+    path == "/gm"
+        || path == "/gm/"
+        || path.starts_with("/gm/")
+        || path == "/announcement"
+        || path == "/aki-logic/status"
+}
+
+async fn proxy_to_gm_upstream(
+    upstream: &str,
+    method: Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: Body,
+) -> Response {
+    if !matches!(method, Method::GET | Method::POST | Method::OPTIONS) {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let body_bytes = match to_bytes(body, GM_PROXY_MAX_BODY).await {
+        Ok(b) => b,
+        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+    };
+    let mut stream = match tokio::net::TcpStream::connect(upstream).await {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(%upstream, error = %err, "failed to connect to GM upstream");
+            return (
+                StatusCode::BAD_GATEWAY,
+                r#"{"ok":false,"message":"GM service unavailable"}"#,
+            )
+                .into_response();
+        }
+    };
+
+    let target = uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or(uri.path());
+    let mut req_head = format!(
+        "{method} {target} HTTP/1.1\r\nHost: {upstream}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body_bytes.len()
+    );
+    for key in ["content-type", "x-gm-sign", "x-gm-admin", "accept"] {
+        if let Some(val) = headers.get(key).and_then(|v| v.to_str().ok()) {
+            req_head.push_str(&format!("{key}: {val}\r\n"));
+        }
+    }
+    req_head.push_str("\r\n");
+
+    if stream.write_all(req_head.as_bytes()).await.is_err()
+        || (!body_bytes.is_empty() && stream.write_all(&body_bytes).await.is_err())
+    {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+
+    let mut raw_resp = Vec::new();
+    if stream.read_to_end(&mut raw_resp).await.is_err() {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+
+    let Some(split_pos) = raw_resp.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    let head_str = String::from_utf8_lossy(&raw_resp[..split_pos]);
+    let resp_body = raw_resp[split_pos + 4..].to_vec();
+
+    let mut lines = head_str.lines();
+    let status_code = lines
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .and_then(|c| StatusCode::from_u16(c).ok())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+
+    let mut resp = Response::builder().status(status_code);
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            let k_lower = k.trim().to_ascii_lowercase();
+            if matches!(
+                k_lower.as_str(),
+                "content-length" | "connection" | "transfer-encoding"
+            ) {
+                continue;
+            }
+            if let (Ok(hn), Ok(hv)) = (
+                HeaderName::from_bytes(k.trim().as_bytes()),
+                HeaderValue::from_str(v.trim()),
+            ) {
+                resp = resp.header(hn, hv);
+            }
+        }
+    }
+    resp.body(Body::from(resp_body))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+async fn handle_request(
+    State(state): State<AppState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let path = uri.path().to_string();
+    if is_gm_proxy_path(&path) {
+        tracing::info!(%path, %method, "proxying GM request");
+        return proxy_to_gm_upstream(&state.gm_upstream, method, &uri, &headers, body).await;
+    }
+
     if method != Method::GET {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
 
-    let path = uri.path();
     tracing::info!(%path, "request");
 
-    if !is_safe_request_path(path) {
+    if !is_safe_request_path(&path) {
         tracing::warn!(%path, "rejected unsafe request path");
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -152,7 +274,7 @@ mod tests {
     async fn serves_encrypted_config_and_rejects_bad_methods() {
         let dir = make_temp_state();
         let fs_state = Arc::new(FileSystem::open(&dir).expect("open fs"));
-        let app = router(AppState { fs: fs_state });
+        let app = router(AppState::new(fs_state));
 
         let req = Request::builder()
             .method(Method::GET)

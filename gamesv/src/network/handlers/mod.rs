@@ -10752,7 +10752,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::MonsterPatrolPointReachedResponse,
             world_puzzle::handle_monster_patrol_point_reached_request
         ),
-        pb::VfxNpcPatrolFinishRequest::MSG_ID => req_noev!(
+        pb::VfxNpcPatrolFinishRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,
@@ -11371,7 +11371,7 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::ActionResetPosPrePerformanceEndResponse,
             world_puzzle::handle_action_reset_pos_pre_performance_end_request
         ),
-        pb::AccessPasserbyNpcSpawnerRequest::MSG_ID => req_noev!(
+        pb::AccessPasserbyNpcSpawnerRequest::MSG_ID => req_ev!(
             state,
             rpc_id,
             msg_id,

@@ -565,6 +565,73 @@ pub fn handle_sheriff_zone_info_request(
     })
 }
 
+fn ensure_gm_sign_token(state: &mut State) -> Result<String, String> {
+    let db_path = std::path::Path::new("state/gamesv.db");
+    let db_token = if db_path.exists()
+        && let Ok(conn) = rusqlite::Connection::open(db_path)
+        && let Ok(val) = conn.query_row(
+            "SELECT val FROM player_kv WHERE player_id = ?1 AND ns = 'gm' AND k = 'sign_token' LIMIT 1",
+            [state.player_id],
+            |row| row.get::<_, String>(0),
+        )
+        && val.len() >= 16
+    {
+        Some(val)
+    } else {
+        None
+    };
+
+    let mem_token = state
+        .player_components
+        .progress
+        .info
+        .get_key_str("gm:sign_token")
+        .to_string();
+
+    let token = if let Some(tok) = db_token {
+        tok
+    } else if mem_token.len() >= 16 {
+        mem_token.clone()
+    } else {
+        let mut random_bytes = [0u8; 12];
+        getrandom::fill(&mut random_bytes).map_err(|e| format!("rng failed: {e}"))?;
+        let mut hex = String::with_capacity(24);
+        for b in random_bytes {
+            use std::fmt::Write as _;
+            let _ = write!(&mut hex, "{b:02x}");
+        }
+        hex
+    };
+
+    if mem_token != token {
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_str("gm:sign_token", &token);
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if db_path.exists()
+        && let Ok(conn) = rusqlite::Connection::open(db_path)
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0i64, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        let _ = conn.execute(
+            "INSERT INTO player_kv(player_id, ns, k, val, updated_at) VALUES(?1, 'gm', 'sign_token', ?2, ?3)
+             ON CONFLICT(player_id, ns, k) DO UPDATE SET val = excluded.val, updated_at = excluded.updated_at",
+            rusqlite::params![state.player_id, token, ts],
+        );
+    }
+
+    Ok(token)
+}
+
 pub fn handle_web_sign_request(
     state: &mut State,
     _req: WebSignRequest,
@@ -575,9 +642,9 @@ pub fn handle_web_sign_request(
         "web_sign:claimed",
     )
     .map_err(|e| e.to_string())?;
+    let token = ensure_gm_sign_token(state)?;
     Ok(WebSignResponse {
-        NoticeSign: format!("session_token_{}", state.player_id)
-            .into_bytes(),
+        NoticeSign: token.into_bytes(),
     })
 }
 
@@ -984,34 +1051,7 @@ pub fn handle_player_game_token_request(
     state: &mut State,
     _req: PlayerGameTokenRequest,
 ) -> Result<PlayerGameTokenResponse, String> {
-    let existing = state
-        .player_components
-        .progress
-        .info
-        .get_key_str("gm:sign_token")
-        .to_string();
-    let token = if existing.len() >= 16 {
-        existing
-    } else {
-        let mut random_bytes = [0u8; 12];
-        getrandom::fill(&mut random_bytes).map_err(|e| format!("rng failed: {e}"))?;
-        let mut hex = String::with_capacity(24);
-        for b in random_bytes {
-            use std::fmt::Write as _;
-            let _ = write!(&mut hex, "{b:02x}");
-        }
-        state
-            .player_components
-            .progress
-            .info
-            .set_key_str("gm:sign_token", &hex);
-        state
-            .player_components
-            .progress
-            .save(&state.fs)
-            .map_err(|e| e.to_string())?;
-        hex
-    };
+    let token = ensure_gm_sign_token(state)?;
     Ok(PlayerGameTokenResponse {
         GameToken: token.into_bytes(),
     })

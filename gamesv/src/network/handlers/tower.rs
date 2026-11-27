@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use sonoro_gamesv_logic::event_queue::EventQueue;
-use sonoro_gamesv_logic::helpers::{craft, energy, quest_engine};
+use sonoro_gamesv_logic::helpers::{condition, craft, energy, quest_engine};
 use sonoro_proto::enums::ErrorCode;
 use sonoro_proto::pb::{
     TowerApplyFloorDataRequest, TowerApplyFloorDataResponse, TowerAreaPb, TowerDifficultyPb,
@@ -70,6 +70,38 @@ fn build_difficulty_pb(state: &State, diff: i32) -> TowerDifficultyPb {
     }
 }
 
+fn current_unlock_difficulty(state: &State) -> i32 {
+    if !condition::is_function_open(&state.eval_context(), 10055) {
+        return 0;
+    }
+    let challenge = &state.player_components.progress.info.challenge;
+    let season = challenge.tower_season;
+    let mut unlocked = 1i32;
+    for d in 1..=3 {
+        let mut any_floor = false;
+        let mut all_cleared = true;
+        for cfg in &state.assets.tables.tower_config.items {
+            if cfg.Difficulty == d && (cfg.Season == 0 || cfg.Season == season) {
+                any_floor = true;
+                if !challenge
+                    .tower_floors
+                    .iter()
+                    .any(|fl| fl.config_id == cfg.Id && fl.star > 0)
+                {
+                    all_cleared = false;
+                    break;
+                }
+            }
+        }
+        if any_floor && all_cleared {
+            unlocked = d + 1;
+        } else {
+            break;
+        }
+    }
+    unlocked
+}
+
 pub fn build_tower_info(state: &State, now_sec: i64) -> TowerInfo {
     let diffs = state
         .assets
@@ -86,7 +118,7 @@ pub fn build_tower_info(state: &State, now_sec: i64) -> TowerInfo {
         TowerDifficulties: diffs,
         BeginTime: now_sec - 86_400,
         EndTime: now_sec + 2_592_000,
-        MaxUnlockDifficulty: 4,
+        MaxUnlockDifficulty: current_unlock_difficulty(state),
         QuickPassId: 0,
     }
 }
@@ -104,10 +136,27 @@ pub fn handle_tower_season_update_request(
     state: &mut State,
     _req: TowerSeasonUpdateRequest,
 ) -> Result<TowerSeasonUpdateResponse, String> {
+    let unlock_diff = current_unlock_difficulty(state);
+    let announced = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("tower:announced_unlock_diff") as i32;
+    let newly_unlocked = if unlock_diff > 0 && unlock_diff > announced {
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int("tower:announced_unlock_diff", i64::from(unlock_diff));
+        let _ = state.player_components.progress.save(&state.fs);
+        unlock_diff
+    } else {
+        0
+    };
     let info = build_tower_info(state, energy::now_seconds());
     Ok(TowerSeasonUpdateResponse {
         Towers: Some(TowerSeasonUpdateResponseTowersOneof::TowerInfo(info)),
-        MaxUnlockDifficulty: 4,
+        MaxUnlockDifficulty: newly_unlocked,
     })
 }
 

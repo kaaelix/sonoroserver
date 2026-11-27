@@ -16,9 +16,22 @@ pub struct RewardConfig {
 
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct LevelPlayActiveConfig {
+    #[serde(default, deserialize_with = "super::de_null_default")]
+    pub ActiveType: i32,
+    #[serde(default)]
+    pub ActiveCondition: Option<serde_json::Value>,
+    #[serde(default)]
+    pub OpenCondition: Option<serde_json::Value>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct DataEntry {
     #[serde(default, deserialize_with = "super::de_null_default")]
     pub Id: i32,
+    #[serde(default, deserialize_with = "super::de_null_default")]
+    pub Key: String,
     #[serde(default, deserialize_with = "super::de_null_default")]
     pub LevelId: i32,
     #[serde(default, deserialize_with = "super::de_null_default")]
@@ -33,6 +46,8 @@ pub struct DataEntry {
     pub LeaveRadius: i32,
     #[serde(default, deserialize_with = "super::de_null_default")]
     pub ExploratoryDegree: i32,
+    #[serde(default)]
+    pub LevelPlayActive: Option<LevelPlayActiveConfig>,
     #[serde(default)]
     pub LevelPlayRewardConfig: Option<RewardConfig>,
     #[serde(default)]

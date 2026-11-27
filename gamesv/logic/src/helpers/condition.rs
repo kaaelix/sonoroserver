@@ -131,6 +131,12 @@ pub fn is_function_open(ctx: &EvalContext<'_>, function_id: i32) -> bool {
     is_function_config_open(ctx, &config)
 }
 
+/// Returns whether the Parkour Challenge (`Activity 100`) system has unlocked (`Function 10053`
+/// + `ConditionGroup 13000010`: quest `139000029` completed and Union Level >= 14).
+pub fn is_parkour_unlocked(ctx: &EvalContext<'_>) -> bool {
+    is_function_open(ctx, 10053) && eval_condition_group(ctx, 13000010)
+}
+
 pub fn eval_condition_group(ctx: &EvalContext<'_>, group_id: i32) -> bool {
     if group_id <= 0 {
         return true;
@@ -213,7 +219,8 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
                 return false;
             };
             let st = get_param_int(lp, "State").unwrap_or(3);
-            quest_state_value(ctx, qid) == st
+            let cur = quest_state_value(ctx, qid);
+            cur == st || (st == 4 && cur == 3)
         }
         "NewQuestStepState" | "QuestNodeStatus" => {
             let Some(qid) = get_param_int(lp, "NewQuestId") else {
