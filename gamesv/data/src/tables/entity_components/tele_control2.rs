@@ -8,4 +8,10 @@ pub struct TeleControl2 {
     pub Disabled: Option<bool>,
     #[serde(default)]
     pub PlayerStateRestritionId: Option<i32>,
+    #[serde(default)]
+    pub DestroyCfg: Option<serde_json::Value>,
+    #[serde(default)]
+    pub ThrowCfg: Option<serde_json::Value>,
+    #[serde(default)]
+    pub BulletCfg: Option<serde_json::Value>,
 }

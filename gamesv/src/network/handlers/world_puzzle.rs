@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 
 use serde_json::Value;
+use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_data::asset_indexes::{entity_world_pos, entity_world_rot};
 use sonoro_gamesv_data::tables::entity_components::extra::{ExtraEntry, HookInteractConfig};
 use sonoro_gamesv_fs::formation_info::FormationRole;
+use crate::network::state::PlayerComponentStorage;
 use sonoro_gamesv_logic::component::entity::small::{
     EntityType, LiftComponent as EntityLiftComponent, MoveSplineComponent, MoveToPointComponent,
     SceneItemComponent,
@@ -24,8 +26,9 @@ use sonoro_gamesv_logic::helpers::{
     pb_kv, reward, role as role_helper, spline_state,
 };
 use sonoro_proto::enums::{
-    ArchiveType, EAttributeType, ErrorCode, GameCtxType, GravityFlipType, HookInteractActionType,
-    MoveStatus, SneakFinishType, TeleportReason,
+    ArchiveType, EAttributeType, EControlState, EPlayerTeleportState, ErrorCode, GameCtxType,
+    GravityFlipType, HookInteractActionType, MoveStatus, PilotThrowOperationType, SneakFinishType,
+    TeleportReason,
 };
 use sonoro_proto::pb::{
     AcceptEntrustRequest, AcceptEntrustResponse, AccessPasserbyNpcSpawnerRequest,
@@ -179,6 +182,55 @@ pub fn build_level_play_vars(quest_comp: &PlayerQuestComponent) -> BTreeMap<Vec<
             }
         };
         vars.insert(qv.key.as_bytes().to_vec(), vdef);
+    }
+    vars
+}
+
+pub fn build_level_play_vars_for(
+    assets: &Assets,
+    pcs: &PlayerComponentStorage,
+    _inst_id: i32,
+    level_play_id: i32,
+) -> BTreeMap<Vec<u8>, VarDefinePb> {
+    let mut vars = build_level_play_vars(&pcs.quest);
+    let pinfo = &pcs.progress.info;
+    let completed = &pcs.quest.info.completed_level_plays;
+
+    for m in assets.level_play_mappings() {
+        let lp_id = m.Data.LevelPlayId;
+        if lp_id <= 0 {
+            continue;
+        }
+        if level_play_id > 0 && lp_id != level_play_id {
+            continue;
+        }
+        let is_done = completed.contains(&lp_id);
+        for (idx, var_name) in m.Data.Vars.iter().enumerate() {
+            let key_bytes = var_name.as_bytes().to_vec();
+            let stored = pinfo.dynamic.ints.iter().find(|kv| {
+                kv.key == format!("lp_var:{lp_id}:{var_name}")
+            });
+            let is_bool_var = m.Data.Type == 0 && !var_name.contains("数量");
+            if is_bool_var {
+                let done_flag = stored.map_or(is_done, |kv| kv.val != 0);
+                vars.entry(key_bytes).or_insert(VarDefinePb {
+                    VarType: 0,
+                    Value: Some(VarDefinePbValueOneof::Boolean(done_flag)),
+                });
+            } else {
+                let default_v = m
+                    .Data
+                    .DefaultValues
+                    .get(idx)
+                    .copied()
+                    .unwrap_or_else(|| if is_done { 1 } else { 0 });
+                let val = stored.map_or(default_v, |kv| kv.val);
+                vars.entry(key_bytes).or_insert(VarDefinePb {
+                    VarType: 1,
+                    Value: Some(VarDefinePbValueOneof::Int(val)),
+                });
+            }
+        }
     }
     vars
 }
@@ -1090,13 +1142,40 @@ pub fn handle_monster_patrol_point_reached_request(
     state: &mut State,
     req: MonsterPatrolPointReachedRequest,
 ) -> Result<MonsterPatrolPointReachedResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("patrol:pt:{}", req.EntityId),
-        i64::from(req.Index),
-    )
-    .map_err(|e| e.to_string())?;
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int(&format!("patrol:pt:{}", req.EntityId), i64::from(req.Index));
+        if req.SplineEntityConfigId > 0 {
+            info.set_key_int(
+                &format!("patrol:spline:{}", req.EntityId),
+                i64::from(req.SplineEntityConfigId),
+            );
+        }
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+
+    if req.SplineEntityConfigId > 0
+        && let Some(inst_id) = state.scene.as_ref().map(|s| s.instance_id)
+        && let Some(pos) = resolve_spline_point_pos(
+            state,
+            inst_id,
+            i64::from(req.SplineEntityConfigId),
+            Some(req.Index),
+        )
+    {
+        if persist_world_entity_transform(state, req.EntityId, pos, None)? {
+            state
+                .player_components
+                .progress
+                .save(&state.fs)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
     Ok(MonsterPatrolPointReachedResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1166,10 +1245,11 @@ fn read_json_pos3_offsets(obj: &serde_json::Map<String, Value>) -> [f32; 3] {
     ]
 }
 
-fn resolve_spline_endpoint_pos(
+fn resolve_spline_point_pos(
     state: &State,
     instance_id: i32,
     spline_cfg_id: i64,
+    point_index: Option<i32>,
 ) -> Option<[f32; 3]> {
     let lcfg = state.assets.find_level_entity(instance_id, spline_cfg_id)?;
     let base = entity_world_pos(lcfg.as_ref()).unwrap_or([0.0; 3]);
@@ -1180,10 +1260,21 @@ fn resolve_spline_endpoint_pos(
     }
     let spline = components.SplineComponent?;
     let pts = spline.Option.as_ref()?.as_object()?.get("Points")?.as_array()?;
-    let last_obj = pts.last()?.as_object()?;
-    let pos_obj = last_obj.get("Position")?.as_object()?;
+    let pt_val = match point_index {
+        Some(idx) => usize::try_from(idx).ok().and_then(|i| pts.get(i))?,
+        None => pts.last()?,
+    };
+    let pos_obj = pt_val.as_object()?.get("Position")?.as_object()?;
     let off = gravity::rotate_local_offset_ue(read_json_pos3_offsets(pos_obj), rot);
     Some([base[0] + off[0], base[1] + off[1], base[2] + off[2]])
+}
+
+fn resolve_spline_endpoint_pos(
+    state: &State,
+    instance_id: i32,
+    spline_cfg_id: i64,
+) -> Option<[f32; 3]> {
+    resolve_spline_point_pos(state, instance_id, spline_cfg_id, None)
 }
 
 pub fn handle_quest_npc_move_over_request(
@@ -1753,16 +1844,197 @@ pub fn handle_scene_item_move_target_request(
     })
 }
 
+fn apply_scene_item_sequence_frame_event(
+    state: &mut State,
+    entity_id: i64,
+    seq_guid_bytes: &[u8],
+    event_name_bytes: &[u8],
+    is_start: bool,
+) -> Result<(), String> {
+    let key = if is_start {
+        format!("seq_frame:start:{entity_id}")
+    } else {
+        format!("seq_frame:end:{entity_id}")
+    };
+    pb_kv::persist_claim(&state.fs, &mut state.player_components.progress, &key)
+        .map_err(|e| e.to_string())?;
+
+    let seq_guid = String::from_utf8_lossy(seq_guid_bytes).into_owned();
+    let event_name = String::from_utf8_lossy(event_name_bytes).into_owned();
+
+    let (inst_id, cfg_id, current_state_id) = {
+        let Some(scene) = state.scene.as_ref() else {
+            return Ok(());
+        };
+        let Some(&idx) = scene.net_id_map.get(&entity_id) else {
+            return Ok(());
+        };
+        let ent = &scene.entities[idx];
+        let st_id = ent.state_tag.map(|s| s.state_tag_id).unwrap_or(0);
+        (scene.instance_id, ent.config.config_id, st_id)
+    };
+    if cfg_id <= 0 {
+        return Ok(());
+    }
+    let Some(lcfg) = state.assets.find_level_entity(inst_id, i64::from(cfg_id)) else {
+        return Ok(());
+    };
+    let mut components = lcfg.ComponentsData.clone();
+    if let Some(tpl) = state.assets.find_template_config(&lcfg.BlueprintType) {
+        tpl.ComponentsData.merge_into(&mut components);
+    }
+    let listener = components
+        .extra
+        .iter()
+        .chain(components.template_extra.iter())
+        .find_map(|e| match e {
+            ExtraEntry::SceneItemEventListenerComponent(c) => Some(c.clone()),
+            _ => None,
+        });
+    let Some(listener) = listener else {
+        return Ok(());
+    };
+
+    let mut matched_actions: Vec<Value> = Vec::new();
+    let collect_from_events = |prefer_state_id: Option<i32>, out: &mut Vec<Value>| {
+        for ev_val in &listener.Events {
+            let Some(ev_obj) = ev_val.as_object() else {
+                continue;
+            };
+            if let Some(target_st_id) = prefer_state_id {
+                let matches = ev_obj
+                    .get("EntityStateTagName")
+                    .and_then(Value::as_str)
+                    .and_then(|s| {
+                        gameplay_tags::id_from_name(
+                            &state.assets.tables.gameplay_tag_remap,
+                            s,
+                        )
+                    })
+                    == Some(target_st_id);
+                if !matches {
+                    continue;
+                }
+            }
+            let Some(seq_events) = ev_obj.get("SequenceEvents").and_then(Value::as_array) else {
+                continue;
+            };
+            for se_val in seq_events {
+                let Some(se_obj) = se_val.as_object() else {
+                    continue;
+                };
+                if !seq_guid.is_empty()
+                    && se_obj.get("SeqGuid").and_then(Value::as_str) != Some(seq_guid.as_str())
+                {
+                    continue;
+                }
+                let Some(cbs) = se_obj.get("EventCallbacks").and_then(Value::as_array) else {
+                    continue;
+                };
+                for cb_val in cbs {
+                    let Some(cb_obj) = cb_val.as_object() else {
+                        continue;
+                    };
+                    if !event_name.is_empty()
+                        && cb_obj.get("EventName").and_then(Value::as_str)
+                            != Some(event_name.as_str())
+                    {
+                        continue;
+                    }
+                    if let Some(action) = cb_obj.get("Action") {
+                        out.push(action.clone());
+                    }
+                }
+            }
+        }
+    };
+    if current_state_id != 0 {
+        collect_from_events(Some(current_state_id), &mut matched_actions);
+    }
+    if matched_actions.is_empty() {
+        collect_from_events(None, &mut matched_actions);
+    }
+    if matched_actions.is_empty() {
+        return Ok(());
+    }
+
+    let mut generic_actions = Vec::new();
+    let mut events = EventQueue::new();
+    {
+        let mut qctx = state.quest_context(&mut events);
+        for action in &matched_actions {
+            let Some(aobj) = action.as_object() else {
+                continue;
+            };
+            let aname = aobj.get("Name").and_then(Value::as_str).unwrap_or("");
+            let aparams = aobj.get("Params").and_then(Value::as_object);
+            match aname {
+                "SeqEventAddTagToSelf" => {
+                    let tags: Vec<i32> = aparams
+                        .and_then(|p| p.get("Tags"))
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_i64().and_then(|n| i32::try_from(n).ok()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    quest_actions::apply_entity_gameplay_tag_change(
+                        &mut qctx,
+                        entity_id,
+                        &tags,
+                        is_start,
+                    );
+                }
+                "SeqEventFireBullet" => {
+                    let bullet_id = aparams
+                        .and_then(|p| p.get("BulletId"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    if let Some(prog) = qctx.progress_comp.as_deref_mut() {
+                        if bullet_id > 0 {
+                            prog.info.set_key_int(
+                                &format!("seq_bullet:{cfg_id}:{bullet_id}"),
+                                i64::from(is_start),
+                            );
+                        }
+                        prog.info.set_key_int(
+                            &format!("seq_bullet_active:{cfg_id}"),
+                            if is_start { bullet_id } else { 0 },
+                        );
+                    }
+                }
+                _ if is_start => {
+                    generic_actions.push(action.clone());
+                }
+                _ => {}
+            }
+        }
+        if !generic_actions.is_empty() {
+            let _ = quest_engine::triggers::execute_entity_actions(
+                &mut qctx,
+                entity_id,
+                cfg_id,
+                &generic_actions,
+            );
+        }
+    }
+    let _ = state.player_components.progress.save(&state.fs);
+    drain_event_queue_best_effort(&mut events, state);
+    Ok(())
+}
+
 pub fn handle_scene_item_sequence_frame_start_request(
     state: &mut State,
     req: SceneItemSequenceFrameStartRequest,
 ) -> Result<SceneItemSequenceFrameStartResponse, String> {
-    pb_kv::persist_claim(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("seq_frame:start:{}", req.EntityId),
-    )
-    .map_err(|e| e.to_string())?;
+    apply_scene_item_sequence_frame_event(
+        state,
+        req.EntityId,
+        &req.SeqGuid,
+        &req.EventName,
+        true,
+    )?;
     Ok(SceneItemSequenceFrameStartResponse {
         Code: Some(ErrorCode::Success),
     })
@@ -1772,12 +2044,13 @@ pub fn handle_scene_item_sequence_frame_end_request(
     state: &mut State,
     req: SceneItemSequenceFrameEndRequest,
 ) -> Result<SceneItemSequenceFrameEndResponse, String> {
-    pb_kv::persist_claim(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("seq_frame:end:{}", req.EntityId),
-    )
-    .map_err(|e| e.to_string())?;
+    apply_scene_item_sequence_frame_event(
+        state,
+        req.EntityId,
+        &req.SeqGuid,
+        &req.EventName,
+        false,
+    )?;
     Ok(SceneItemSequenceFrameEndResponse {
         Code: Some(ErrorCode::Success),
     })
@@ -1830,13 +2103,24 @@ pub fn handle_move_scene_item_reset_position_request(
     state: &mut State,
     req: MoveSceneItemResetPositionRequest,
 ) -> Result<MoveSceneItemResetPositionResponse, String> {
-    let reset_pos = if let Some(scene) = state.scene.as_mut()
+    let (cfg_id, reset_pos) = if let Some(scene) = state.scene.as_mut()
         && let Some(&idx) = scene.net_id_map.get(&req.EntityId)
     {
         let cfg_id = scene.entities[idx].config.config_id;
         let inst_id = scene.instance_id;
         scene.entities[idx].world_item.move_spline = None;
         scene.entities[idx].world_item.move_to_point = None;
+        scene.entities[idx].world_item.be_controlled_player_id = None;
+        if let Some(sc_item) = scene.entities[idx].world_item.scene_item.as_mut() {
+            sc_item.manipulatable_state = None;
+        }
+        let mut cpack = Vec::new();
+        if scene.set_entity_visibility(req.EntityId, true, &mut cpack) && !cpack.is_empty() {
+            let _ = state.conn.push_msg(
+                sonoro_proto::pb::CombatReceivePackNotify::MSG_ID,
+                &sonoro_proto::pb::CombatReceivePackNotify { Data: cpack },
+            );
+        }
         if cfg_id > 0 {
             let info = &mut state.player_components.progress.info;
             info.set_key_int(&format!("scene_item_spline_active:{cfg_id}"), 0);
@@ -1847,14 +2131,26 @@ pub fn handle_move_scene_item_reset_position_request(
             info.set_key_int(&format!("scene_item_move_target_active:{cfg_id}"), 0);
             info.set_key_int(&format!("quest_spline_active:{cfg_id}"), 0);
             info.set_key_int(&format!("vehicle:spline_active:{cfg_id}"), 0);
+            info.set_key_int(&format!("be_ctrl:active:{cfg_id}"), 0);
+            info.set_key_int(&format!("item_bb:{cfg_id}:0"), 0);
         }
-        state
+        let pos = state
             .assets
             .find_level_entity(inst_id, i64::from(cfg_id))
-            .and_then(|ecfg| entity_world_pos(ecfg.as_ref()))
+            .and_then(|ecfg| entity_world_pos(ecfg.as_ref()));
+        (cfg_id, pos)
     } else {
-        None
+        (0, None)
     };
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int(&format!("be_ctrl:active:{}", req.EntityId), 0);
+        let net_destroy = format!("be_ctrl:destroy:{}", req.EntityId);
+        let cfg_destroy = format!("be_ctrl:destroy:{cfg_id}");
+        info.dynamic
+            .claims
+            .retain(|c| c != &net_destroy && (cfg_id <= 0 || c != &cfg_destroy));
+    }
     if let Some(pos) = reset_pos {
         let _ = persist_world_entity_transform(state, req.EntityId, pos, None)?;
     }
@@ -2426,6 +2722,19 @@ pub fn handle_hook_lock_point_request(
             .info
             .set_key_int(&format!("hook_point:active:{}", req.EntityId), 1);
     }
+    let inst_id = state.scene.as_ref().map_or(8, |s| s.instance_id);
+    if let Some(hook_cfg) = resolve_hook_interact_config(state, inst_id, target_id)
+        && hook_cfg.Type.as_deref() == Some("PilotThrow")
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int("pilot_throw:hook_net", req.EntityId);
+        info.set_key_int("pilot_throw:hook_cfg", target_id);
+        if let Some(titan_id) = hook_cfg.TitanEntityId.filter(|&id| id > 0) {
+            info.set_key_int("pilot_throw:titan_cfg", titan_id);
+        } else {
+            info.set_key_int("pilot_throw:titan_cfg", 0);
+        }
+    }
     state
         .player_components
         .progress
@@ -2975,17 +3284,112 @@ pub fn handle_scene_mode_change_finish_request(
     })
 }
 
+fn tele_control2_destroy_triggers(state: &State, inst_id: i32, cfg_id: i32, is_let_go: bool) -> bool {
+    let Some(lcfg) = state.assets.find_level_entity(inst_id, i64::from(cfg_id)) else {
+        return false;
+    };
+    let mut merged = lcfg.ComponentsData.clone();
+    if let Some(tpl) = state.assets.find_template_config(&lcfg.BlueprintType) {
+        tpl.ComponentsData.merge_into(&mut merged);
+    }
+    let Some(tc2) = merged.TeleControl2.as_ref() else {
+        return false;
+    };
+    if tc2.Disabled.unwrap_or(false) {
+        return false;
+    }
+    let Some(conds) = tc2
+        .DestroyCfg
+        .as_ref()
+        .and_then(|d| d.get("Conditions"))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let wanted = if is_let_go { "LetGo" } else { "Throw" };
+    conds.iter().any(|c| {
+        c.get("Type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t == wanted)
+    })
+}
+
 pub fn handle_be_controlled_throw_request(
     state: &mut State,
     req: BeControlledThrowRequest,
 ) -> Result<BeControlledThrowResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("be_ctrl:throw:{}", req.EntityId),
-        i64::from(req.ThrowType),
-    )
-    .map_err(|e| e.to_string())?;
+    let is_let_go = req.ControlState == Some(EControlState::LetGo);
+    let bb_state = if is_let_go { 11i32 } else { 6i32 };
+    let mut item_cfg_id = i32::try_from(req.EntityId).unwrap_or(0);
+    let mut inst_id = 8i32;
+
+    if let Some(scene) = state.scene.as_mut() {
+        inst_id = scene.instance_id;
+        if let Some(cfg_id) = scene.find_config_id_by_net_id(req.EntityId) {
+            item_cfg_id = cfg_id;
+        }
+        if let Some(&idx) = scene.net_id_map.get(&req.EntityId) {
+            scene.entities[idx].world_item.be_controlled_player_id = None;
+            let mut sc_item = scene.entities[idx]
+                .world_item
+                .scene_item
+                .unwrap_or(SceneItemComponent {
+                    pos_sender: scene.player_id,
+                    manipulatable_state: None,
+                });
+            sc_item.manipulatable_state = Some(bb_state);
+            scene.entities[idx].world_item.scene_item = Some(sc_item);
+        }
+    }
+
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int(&format!("be_ctrl:throw:{}", req.EntityId), i64::from(req.ThrowType));
+        info.set_key_int(&format!("be_ctrl:active:{}", req.EntityId), 0);
+        if item_cfg_id > 0 {
+            info.set_key_int(&format!("be_ctrl:active:{item_cfg_id}"), 0);
+            info.set_key_int(&format!("item_bb:{item_cfg_id}:0"), i64::from(bb_state));
+            let f_key = format!("controlled_foundation:{item_cfg_id}");
+            let fid = info.get_key_int(&f_key) as i32;
+            if fid > 0 {
+                info.set_key_int(&f_key, 0);
+                info.set_key_int(&format!("foundation_match:{fid}"), 0);
+            }
+        }
+    }
+
+    let should_destroy =
+        item_cfg_id > 0 && tele_control2_destroy_triggers(state, inst_id, item_cfg_id, is_let_go);
+    if should_destroy {
+        if let Some(scene) = state.scene.as_mut() {
+            let mut cpack = Vec::new();
+            if scene.set_entity_visibility(req.EntityId, false, &mut cpack) && !cpack.is_empty() {
+                let _ = state.conn.push_msg(
+                    sonoro_proto::pb::CombatReceivePackNotify::MSG_ID,
+                    &sonoro_proto::pb::CombatReceivePackNotify { Data: cpack },
+                );
+            }
+        }
+        state
+            .player_components
+            .progress
+            .info
+            .mark_claim(&format!("be_ctrl:destroy:{}", req.EntityId));
+        if item_cfg_id > 0 {
+            state
+                .player_components
+                .progress
+                .info
+                .mark_claim(&format!("be_ctrl:destroy:{item_cfg_id}"));
+        }
+    }
+
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    flush_quest_condition_changed(state);
     Ok(BeControlledThrowResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -3391,6 +3795,11 @@ pub fn handle_timeline_trace_start_request(
     info.set_key_int(&format!("timeline_cfg:{}", req.EntityId), cfg_id);
     let cur_cp = info.get_key_int(&cp_key).clamp(0, max_cp);
     info.set_key_int(&cp_key, cur_cp);
+    if cfg_id > 0 && cfg_id != req.EntityId {
+        info.set_key_int(&format!("timeline_cp_max:{cfg_id}"), max_cp);
+        info.set_key_int(&format!("timeline_idx:{cfg_id}"), i64::from(req.Index));
+        info.set_key_int(&format!("timeline_cp:{cfg_id}"), cur_cp);
+    }
     state
         .player_components
         .progress
@@ -3458,6 +3867,36 @@ pub fn handle_timeline_trace_control_request(
         }
         None => (8, 0, req.EntityId),
     };
+    if cfg_id > 0 && cfg_id != req.EntityId {
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int(&format!("timeline_cp:{cfg_id}"), next_cp);
+    }
+    if let Some(resolved) = (cfg_id > 0)
+        .then(|| level_play::resolve_entity_config(&state.assets, map_id, cfg_id))
+        .flatten()
+        && let Some(ttc) = resolved
+            .components
+            .extra
+            .iter()
+            .chain(resolved.components.template_extra.iter())
+            .find_map(|e| match e {
+                ExtraEntry::TimelineTrackControlComponent(ttc) => Some(ttc),
+                _ => None,
+            })
+        && let Some(scene) = state.scene.as_mut()
+        && let Some(storage) = scene.entity_mut(req.EntityId)
+    {
+        storage.world_item.timeline_track =
+            sonoro_gamesv_logic::component::entity::resolve_timeline_track_pb_state(
+                ttc,
+                Some(&state.player_components.progress.info),
+                req.EntityId,
+                cfg_id,
+            );
+    }
     let mut target_state_changes: Vec<(i32, String)> = Vec::new();
     if cfg_id > 0
         && let Some(resolved) = level_play::resolve_entity_config(&state.assets, map_id, cfg_id)
@@ -3794,14 +4233,68 @@ pub fn handle_pilot_throw_operation_request(
     state: &mut State,
     req: PilotThrowOperationRequest,
 ) -> Result<PilotThrowOperationResponse, String> {
-    let op_val = req.OpType.map(|t| i64::from(t.to_i32())).unwrap_or(0);
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        "pilot_throw:op:1",
-        op_val,
-    )
-    .map_err(|e| e.to_string())?;
+    let op = req.OpType.unwrap_or_default();
+    let op_val = i64::from(op.to_i32());
+    let (hook_net, hook_cfg, titan_cfg) = {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int("pilot_throw:op:1", op_val);
+        let h_net = info.get_key_int("pilot_throw:hook_net");
+        let h_cfg = i32::try_from(info.get_key_int("pilot_throw:hook_cfg")).unwrap_or(0);
+        let t_cfg = i32::try_from(info.get_key_int("pilot_throw:titan_cfg")).unwrap_or(0);
+        if h_net > 0 {
+            info.set_key_int(&format!("hook_point:active:{h_net}"), 0);
+        }
+        if h_cfg > 0 {
+            info.set_key_int(&format!("hook_point:active:{h_cfg}"), 0);
+        }
+        info.set_key_int("pilot_throw:hook_net", 0);
+        info.set_key_int("pilot_throw:hook_cfg", 0);
+        info.set_key_int("pilot_throw:titan_cfg", 0);
+        (h_net, h_cfg, t_cfg)
+    };
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+
+    if op == PilotThrowOperationType::Ptothrow {
+        if hook_net > 0 {
+            handle_hook_lock_point_action(state, hook_net, HookInteractActionType::ExitEndpoint)?;
+        }
+        if hook_cfg > 0 || titan_cfg > 0 {
+            let mut events = EventQueue::new();
+            {
+                let mut qctx = state.quest_context(&mut events);
+                let cbs = quest_engine::action_callbacks();
+                if hook_cfg > 0 {
+                    let _ = quest_actions::apply_entity_state_change(
+                        &mut qctx,
+                        &cbs,
+                        hook_cfg,
+                        "关卡.Common.状态.完成",
+                    );
+                }
+                if titan_cfg > 0 {
+                    let _ = quest_actions::apply_entity_state_change(
+                        &mut qctx,
+                        &cbs,
+                        titan_cfg,
+                        "关卡.Common.状态.完成",
+                    );
+                }
+                let _ = quest_engine::on_condition_state_changed(&mut qctx);
+            }
+            drain_event_queue_best_effort(&mut events, state);
+        } else {
+            flush_quest_condition_changed(state);
+        }
+    } else {
+        if hook_net > 0 {
+            handle_hook_lock_point_action(state, hook_net, HookInteractActionType::ExitMidway)?;
+        }
+        flush_quest_condition_changed(state);
+    }
     Ok(PilotThrowOperationResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -4261,6 +4754,49 @@ pub fn handle_well_streaming_finis_request(
         &format!("well_stream:fin:{}", req.EntityIncId),
     )
     .map_err(|e| e.to_string())?;
+
+    let target_info = state.scene.as_ref().and_then(|scene| {
+        let &idx = scene.net_id_map.get(&req.EntityIncId)?;
+        let cfg_id = scene.entities[idx].config.config_id;
+        if cfg_id <= 0 {
+            return None;
+        }
+        let lcfg = state
+            .assets
+            .find_level_entity(scene.instance_id, i64::from(cfg_id))?;
+        let mut components = lcfg.ComponentsData.clone();
+        if let Some(tpl) = state.assets.find_template_config(&lcfg.BlueprintType) {
+            tpl.ComponentsData.merge_into(&mut components);
+        }
+        let finish_state = components
+            .extra
+            .iter()
+            .chain(components.template_extra.iter())
+            .find_map(|e| match e {
+                ExtraEntry::ElementalWellComponent(c) => {
+                    c.StreamingFinishedToState.as_ref().filter(|s| !s.is_empty()).cloned()
+                }
+                _ => None,
+            })?;
+        Some((cfg_id, finish_state))
+    });
+
+    if let Some((cfg_id, finish_state)) = target_info {
+        let mut events = EventQueue::new();
+        {
+            let mut qctx = state.quest_context(&mut events);
+            let cbs = quest_engine::action_callbacks();
+            let _ = quest_actions::apply_entity_state_change(
+                &mut qctx,
+                &cbs,
+                cfg_id,
+                &finish_state,
+            );
+            let _ = quest_engine::on_condition_state_changed(&mut qctx);
+        }
+        drain_event_queue_best_effort(&mut events, state);
+    }
+
     Ok(WellStreamingFinisResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -4371,13 +4907,67 @@ pub fn handle_action_reset_pos_pre_performance_end_request(
     state: &mut State,
     req: ActionResetPosPrePerformanceEndRequest,
 ) -> Result<ActionResetPosPrePerformanceEndResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("act:reset_pos_pre:{}", req.IncId),
-        i64::from(req.Index),
-    )
-    .map_err(|e| e.to_string())?;
+    let target_key = format!("act:reset_pos_target:{}:{}", req.IncId, req.Index);
+    let map_key = format!("act:reset_pos_map:{}:{}", req.IncId, req.Index);
+    let (target_cfg_id, target_map_id) = {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int(&format!("act:reset_pos_pre:{}", req.IncId), i64::from(req.Index));
+        let eid = info.get_key_int(&target_key);
+        let map_id = i32::try_from(info.get_key_int(&map_key)).unwrap_or(0);
+        info.set_key_int(&target_key, 0);
+        info.set_key_int(&map_key, 0);
+        (eid, map_id)
+    };
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+
+    if req.ContinueExecute && target_cfg_id > 0 {
+        let cur_inst = state.scene.as_ref().map(|s| s.instance_id).unwrap_or(0);
+        let inst_id = if target_map_id > 0 {
+            target_map_id
+        } else {
+            cur_inst
+        };
+        if let Some(cfg) = state.assets.find_level_entity(inst_id, target_cfg_id)
+            && let Some(pos) = entity_world_pos(&cfg)
+        {
+            let rot = entity_world_rot(&cfg);
+            let mut events = EventQueue::new();
+            if inst_id == cur_inst && state.scene.is_some() {
+                {
+                    let mut qctx = state.quest_context(&mut events);
+                    quest_actions::update_player_scene_state(&mut qctx, pos, Some(rot))
+                        .map_err(|e| e.to_string())?;
+                }
+                drain_event_queue_best_effort(&mut events, state);
+                let _ = state.conn.push_msg(
+                    TeleportNotify::MSG_ID,
+                    &TeleportNotify {
+                        MapId: inst_id,
+                        Pos: Some(Vector {
+                            X: pos[0],
+                            Y: pos[1],
+                            Z: pos[2],
+                        }),
+                        Rot: Some(Vector {
+                            X: rot[0],
+                            Y: rot[1],
+                            Z: rot[2],
+                        }),
+                        Reason: Some(TeleportReason::Action),
+                        ..Default::default()
+                    },
+                );
+            } else {
+                super::teleport::enqueue_scene_transfer(state, &mut events, inst_id, pos, rot[2])?;
+                drain_event_queue_best_effort(&mut events, state);
+            }
+        }
+    }
+
     Ok(ActionResetPosPrePerformanceEndResponse {
         Code: Some(ErrorCode::Success),
     })
@@ -4602,6 +5192,19 @@ pub fn handle_seamless_teleport_request(
                 .map_err(|e| e.to_string())?;
         }
         drain_event_queue_best_effort(&mut events, state);
+        if let Some(coop) = state.coop_service.as_ref() {
+            let role_nid = state
+                .scene
+                .as_ref()
+                .map_or(0, |s| s.current_role_entity_id());
+            coop.notify_teleport_state(
+                state.player_id,
+                EPlayerTeleportState::Default,
+                role_nid,
+                [loc.X, loc.Y, loc.Z],
+                rotation.unwrap_or([0.0; 3]),
+            );
+        }
     }
     Ok(SeamlessTeleportResponse {
         ErrorCode: Some(ErrorCode::Success),
@@ -5141,9 +5744,46 @@ pub fn handle_level_sequence_frame_event_action_request(
         .or_else(|| i32::try_from(req.EntityId).ok())
         .unwrap_or(0);
     let key = String::from_utf8_lossy(&req.Key).into_owned();
+    let seq_actions = state.scene.as_ref().and_then(|s| {
+        if entity_config_id <= 0 {
+            return None;
+        }
+        let lcfg = state
+            .assets
+            .find_level_entity(s.instance_id, i64::from(entity_config_id))?;
+        let mut comps = lcfg.ComponentsData.clone();
+        if let Some(tpl) = state.assets.find_template_config(&lcfg.BlueprintType) {
+            tpl.ComponentsData.merge_into(&mut comps);
+        }
+        let comp = match comps.find_extra_entry(
+            sonoro_gamesv_data::tables::entity_components::extra::ExtraKind::LevelSequenceFrameEventComponent,
+        ) {
+            Some(sonoro_gamesv_data::tables::entity_components::extra::ExtraEntry::LevelSequenceFrameEventComponent(c)) => c,
+            _ => return None,
+        };
+        if comp.Disabled.unwrap_or(false) {
+            return None;
+        }
+        let actions: Vec<Value> = comp
+            .ForwardSections
+            .iter()
+            .chain(comp.BackWardSections.iter())
+            .filter(|sec| sec.Key == key && !sec.ActionList.is_empty())
+            .flat_map(|sec| sec.ActionList.iter().cloned())
+            .collect();
+        if actions.is_empty() { None } else { Some(actions) }
+    });
     let mut events = EventQueue::new();
     {
         let mut qctx = state.quest_context(&mut events);
+        if let Some(actions) = seq_actions {
+            let _ = quest_engine::triggers::execute_entity_actions(
+                &mut qctx,
+                req.EntityId,
+                entity_config_id,
+                &actions,
+            );
+        }
         quest_engine::on_level_sequence_mark_reached(&mut qctx, entity_config_id, &key)
             .map_err(|e| e.to_string())?;
     }
@@ -6296,12 +6936,30 @@ pub fn handle_road_network_entity_update_cur_road_push(
     state: &mut State,
     push: RoadNetworkEntityUpdateCurRoadPush,
 ) -> Result<(), String> {
+    let mut cfg_id = i32::try_from(push.EntityId).unwrap_or(0);
+    if let Some(scene) = state.scene.as_mut() {
+        if let Some(cid) = scene.find_config_id_by_net_id(push.EntityId) {
+            cfg_id = cid;
+        }
+        if let Some(st) = scene.entity_mut(push.EntityId) {
+            st.world_item.road_network = Some((
+                push.CurRoadId,
+                push.CurRoadIndex,
+                push.CurRoadId,
+                push.CurRoadIndex,
+            ));
+        }
+    }
     let info = &mut state.player_components.progress.info;
     info.set_key_int(&format!("road:cur:{}", push.EntityId), i64::from(push.CurRoadId));
     info.set_key_int(
         &format!("road:idx:{}", push.EntityId),
         i64::from(push.CurRoadIndex),
     );
+    if cfg_id > 0 && i64::from(cfg_id) != push.EntityId {
+        info.set_key_int(&format!("road:cur:{cfg_id}"), i64::from(push.CurRoadId));
+        info.set_key_int(&format!("road:idx:{cfg_id}"), i64::from(push.CurRoadIndex));
+    }
     state
         .player_components
         .progress
@@ -6433,7 +7091,7 @@ pub fn handle_udp_move_package_push(
             }
         }
     }
-    for loc in nexus_check_locs {
+    for &loc in &nexus_check_locs {
         if let Some(scene) = state.scene.as_mut() {
             role_helper::heal_formation_if_near_nexus(
                 &mut state.conn,
@@ -6453,7 +7111,21 @@ pub fn handle_udp_move_package_push(
     }
     drain_event_queue_best_effort(&mut events, state);
     if let Some(coop) = &state.coop_service {
+        let sync_loc = if !nexus_check_locs.is_empty() {
+            nexus_check_locs.last().copied().and_then(|loc| {
+                state.scene.as_ref().map(|sc| {
+                    let map_id = state.assets.resolve_map_config_id(sc.instance_id);
+                    let area_id = state.player_components.basic.info.attributes.area_id;
+                    (map_id, area_id, loc)
+                })
+            })
+        } else {
+            None
+        };
         coop.broadcast_move_except(sender_id, push.MovingEntities);
+        if let Some((map_id, area_id, loc)) = sync_loc {
+            coop.broadcast_player_location(sender_id, map_id, area_id, loc, [0.0, 0.0, -1.0]);
+        }
     }
     Ok(())
 }

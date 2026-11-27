@@ -429,6 +429,72 @@ impl AssetsDb {
         Ok(out)
     }
 
+    pub fn query_world_controller_entities(
+        &self,
+        map_id: i32,
+    ) -> Result<Vec<Arc<LevelEntityConfig>>, SqliteError> {
+        let guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut tpl_stmt = guard.conn.prepare_cached(
+            "SELECT blueprint_type FROM template_configs \
+             WHERE data LIKE '%RefreshGroupComponent%' \
+                OR data LIKE '%EntityBatchRefreshComponent%' \
+                OR data LIKE '%DynamicSpawnMonsterComponent%' \
+                OR data LIKE '%DynamicSpawnMonsterPointComponent%' \
+                OR data LIKE '%TimeScheduleComponent%'",
+        )?;
+        let mut tpl_rows = tpl_stmt.query([])?;
+        let mut tpl_bps = Vec::new();
+        while let Some(row) = tpl_rows.next()? {
+            let bp: String = row.get(0)?;
+            if !bp.is_empty() {
+                tpl_bps.push(bp);
+            }
+        }
+        drop(tpl_rows);
+
+        let mut sql = String::from(
+            "SELECT data FROM level_entities WHERE map_id = ?1 AND (\
+             data LIKE '%\"RefreshGroupComponent\"%' \
+             OR data LIKE '%\"EntityBatchRefreshComponent\"%' \
+             OR data LIKE '%\"DynamicSpawnMonsterComponent\"%' \
+             OR data LIKE '%\"DynamicSpawnMonsterPointComponent\"%' \
+             OR data LIKE '%\"TimeScheduleComponent\"%'",
+        );
+        if !tpl_bps.is_empty() {
+            sql.push_str(" OR blueprint_type IN (");
+            for (i, bp) in tpl_bps.iter().enumerate() {
+                if i > 0 {
+                    sql.push(',');
+                }
+                sql.push('\'');
+                for ch in bp.chars() {
+                    if ch == '\'' {
+                        sql.push_str("''");
+                    } else {
+                        sql.push(ch);
+                    }
+                }
+                sql.push('\'');
+            }
+            sql.push(')');
+        }
+        sql.push(')');
+
+        let mut stmt = guard.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![map_id])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let raw: String = row.get(0)?;
+            if let Ok(parsed) = serde_json::from_str::<LevelEntityConfig>(&raw) {
+                out.push(Arc::new(parsed));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn query_level_entity_index_rows(&self) -> Result<Vec<LevelEntityIndexRow>, SqliteError> {
         let guard = self
             .inner

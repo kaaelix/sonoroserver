@@ -11,20 +11,23 @@ use crate::component::comp_util;
 use sonoro_common::fs::FileSystem;
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_fs::file_util::load_zon;
-use sonoro_proto::enums::{DirectionType, EAttributeType};
+use sonoro_proto::enums::{BlackboardParamType, DirectionType, EAttributeType};
 use sonoro_proto::pb::{
-    BatchBulletCastComponentPb, BeControlledComponentPb, BoardGridDynamicConfig, BoardPb,
-    BuffConsumerComponentPb, BuffProducerComponentPb, ConnectorComponentPb,
-    DollGrabMachineComponentPb, DollGrabShowcaseComponentPb, DropComponentPb,
-    ElementalHolderComponentPb, EntityComponentPb, EntityComponentPbComponentPbOneof,
-    EntityFoundationComponentPb, EntityFoundationComponentPbEgMOneof, EntityPb,
-    EntityPbD3sOneof, ExhibitionComponentPb, FanComponentPb, FlowerPollutionComponentPb,
-    FoundationCoreInfo, FurnitureComponentPb, GrapplingHookPointComponentPb, GravityFlipComponent,
+    AttributesIdsComponentPb, BatchBulletCastComponentPb, BeControlledComponentPb,
+    BlackboardParam, BlackboardParamComponentPb, BlackboardParamValueOneof,
+    BoardGridDynamicConfig, BoardPb, BubbleComponentPb, BubbleInfo, BuffConsumerComponentPb,
+    BuffProducerComponentPb, ConnectorComponentPb, DollGrabMachineComponentPb,
+    DollGrabShowcaseComponentPb, DropComponentPb, ElementalHolderComponentPb, EntityComponentPb,
+    EntityComponentPbComponentPbOneof, EntityFoundationComponentPb,
+    EntityFoundationComponentPbEgMOneof, EntityPb, EntityPbD3sOneof, EntityRewardItemPb,
+    ExhibitionComponentPb, FanComponentPb, FlowerPollutionComponentPb, FoundationCoreInfo,
+    FurnitureComponentPb, GrapplingHookPointComponentPb, GravityFlipComponent,
     HackTargetComponentPb, HackingComponentPb, HoldHandComponentPb, MonsterWeaponComponentPb,
     NearbyTrackingComponentPb, NpcPb, OccupiedBoardGridInfo, PatrolComponentPb,
     PullingFoundationComponentPb, RangeComponentPb, RbBlockComponentPb, RbFloorComponentPb,
-    RbItemComponentPb, SceneItemEventListenerComponentPb, ShieldComponentPb, ShieldInfoPb,
-    SunSpiritGearComponentPb, TriggerComponentPb, Vector,
+    RbItemComponentPb, RoadNavMoveData, RoadNetworkComponentPb, RoadNetworkComponentPbMoveDataOneof,
+    SceneItemEventListenerComponentPb, ShieldComponentPb, ShieldInfoPb, SunSpiritGearComponentPb,
+    TimelineTrackComponentPb, TimelineTrackControlDataPb, TriggerComponentPb, Vector,
 };
 use sonoro_proto::wire::PbEnum;
 use std::io;
@@ -90,6 +93,7 @@ pub struct WorldItemState {
     pub elemental_holder_enable: Option<bool>,
     pub nearby_tracking_enable: Option<bool>,
     pub flower_pollution: bool,
+    pub flower_unpolluted_splines: Vec<i32>,
     pub range_present: bool,
     pub trigger_present: bool,
     pub patrol_dir: Option<bool>,
@@ -97,6 +101,7 @@ pub struct WorldItemState {
     pub buff_producer_present: bool,
     pub buff_consumer_present: bool,
     pub listener_present: bool,
+    pub listener_constate_id: i64,
     pub batch_bullet_cast_present: bool,
     pub be_controlled_present: bool,
     pub drop_present: bool,
@@ -135,6 +140,11 @@ pub struct WorldItemState {
     pub trigger_count: i32,
     pub exit_trigger_count: i32,
     pub trample_down: bool,
+    pub scene_item_attributes: Option<Vec<i32>>,
+    pub timeline_track: Option<(i32, Vec<TimelineTrackControlDataPb>)>,
+    pub bubble_guids: Vec<String>,
+    pub reward_count: Option<i32>,
+    pub road_network: Option<(i32, i32, i32, i32)>,
 }
 
 impl Default for WorldItemState {
@@ -154,6 +164,7 @@ impl Default for WorldItemState {
             elemental_holder_enable: None,
             nearby_tracking_enable: None,
             flower_pollution: false,
+            flower_unpolluted_splines: Vec::new(),
             range_present: false,
             trigger_present: false,
             patrol_dir: None,
@@ -161,6 +172,7 @@ impl Default for WorldItemState {
             buff_producer_present: false,
             buff_consumer_present: false,
             listener_present: false,
+            listener_constate_id: 0,
             batch_bullet_cast_present: false,
             be_controlled_present: false,
             drop_present: false,
@@ -198,8 +210,77 @@ impl Default for WorldItemState {
             trigger_count: 0,
             exit_trigger_count: 0,
             trample_down: false,
+            scene_item_attributes: None,
+            timeline_track: None,
+            bubble_guids: Vec::new(),
+            reward_count: None,
+            road_network: None,
         }
     }
+}
+
+pub fn resolve_scene_item_attribute_ids(
+    attr: &sonoro_gamesv_data::tables::entity_components::extra::SceneItemAttributeComponent,
+) -> Option<Vec<i32>> {
+    if attr.Disabled.unwrap_or(false) {
+        return None;
+    }
+    let tags = attr.DefaultTags.as_ref()?;
+    let ids: Vec<i32> = tags
+        .iter()
+        .filter_map(|&t| i32::try_from(t).ok())
+        .filter(|&id| id != 0)
+        .collect();
+    if ids.is_empty() { None } else { Some(ids) }
+}
+
+pub fn resolve_timeline_track_pb_state(
+    ttc: &sonoro_gamesv_data::tables::entity_components::extra::TimelineTrackControlComponent,
+    progress_info: Option<&sonoro_gamesv_fs::progress_info::ProgressInfo>,
+    net_id: i64,
+    config_id: i64,
+) -> Option<(i32, Vec<TimelineTrackControlDataPb>)> {
+    if ttc.Disabled.unwrap_or(false) || ttc.ControlGroups.is_empty() {
+        return None;
+    }
+    let stored_idx = progress_info
+        .map(|pi| {
+            let v = pi.get_key_int(&format!("timeline_idx:{net_id}"));
+            if v != 0 || pi.get_key_int(&format!("timeline_cp_max:{net_id}")) > 0 {
+                v
+            } else {
+                pi.get_key_int(&format!("timeline_idx:{config_id}"))
+            }
+        })
+        .unwrap_or(0)
+        .clamp(0, (ttc.ControlGroups.len() - 1) as i64) as usize;
+    let stored_cp = progress_info
+        .map(|pi| {
+            let v = pi.get_key_int(&format!("timeline_cp:{net_id}"));
+            if v != 0 || pi.get_key_int(&format!("timeline_cp_max:{net_id}")) > 0 {
+                v
+            } else {
+                pi.get_key_int(&format!("timeline_cp:{config_id}"))
+            }
+        })
+        .unwrap_or(0);
+    let mut control_datas = Vec::with_capacity(ttc.ControlGroups.len());
+    for (gi, grp) in ttc.ControlGroups.iter().enumerate() {
+        let max_cp = grp
+            .ControlConfigs
+            .iter()
+            .map(|c| c.ControlPoints.len())
+            .max()
+            .unwrap_or(1)
+            .saturating_sub(1) as i64;
+        let cp = if gi == stored_idx {
+            stored_cp.clamp(0, max_cp) as i32
+        } else {
+            0
+        };
+        control_datas.push(TimelineTrackControlDataPb { ControlPoint: cp });
+    }
+    Some((stored_idx as i32, control_datas))
 }
 
 #[derive(Debug, Clone)]
@@ -453,7 +534,9 @@ impl EntityComponentStorage {
             push(
                 &mut entity.ComponentPbs,
                 EntityComponentPbComponentPbOneof::FlowerPollutionComponentPb(
-                    FlowerPollutionComponentPb::default(),
+                    FlowerPollutionComponentPb {
+                        UnPollutionSpline: wi.flower_unpolluted_splines.clone(),
+                    },
                 ),
             );
         }
@@ -520,7 +603,89 @@ impl EntityComponentStorage {
             push(
                 &mut entity.ComponentPbs,
                 EntityComponentPbComponentPbOneof::SceneItemEventListenerComponentPb(
-                    SceneItemEventListenerComponentPb::default(),
+                    SceneItemEventListenerComponentPb {
+                        ConstateId: wi.listener_constate_id,
+                    },
+                ),
+            );
+        }
+        if let Some(attr_ids) = &wi.scene_item_attributes {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::AttributesIdsComponentPb(
+                    AttributesIdsComponentPb {
+                        PbSceneItemAttributeIds: attr_ids.clone(),
+                    },
+                ),
+            );
+        }
+        if let Some((idx, datas)) = &wi.timeline_track {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::TimelineTrackComponentPb(
+                    TimelineTrackComponentPb {
+                        Index: *idx,
+                        ControlDatas: datas.clone(),
+                    },
+                ),
+            );
+        }
+        if let Some(manip_st) = wi.scene_item.and_then(|sc| sc.manipulatable_state) {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::BlackboardParamComponent(
+                    BlackboardParamComponentPb {
+                        BlackboardParams: vec![BlackboardParam {
+                            Key: b"ManipulatableState".to_vec(),
+                            Type: Some(BlackboardParamType::Int),
+                            Value: Some(BlackboardParamValueOneof::IntValue(manip_st)),
+                        }],
+                    },
+                ),
+            );
+        }
+        if !wi.bubble_guids.is_empty() {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::BubbleComponent(BubbleComponentPb {
+                    BubbleInfos: wi
+                        .bubble_guids
+                        .iter()
+                        .map(|guid| BubbleInfo {
+                            ActionGuid: guid.as_bytes().to_vec(),
+                            GameCtx: None,
+                        })
+                        .collect(),
+                }),
+            );
+        }
+        if let Some(has_count) = wi.reward_count {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::EntityRewardItemPb(EntityRewardItemPb {
+                    HasCount: has_count,
+                    NextResetTime: 0,
+                }),
+            );
+        }
+        if let Some((dest_road, dest_idx, gen_road, gen_idx)) = wi.road_network {
+            push(
+                &mut entity.ComponentPbs,
+                EntityComponentPbComponentPbOneof::RoadNetworkComponentPb(
+                    RoadNetworkComponentPb {
+                        MoveData: Some(RoadNetworkComponentPbMoveDataOneof::NavMoveData(
+                            RoadNavMoveData {
+                                DestRoadId: dest_road,
+                                DestIndex: dest_idx,
+                                GenRoadId: gen_road,
+                                GenRoadIndex: gen_idx,
+                            },
+                        )),
+                        DestRoadId: dest_road,
+                        DestIndex: dest_idx,
+                        GenRoadId: gen_road,
+                        GenRoadIndex: gen_idx,
+                    },
                 ),
             );
         }

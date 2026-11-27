@@ -1,5 +1,4 @@
 use sonoro_gamesv_logic::event_queue::EventQueue;
-use sonoro_gamesv_logic::helpers::reward::RewardItem;
 use sonoro_gamesv_logic::helpers::{pb_kv, quest_engine, reward};
 use sonoro_proto::enums::ErrorCode;
 use sonoro_proto::pb::{
@@ -740,16 +739,6 @@ fn claim_pb_reward_ids(
     table: &str,
     ids: &[i32],
 ) -> Result<(), String> {
-    let fallback = [
-        RewardItem {
-            item_id: 3,
-            count: 40,
-        },
-        RewardItem {
-            item_id: 2,
-            count: 15000,
-        },
-    ];
     for &id in ids {
         if state
             .player_components
@@ -765,7 +754,7 @@ fn claim_pb_reward_ids(
                 false,
                 true,
                 1,
-                &fallback,
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;

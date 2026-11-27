@@ -37,7 +37,6 @@ NON_SPAWNABLE_ITEM_TYPES = {
     "RenderSpecifiedRange2",
     "SceneItemStateHint",
     "SceneText",
-    "Slots",
     "Spline",
     "SplineFX",
     "SplineRange",

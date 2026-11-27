@@ -214,22 +214,39 @@ fn populate_sub_payload(
         }
         ActivityType::LifePointChallenge => Some(D::LifePointDrawActivityData(Default::default())),
         ActivityType::TrapDefense => {
-            let dummy_reward = TrapDefenseRewardData {
-                ActivityServerRewardItemData: Some(ConditionTask {
-                    Id: 1001,
-                    Status: Some(ConditionTaskState::ConditionTaskFinish),
-                    ..Default::default()
-                }),
-                StartTime: 0,
-                EndTime: FAR_FUTURE,
+            let cache = bin_data::get();
+            let build_rewards = |cfgs: &[bin_data::TrapDefenseRewardCfg], claim_prefix: &str| {
+                cfgs.iter()
+                    .filter(|c| c.activity_id == 0 || c.activity_id == id)
+                    .map(|c| {
+                        let claimed = claims.contains(&format!("{claim_prefix}{}", c.id));
+                        TrapDefenseRewardData {
+                            ActivityServerRewardItemData: Some(ConditionTask {
+                                Id: c.id,
+                                Status: Some(if claimed {
+                                    ConditionTaskState::ConditionTaskTaken
+                                } else {
+                                    ConditionTaskState::ConditionTaskRunning
+                                }),
+                                ..Default::default()
+                            }),
+                            StartTime: 0,
+                            EndTime: FAR_FUTURE,
+                        }
+                    })
+                    .collect()
             };
+            let talent_pts = *ints.get("trap_defense:talent_pts").unwrap_or(&0) as i32;
+            let remain_pts = *ints
+                .get("trap_defense:remain_pts")
+                .unwrap_or(&i64::from(talent_pts)) as i32;
             Some(D::ActivityTrapDefenseData(ActivityTrapDefenseData {
-                TrapDefenseTalentTreePoints: 100,
-                TrapDefenseRemainPoints: 100,
+                TrapDefenseTalentTreePoints: talent_pts,
+                TrapDefenseRemainPoints: remain_pts,
                 StartTime: 0,
                 EndTime: FAR_FUTURE,
-                SpecialReward: vec![dummy_reward.clone()],
-                Rewards: vec![dummy_reward],
+                SpecialReward: build_rewards(&cache.trap_defense_special_rewards, "trap_def:sclm:"),
+                Rewards: build_rewards(&cache.trap_defense_rewards, "trap_def:clm:"),
                 ..Default::default()
             }))
         }

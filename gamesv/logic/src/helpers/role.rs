@@ -13,9 +13,8 @@ use sonoro_proto::pb::{
     CombatCommon, CombatNotifyData, CombatNotifyDataMessageOneof, CombatReceiveData,
     CombatReceiveDataMessageOneof, CombatReceivePackNotify, EntityAddNotify,
     EntityLivingStatusNotify, EntityRemoveInfo, EntityRemoveNotify, FightRoleInfo, FightRoleInfos,
-    GroupFormation, JSPatchNotify, PlayerDeadNotify, RoleChangeUnlockNotify, RoleFavor,
-    RoleFavorListNotify, RoleMotion, RoleMotionListNotify, UpdateGroupFormationNotify,
-    VehicleUpdateNotify,
+    GroupFormation, PlayerDeadNotify, RoleChangeUnlockNotify, RoleFavor, RoleFavorListNotify,
+    RoleMotion, RoleMotionListNotify, UpdateGroupFormationNotify, VehicleUpdateNotify,
 };
 use sonoro_proto::wire::PbEnum;
 
@@ -985,12 +984,6 @@ pub fn revive_and_heal_formation<S: PushSink + ?Sized>(
         sink.push(
             CombatReceivePackNotify::MSG_ID,
             &CombatReceivePackNotify { Data: pack_data },
-        );
-        sink.push(
-            JSPatchNotify::MSG_ID,
-            &JSPatchNotify {
-                Content: b"try { const g = require('QuicklyRequire')('Game/Module/GenericPrompt/GenericPromptController'); if (g && g.GenericPromptController) g.GenericPromptController.ShowPromptByCode('30'); } catch (_) {}".to_vec(),
-            },
         );
     }
     scene.force_battle_state(false);

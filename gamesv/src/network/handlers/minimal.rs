@@ -42,7 +42,8 @@ use sonoro_proto::pb::{
     PhantomManageConfigUpdateResponse, PhantomSettingBatchUpdateRequest,
     PhantomSettingBatchUpdateResponse, PhotoMemoryRequest, PhotoMemoryResponse,
     PlayerGameTokenRequest, PlayerGameTokenResponse, PlayerNetStatePush,
-    PlayerXboxBlockListRequest, PlayerXboxBlockListResponse, TeamRecommendInfo, TeamRecommendRole,
+    PlayerNetStateS2cNotify, PlayerXboxBlockListRequest, PlayerXboxBlockListResponse,
+    TeamRecommendInfo, TeamRecommendRole,
     TeamRecommendRoleInfo, TeamRecommendTeammate,
     PrivateChatOperateRequest, PrivateChatOperateResponse, RobotDestinationPush,
     RoleDevelopConfigRequest, RoleDevelopConfigResponse, RoleOperateSelfBgmRequest,
@@ -470,11 +471,16 @@ pub fn handle_monster_detection_info_request(
 
 pub fn handle_level_play_var_async_request(
     state: &mut State,
-    _req: LevelPlayVarAsyncRequest,
+    req: LevelPlayVarAsyncRequest,
 ) -> Result<LevelPlayVarAsyncResponse, String> {
     Ok(LevelPlayVarAsyncResponse {
         ErrorCode: Some(ErrorCode::Success),
-        Vars: world_puzzle::build_level_play_vars(&state.player_components.quest),
+        Vars: world_puzzle::build_level_play_vars_for(
+            &state.assets,
+            &state.player_components,
+            req.InstId,
+            req.LevelPlayId,
+        ),
     })
 }
 
@@ -1487,9 +1493,14 @@ pub fn handle_character_death_push(
 }
 
 pub fn handle_player_net_state_push(
-    _state: &mut State,
+    state: &mut State,
     _push: PlayerNetStatePush,
 ) -> Result<(), String> {
+    let uid = i64::from(state.player_id);
+    let _ = state.conn.push_msg(
+        PlayerNetStateS2cNotify::MSG_ID,
+        &PlayerNetStateS2cNotify { Uid: uid },
+    );
     Ok(())
 }
 

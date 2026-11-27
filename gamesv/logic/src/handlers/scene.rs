@@ -21,11 +21,11 @@ use sonoro_proto::enums::{
 use sonoro_proto::pb::{
     AfterJoinSceneNotify, CombatReceivePackNotify, ElevatorMoveNotify, EntityRemoveInfo,
     EntityRemoveNotify, ExploreSkillRoulette, ExploreSkillRouletteUpdateNotify,
-    ExploreToolAllNotify, FightFormationNotifyInfo, FightRoleInfo, FightRoleInfos, FlowStartNotify,
-    FormationAttr, FormationAttrNotify, FormationRoleInfo, GravityFlipUpdateTypeNotify,
-    InfrOneRoad, InfrRoadPb, InfrRoadUpdateNotify, JSPatchNotify, JoinSceneNotify,
-    MovePackageNotify, MoveReplaySample, MoveSplineStatusNotify, MovingEntityData,
-    PlayerFightFormations, PlayerSceneAoiData, Rotator, SceneAreaState, SceneInformation,
+    ExploreToolAllNotify,
+    FightFormationNotifyInfo, FightRoleInfo, FightRoleInfos, FlowStartNotify, FormationAttr,
+    FormationAttrNotify, FormationRoleInfo, GravityFlipUpdateTypeNotify, InfrOneRoad, InfrRoadPb,
+    InfrRoadUpdateNotify, JoinSceneNotify, MovePackageNotify, MoveReplaySample,
+    MoveSplineStatusNotify, MovingEntityData, PlayerFightFormations, PlayerSceneAoiData, Rotator, SceneAreaState, SceneInformation,
     SceneItemMoveTargetInfo, SceneItemMoveTargetNotify, SceneItemSplineRuntimeData,
     ScenePlayerInformation, SceneRoadSyncNotify, SwitchBattleModeNotify, TimeCheckNotify,
     TransitionOptionPb, UpdateFormationNotify, Vector, VisionExploreSkillNotify,
@@ -342,6 +342,9 @@ fn apply_stored_world_entity_overrides(
         }
         let mut fan_turns_val = None;
         let mut hook_disabled_val = None;
+        let mut scene_item_attrs_val = None;
+        let mut timeline_track_val = None;
+        let mut road_network_val = None;
         for extra_slice in [&merged.extra, &merged.template_extra] {
             for entry in extra_slice {
                 match entry {
@@ -362,16 +365,63 @@ fn apply_stored_world_entity_overrides(
                             hlp.DisableAtCreateStage.unwrap_or(false) || hlp.Disabled.unwrap_or(false);
                         hook_disabled_val = Some(if is_active { false } else { default_disabled });
                     }
+                    ExtraEntry::SceneItemAttributeComponent(sa) => {
+                        if let Some(ids) =
+                            crate::component::entity::resolve_scene_item_attribute_ids(sa)
+                        {
+                            scene_item_attrs_val = Some(ids);
+                        }
+                    }
+                    ExtraEntry::TimelineTrackControlComponent(ttc) => {
+                        if let Some(tt) =
+                            crate::component::entity::resolve_timeline_track_pb_state(
+                                ttc,
+                                Some(info),
+                                net_id,
+                                i64::from(config_id),
+                            )
+                        {
+                            timeline_track_val = Some(tt);
+                        }
+                    }
+                    ExtraEntry::RoadNetworkNavigationComponent(_) => {
+                        let road = opt_key_int(info, &format!("road:cur:{net_id}"))
+                            .or_else(|| opt_key_int(info, &format!("road:cur:{config_id}")))
+                            .unwrap_or(0) as i32;
+                        let ridx = opt_key_int(info, &format!("road:idx:{net_id}"))
+                            .or_else(|| opt_key_int(info, &format!("road:idx:{config_id}")))
+                            .unwrap_or(0) as i32;
+                        road_network_val = Some((road, ridx, road, ridx));
+                    }
                     _ => {}
                 }
             }
         }
+        let has_reward_comp =
+            merged.RewardComponent.is_some() || merged.TreasureBoxComponent.is_some();
+        let reward_claimed = info.has_claim(&format!("reward_claimed:{config_id}"));
+        let bubble_guids = scene.play_bubble_guids_for_entity(config_id);
         if let Some(storage) = scene.entity_mut(net_id) {
             if let Some(t) = fan_turns_val {
                 storage.world_item.fan_turns = Some(t);
             }
             if let Some(hd) = hook_disabled_val {
                 storage.world_item.hook_disabled = Some(hd);
+            }
+            if let Some(attrs) = scene_item_attrs_val {
+                storage.world_item.scene_item_attributes = Some(attrs);
+            }
+            if let Some(tt) = timeline_track_val {
+                storage.world_item.timeline_track = Some(tt);
+            }
+            if let Some(rn) = road_network_val {
+                storage.world_item.road_network = Some(rn);
+            }
+            if has_reward_comp {
+                storage.world_item.reward_count = Some(i32::from(!reward_claimed));
+            }
+            if !bubble_guids.is_empty() {
+                storage.world_item.bubble_guids = bubble_guids;
             }
             storage.world_item.be_controlled_present = merged.TeleControl2.is_some();
         }
@@ -1502,33 +1552,6 @@ pub fn after_scene_join<S: PushSink + ?Sized>(
         },
     );
 
-    if let Some(raw_wm) = fs.read_file("assets/scripts/join_scene_patches/uid_watermark.js")? {
-        let content = String::from_utf8_lossy(&raw_wm).replace("{PLR_UID}", &player_id.to_string());
-        qctx.sink.push(
-            JSPatchNotify::MSG_ID,
-            &JSPatchNotify {
-                Content: content.into(),
-            },
-        );
-    }
-
-    for path in [
-        "assets/scripts/join_scene_patches/disable_watermask.js",
-        "assets/scripts/join_scene_patches/unlock_soar_flight.js",
-        "assets/scripts/join_scene_patches/dismount_vehicle_on_teleport.js",
-        "assets/scripts/join_scene_patches/entity_source_map_sync.js",
-        "assets/scripts/join_scene_patches/special_energy_bar_lili.js",
-    ] {
-        if let Some(content) = fs.read_file(path)? {
-            qctx.sink.push(
-                JSPatchNotify::MSG_ID,
-                &JSPatchNotify {
-                    Content: String::from_utf8_lossy(&content).into_owned().into(),
-                },
-            );
-        }
-    }
-
     if let Some(scene) = qctx.scene.as_deref_mut() {
         if let Some(p0) = scene.instance.players.first() {
             scene.last_spatial_check_loc = p0.location;
@@ -1555,6 +1578,11 @@ pub fn after_scene_join<S: PushSink + ?Sized>(
             }
         }
     }
+    let (init_hour, init_min) = qctx
+        .scene
+        .as_deref()
+        .map_or((0, 0), |s| (s.instance.map_time.hour, s.instance.map_time.minute));
+    crate::helpers::world_controllers::tick_time_schedules(qctx, init_hour, init_min)?;
     Ok(())
 }
 
@@ -1648,6 +1676,7 @@ pub fn handle_spatial_spawns_check<S: PushSink + ?Sized>(
             )?;
         }
         let _ = crate::helpers::quest_engine::triggers::reevaluate_condition_listeners(&mut qctx)?;
+        crate::helpers::world_controllers::tick_world_controllers(&mut qctx)?;
     }
     Ok(())
 }

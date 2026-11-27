@@ -197,15 +197,18 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
     match cond.Type.as_str() {
         "CheckLevel" => {
             let req = get_param_int(lp, "Level").unwrap_or(1);
-            ctx.basic_comp.info.attributes.level >= req
+            let op = resolve_limit_op(cond, lp, "Level", "Ge");
+            compare_ints(ctx.basic_comp.info.attributes.level, req, op)
         }
         "CheckOriginWorldLevel" => {
             let req = get_param_int(lp, "Level").unwrap_or(0);
-            ctx.basic_comp.info.attributes.origin_world_level >= req
+            let op = resolve_limit_op(cond, lp, "Level", "Ge");
+            compare_ints(ctx.basic_comp.info.attributes.origin_world_level, req, op)
         }
-        "CheckCurWorldLevel" => {
+        "CheckCurWorldLevel" | "CheckCurWorldLevelOp" => {
             let req = get_param_int(lp, "Level").unwrap_or(0);
-            ctx.basic_comp.info.attributes.cur_world_level >= req
+            let op = resolve_limit_op(cond, lp, "Level", "Ge");
+            compare_ints(ctx.basic_comp.info.attributes.cur_world_level, req, op)
         }
         "CalabashLevel" => {
             let req = get_param_int(lp, "Level").unwrap_or(1);
@@ -270,14 +273,15 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
             let Some(item_id) = get_param_int(lp, "ItemId").or_else(|| get_param_int(lp, "ItemID")) else {
                 return false;
             };
-            item_count(ctx, item_id) >= cond.NeedNum.max(1)
+            let op = resolve_limit_op(cond, lp, "Count", "Ge");
+            compare_ints(item_count(ctx, item_id), cond.NeedNum.max(1), op)
         }
         "CheckItemWithOperator" => {
             let Some(item_id) = get_param_int(lp, "ItemId").or_else(|| get_param_int(lp, "ItemID")) else {
                 return false;
             };
             let req_count = get_param_int(lp, "Count").unwrap_or_else(|| cond.NeedNum.max(1));
-            let op = get_param_str(lp, "Op").unwrap_or("Ge");
+            let op = resolve_limit_op(cond, lp, "Count", "Ge");
             compare_ints(item_count(ctx, item_id), req_count, op)
         }
         "FunctionUnlock" => {
@@ -313,28 +317,31 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
             let nid_opt = get_param_int(lp, "步骤Id");
             let st = get_param_int(lp, "状态").unwrap_or(3);
             if let Some(nid) = nid_opt {
-                eval_quest_node_status(ctx, qid, nid, st)
+                if let Some(op) = get_ope_str(cond.LimitParamsOpe.as_ref(), "Status") {
+                    compare_ints(quest_node_state_value(ctx, qid, nid), st, op)
+                } else {
+                    eval_quest_node_status(ctx, qid, nid, st)
+                }
             } else {
                 eval_quest_state(ctx, qid, st)
             }
         }
-        "EntityStateById" | "EntityStateByBpTypeOnline" => {
+        "EntityStateById" => {
             let Some(cid) = get_param_int(lp, "EntityConfigId") else {
                 return false;
             };
             let Some(expected_tag) = get_param_int(lp, "Tag") else {
                 return false;
             };
-            let Some(state_str) = ctx.quest_comp.info.get_entity_state(i64::from(cid)) else {
-                return false;
-            };
             let Some(a) = ctx.assets else {
                 return false;
             };
-            let Some(cur_tag) = gameplay_tags::id_from_name(&a.tables.gameplay_tag_remap, state_str) else {
-                return false;
-            };
-            cur_tag == expected_tag
+            let state_str = resolve_current_entity_state_cow(ctx, cid);
+            gameplay_tags::id_from_name(&a.tables.gameplay_tag_remap, state_str.as_ref())
+                .is_some_and(|cur_tag| cur_tag == expected_tag)
+        }
+        "EntityStateByBpTypeOnline" | "EntityStateByBpType" => {
+            eval_entity_state_by_bp_type(ctx, cond, lp, cond.Type == "EntityStateByBpTypeOnline")
         }
         "CheckActivityState" => {
             let Some(aid) = get_param_int(lp, "ActivityId") else {
@@ -376,33 +383,46 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
         },
         "RoleBreach" => {
             let req = get_param_int(lp, "Breach").unwrap_or(0);
-            eval_role_threshold(ctx, lp, RoleThresholdField::Breach, req)
+            let op = resolve_limit_op(cond, lp, "Breach", "Ge");
+            eval_role_threshold(ctx, lp, RoleThresholdField::Breach, req, op)
         }
         "RoleLevel" | "CheckRoleLevel" | "RoleLevelAdd" => {
             let req = get_param_int(lp, "Level").unwrap_or(1);
-            eval_role_threshold(ctx, lp, RoleThresholdField::Level, req)
+            let op = resolve_limit_op(cond, lp, "Level", "Ge");
+            eval_role_threshold(ctx, lp, RoleThresholdField::Level, req, op)
         }
         "RoleFavorLevel" => {
             let req = get_param_int(lp, "Level").unwrap_or(1);
-            eval_role_threshold(ctx, lp, RoleThresholdField::Favor, req)
+            let op = resolve_limit_op(cond, lp, "Level", "Ge");
+            eval_role_threshold(ctx, lp, RoleThresholdField::Favor, req, op)
         }
         "RoleResonance" => {
             let req = get_param_int(lp, "GroupIndex").unwrap_or(1);
-            eval_role_threshold(ctx, lp, RoleThresholdField::Resonance, req)
+            let op = resolve_limit_op(cond, lp, "GroupIndex", "Ge");
+            eval_role_threshold(ctx, lp, RoleThresholdField::Resonance, req, op)
         }
         "CheckRoleOwned" => {
             let Some(role_id) = get_param_int(lp, "RoleId") else {
                 return false;
             };
-            ctx.role_comp
-                .is_some_and(|rc| rc.role_map.contains_key(&role_id))
+            let want_owned = get_param_int(lp, "Owned").unwrap_or(1) != 0;
+            let is_owned = ctx
+                .role_comp
+                .is_some_and(|rc| rc.role_map.contains_key(&role_id));
+            is_owned == want_owned
         }
         "PassLordGymDifficulty" => {
             let Some(gym_id) = get_param_int(lp, "Id") else {
                 return false;
             };
-            ctx.progress_comp
-                .is_some_and(|pc| pc.info.has_passed_lord_gym(gym_id))
+            let Some(pc) = ctx.progress_comp else {
+                return false;
+            };
+            if gym_id < 0 {
+                (pc.info.challenge.passed_lord_gyms.len() as i32) >= cond.NeedNum.max(1)
+            } else {
+                pc.info.has_passed_lord_gym(gym_id)
+            }
         }
         "DailyQuestGroupCompleteTimes" => {
             let Some(gid) = get_param_int(lp, "DQGroupId") else {
@@ -425,8 +445,12 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
                 return false;
             };
             let want = get_param_int(lp, "State").unwrap_or(3);
-            let done = ctx.quest_comp.info.completed_level_plays.contains(&lpid);
-            if want == 3 { done } else { !done }
+            let done = ctx.quest_comp.info.completed_level_plays.contains(&lpid)
+                || get_param_int(lp, "NodeId").is_some_and(|nid| {
+                    ctx.progress_comp
+                        .is_some_and(|pc| pc.info.has_claim(&format!("lp:{lpid}:node:{nid}")))
+                });
+            if want == 3 || want == 4 { done } else { !done }
         }
         "Record" => {
             let Some(rid) = get_param_int(lp, "RecordId") else {
@@ -436,17 +460,24 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
                 .is_some_and(|pc| pc.info.counters.records.contains(&rid))
         }
         "FinishRogueInst" => {
-            let Some(iid) = get_param_int(lp, "InstanceId") else {
-                return false;
-            };
-            ctx.progress_comp
-                .is_some_and(|pc| pc.info.challenge.finished_rogue_insts.contains(&iid))
+            let iid = get_param_int(lp, "InstanceId").unwrap_or(-1);
+            let want_fin = get_param_int(lp, "FinishInst").unwrap_or(1) != 0;
+            let passed = ctx.progress_comp.is_some_and(|pc| {
+                if iid < 0 {
+                    (pc.info.challenge.finished_rogue_insts.len() as i32) >= cond.NeedNum.max(1)
+                } else {
+                    pc.info.challenge.finished_rogue_insts.contains(&iid)
+                }
+            });
+            passed == want_fin
         }
         "NewTowerTotalScore" => {
             let season = get_param_int(lp, "SeasonId").unwrap_or(1);
             let diff = get_param_int(lp, "Difficulty").unwrap_or(-1);
-            ctx.progress_comp
-                .is_some_and(|pc| pc.info.get_new_tower_score(season, diff) >= cond.NeedNum)
+            let op = resolve_limit_op(cond, lp, "Num", "Ge");
+            ctx.progress_comp.is_some_and(|pc| {
+                compare_ints(pc.info.get_new_tower_score(season, diff), cond.NeedNum, op)
+            })
         }
         "CheckGuideStatus" => {
             let Some(gid) = get_param_int(lp, "GuideGroupId") else {
@@ -509,16 +540,33 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
         }
         "LevelPlaysDoneCount" | "ExploreLevelPlayComplete" => {
             let raw = get_param_str(lp, "LevelPlayId").unwrap_or("");
-            if raw.is_empty() {
-                return (ctx.quest_comp.info.completed_level_plays.len() as i32) >= cond.NeedNum.max(1);
+            if !raw.is_empty() {
+                let count = raw
+                    .split('-')
+                    .filter(|tok| !tok.is_empty())
+                    .filter_map(|tok| tok.parse::<i32>().ok())
+                    .filter(|lpid| ctx.quest_comp.info.completed_level_plays.contains(lpid))
+                    .count() as i32;
+                return count >= cond.NeedNum.max(1);
             }
-            let count = raw
-                .split('-')
-                .filter(|tok| !tok.is_empty())
-                .filter_map(|tok| tok.parse::<i32>().ok())
-                .filter(|lpid| ctx.quest_comp.info.completed_level_plays.contains(lpid))
-                .count() as i32;
-            count >= cond.NeedNum.max(1)
+            let area_id = get_param_int(lp, "AreaIds").unwrap_or(0);
+            if area_id > 0 && let Some(a) = ctx.assets {
+                let cnt = ctx
+                    .quest_comp
+                    .info
+                    .completed_level_plays
+                    .iter()
+                    .filter(|&&lpid| {
+                        a.tables.level_play_data.get_data_by_id(&lpid).is_some_and(|lp| {
+                            let inst = if lp.Data.InstanceId != 0 { lp.Data.InstanceId } else { lp.Data.LevelId };
+                            a.find_level_entity(inst, i64::from(lp.Data.LevelPlayEntityId))
+                                .is_some_and(|le| le.AreaId == area_id)
+                        })
+                    })
+                    .count() as i32;
+                return cnt >= cond.NeedNum.max(1);
+            }
+            (ctx.quest_comp.info.completed_level_plays.len() as i32) >= cond.NeedNum.max(1)
         }
         "LevelPlayTypeCompleteWithMulti" => {
             (ctx.quest_comp.info.completed_level_plays.len() as i32) >= cond.NeedNum.max(1)
@@ -528,21 +576,41 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
             let Some(pc) = ctx.progress_comp else {
                 return false;
             };
-            if gid > 0 {
+            let passed = if gid > 0 {
                 pc.info.has_passed_lord_gym(gid)
             } else {
-                !pc.info.challenge.passed_lord_gyms.is_empty()
+                (pc.info.challenge.passed_lord_gyms.len() as i32) >= cond.NeedNum.max(1)
+            };
+            if !passed {
+                return false;
             }
+            if let Some(req_lv) = get_param_int(lp, "Level") {
+                let op = resolve_limit_op(cond, lp, "Level", "Ge");
+                return compare_ints(ctx.basic_comp.info.attributes.level, req_lv, op);
+            }
+            true
         }
-        "FinishRogueInstDiffRole" | "FinishRogueInstPopularEntrie" => ctx
+        "FinishRogueInstDiffRole" => ctx
             .progress_comp
             .is_some_and(|pc| (pc.info.challenge.finished_rogue_insts.len() as i32) >= cond.NeedNum.max(1)),
+        "FinishRogueInstPopularEntrie" => {
+            let Some(pc) = ctx.progress_comp else {
+                return false;
+            };
+            if let Some(rate_req) = get_param_int(lp, "Rate") {
+                let op = resolve_limit_op(cond, lp, "Rate", "Ge");
+                let cur_rate = pc.info.get_key_int("rogue:hot_rate").clamp(0, i64::from(i32::MAX)) as i32;
+                return compare_ints(cur_rate, rate_req, op)
+                    && !pc.info.challenge.finished_rogue_insts.is_empty();
+            }
+            (pc.info.challenge.finished_rogue_insts.len() as i32) >= cond.NeedNum.max(1)
+        }
         "FirstGetRole" => ctx
             .role_comp
             .is_some_and(|rc| (rc.role_map.len() as i32) >= cond.NeedNum.max(1)),
         "FirstRoleBreakthrough" => {
             let req = get_param_int(lp, "Level").unwrap_or(1);
-            eval_role_threshold(ctx, lp, RoleThresholdField::Breach, req)
+            eval_role_threshold(ctx, lp, RoleThresholdField::Breach, req, "Ge")
         }
         "SkillLevelAdd" => {
             let req = get_param_int(lp, "Level").unwrap_or(1);
@@ -581,7 +649,29 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
         | "ActivatePhantomFettles"
         | "PhantomIdentify" => {
             let need = cond.NeedNum.max(get_param_int(lp, "Count").unwrap_or(1));
-            (ctx.echo_comp.echo_map.len() as i32) >= need
+            let quality_req = get_param_int(lp, "Quality").unwrap_or(0);
+            let level_req = if cond.Type == "StrengthenPhantomMax" {
+                get_param_int(lp, "Level").unwrap_or(1).max(need)
+            } else {
+                0
+            };
+            let matches_echo = |e: &sonoro_gamesv_fs::echo_info::EchoInfo| {
+                let ok_q = quality_req <= 0
+                    || ctx.assets.is_some_and(|a| {
+                        a.tables
+                            .phantom_item
+                            .get_data_by_id(&e.id)
+                            .is_some_and(|pi| pi.QualityId >= quality_req)
+                    });
+                let ok_lv = level_req <= 0 || e.level >= level_req;
+                ok_q && ok_lv
+            };
+            if cond.Type == "StrengthenPhantomMax" {
+                ctx.echo_comp.echo_map.values().any(matches_echo)
+            } else {
+                (ctx.echo_comp.echo_map.values().filter(|e| matches_echo(e)).count() as i32)
+                    >= need
+            }
         }
         "CostItemBagType" => ctx
             .progress_comp
@@ -594,6 +684,22 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
             is_activity_open(ctx, aid) == want_open
         }
         "SomeQuestComplete" | "SomeTypeQuestComplete" => {
+            let qt = get_param_int(lp, "QuestType").unwrap_or(0);
+            if qt > 0 && let Some(a) = ctx.assets {
+                let cnt = ctx
+                    .quest_comp
+                    .info
+                    .finished_quests
+                    .iter()
+                    .filter(|&&qid| {
+                        a.tables
+                            .quest_data
+                            .get_data_by_id(&qid)
+                            .is_some_and(|q| q.Data.Type == qt)
+                    })
+                    .count() as i32;
+                return cnt >= cond.NeedNum.max(1);
+            }
             (ctx.quest_comp.info.finished_quests.len() as i32) >= cond.NeedNum.max(1)
         }
         "RecallQuestState" => {
@@ -724,6 +830,9 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
             cnt >= i64::from(cond.NeedNum.max(1))
         }
         other => {
+            if let Some(handled) = eval_extra_condition_types(ctx, cond, lp, other) {
+                return handled;
+            }
             if let Some(spec) = lookup_server_cond_spec(other) {
                 return eval_server_spec_condition(ctx, cond, lp, spec);
             }
@@ -850,7 +959,6 @@ fn lookup_server_cond_spec(cond_type: &str) -> Option<ServerCondSpec> {
         "CheckPeopleLikeCount" => ServerCondSpec::new("bld:like"),
         "CheckPopularityLevel" => ServerCondSpec::new("bld:pop_lv"),
         "CheckReviveByBuff" => ServerCondSpec::new("combat:revive_buff"),
-        "CheckShop" => ServerCondSpec::with_param("shop:buy", "ShopItemId"),
         "CheckTetrisFinish" => ServerCondSpec::with_param("tetris:best", "Id"),
         "CiacconaActivityResult" => ServerCondSpec::new("ciaccona:res"),
         "CompareActorVar" => ServerCondSpec::new("actor_var:done"),
@@ -872,7 +980,6 @@ fn lookup_server_cond_spec(cond_type: &str) -> Option<ServerCondSpec> {
         "DropCatchActivityScore" => ServerCondSpec::with_param("dc:score", "Id"),
         "EncircleChallengeComplete" => ServerCondSpec::full("encircle:done", "encircle:done:", "Id"),
         "EndlessTetrisScore" => ServerCondSpec::new("tetris:best"),
-        "EntityDie" | "EntityDieByTemplate" | "EntityDieByType" => ServerCondSpec::new("simple_combat:kills"),
         "EntityInteractById" | "EntityInteractByType" => ServerCondSpec::new("explore:interact"),
         "ExploreProgressCompleted" => ServerCondSpec::with_claim("explore:prog_done", "explore_prog:"),
         "ExploreProgressCounter" => ServerCondSpec::new("explore:prog_cnt"),
@@ -899,7 +1006,6 @@ fn lookup_server_cond_spec(cond_type: &str) -> Option<ServerCondSpec> {
         "FishingReputationLevel" => ServerCondSpec::new("fish:rep_lv"),
         "FishingSkillUse" => ServerCondSpec::with_param("fish:skill_use", "Id"),
         "FishingTargetEntrustCount" => ServerCondSpec::with_param("fish:target_entrust", "Id"),
-        "FishingTechLevel" => ServerCondSpec::with_param("fish:tech_lv", "Id"),
         "FlagChallengePassLevel" => ServerCondSpec::full("flag:pass_lv", "flag_rw:", "Id"),
         "FlagChallengePerLevel" => ServerCondSpec::with_claim("flag:per_lv", "flag_rw:"),
         "FloroRanchCounter" => ServerCondSpec::with_claim("fr:day", "fr_task:"),
@@ -1081,6 +1187,7 @@ fn eval_role_threshold(
     lp: &Map<String, Value>,
     field: RoleThresholdField,
     req: i32,
+    op: &str,
 ) -> bool {
     let param_role = get_param_int(lp, "RoleId").unwrap_or(0);
     let role_id = if param_role != 0 {
@@ -1095,23 +1202,538 @@ fn eval_role_threshold(
         return rc
             .role_map
             .values()
-            .any(|role| role_meets_threshold(role, field, req));
+            .any(|role| role_meets_threshold(role, field, req, op));
     }
     rc.role_map
         .get(&role_id)
-        .is_some_and(|role| role_meets_threshold(role, field, req))
+        .is_some_and(|role| role_meets_threshold(role, field, req, op))
 }
 
-fn role_meets_threshold(role: &RoleInfo, field: RoleThresholdField, req: i32) -> bool {
-    match field {
-        RoleThresholdField::Breach => role.breakthrough >= req,
-        RoleThresholdField::Level => role.level >= req,
-        RoleThresholdField::Favor => role.favor >= req,
+fn role_meets_threshold(role: &RoleInfo, field: RoleThresholdField, req: i32, op: &str) -> bool {
+    let cur = match field {
+        RoleThresholdField::Breach => role.breakthrough,
+        RoleThresholdField::Level => role.level,
+        RoleThresholdField::Favor => role.favor,
         RoleThresholdField::Resonance => {
             let active_reson = role.reson.iter().filter(|r| r.open).count() as i32;
-            role.resonant_chain_group_index.max(active_reson) >= req
+            role.resonant_chain_group_index.max(active_reson)
+        }
+    };
+    compare_ints(cur, req, op)
+}
+
+fn resolve_limit_op<'a>(
+    cond: &'a Condition,
+    lp: &'a Map<String, Value>,
+    ope_field: &str,
+    default_op: &'a str,
+) -> &'a str {
+    get_param_str(lp, "Op")
+        .or_else(|| get_param_str(lp, "Compare"))
+        .or_else(|| get_ope_str(cond.LimitParamsOpe.as_ref(), ope_field))
+        .unwrap_or(default_op)
+}
+
+fn quest_node_state_value(ctx: &EvalContext<'_>, qid: i32, nid: i32) -> i32 {
+    if ctx.quest_comp.info.has_finished_child_quest(qid, nid) {
+        return 3;
+    }
+    if let Some(aq) = ctx.quest_comp.info.find_active_quest(qid) {
+        if aq.is_node_finished(nid) {
+            return 3;
+        }
+        if aq.is_node_active(nid) {
+            return 2;
         }
     }
+    0
+}
+
+fn eval_entity_state_by_bp_type(
+    ctx: &EvalContext<'_>,
+    cond: &Condition,
+    lp: &Map<String, Value>,
+    online_only: bool,
+) -> bool {
+    let Some(bp_type) = get_param_str(lp, "BpType") else {
+        return false;
+    };
+    let Some(expected_tag) = get_param_int(lp, "Tag") else {
+        return false;
+    };
+    let Some(a) = ctx.assets else {
+        return false;
+    };
+    let map_id = get_param_int(lp, "InstanceId").filter(|&id| id > 0);
+    let area_id = get_param_int(lp, "AreaIds").filter(|&id| id > 0);
+    let need = cond.NeedNum.max(1);
+    let mut matches = 0i32;
+
+    if let Some(scene) = ctx.scene
+        && map_id.is_none_or(|mid| scene.instance_id == mid)
+    {
+        for ent in &scene.entities {
+            if ent.config.config_id <= 0 {
+                continue;
+            }
+            if let Some(lcfg) = a.find_level_entity(scene.instance_id, i64::from(ent.config.config_id)) {
+                if lcfg.BlueprintType != bp_type
+                    || area_id.is_some_and(|aid| lcfg.AreaId != aid)
+                {
+                    continue;
+                }
+                let st_str = resolve_current_entity_state_cow(ctx, ent.config.config_id);
+                if gameplay_tags::id_from_name(&a.tables.gameplay_tag_remap, st_str.as_ref())
+                    == Some(expected_tag)
+                {
+                    matches += 1;
+                    if matches >= need {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    if online_only && matches > 0 {
+        return matches >= need;
+    }
+    let check_map = map_id.unwrap_or_else(|| ctx.scene.map_or(8, |s| s.instance_id));
+    if let Some(db) = a.tables.assets_db() {
+        for &idx in a.indexes.spawnable_indices_for_map(check_map) {
+            let Some(meta) = a.indexes.quick_entity_meta(idx) else {
+                continue;
+            };
+            let cfg_id = i32::try_from(meta.entity_id).unwrap_or(0);
+            if ctx.scene.is_some_and(|sc| sc.entities.iter().any(|e| e.config.config_id == cfg_id)) {
+                continue;
+            }
+            let Some(lcfg) = db.get_level_entity_by_idx(idx) else {
+                continue;
+            };
+            if lcfg.BlueprintType != bp_type || area_id.is_some_and(|aid| lcfg.AreaId != aid) {
+                continue;
+            }
+            let st_str = if let Some(saved) = ctx.quest_comp.info.get_entity_state(meta.entity_id) {
+                std::borrow::Cow::Borrowed(saved)
+            } else {
+                let mut comps = lcfg.ComponentsData.clone();
+                if let Some(tpl) = a.find_template_config(&lcfg.BlueprintType) {
+                    tpl.ComponentsData.merge_into(&mut comps);
+                }
+                std::borrow::Cow::Owned(
+                    comps
+                        .EntityStateComponent
+                        .as_ref()
+                        .and_then(|esc| esc.State.as_ref())
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| "关卡.Common.状态.常态".to_string()),
+                )
+            };
+            if gameplay_tags::id_from_name(&a.tables.gameplay_tag_remap, st_str.as_ref())
+                == Some(expected_tag)
+            {
+                matches += 1;
+                if matches >= need {
+                    return true;
+                }
+            }
+        }
+    }
+    matches >= need
+}
+
+fn eval_extra_condition_types(
+    ctx: &EvalContext<'_>,
+    cond: &Condition,
+    lp: &Map<String, Value>,
+    cond_type: &str,
+) -> Option<bool> {
+    let pc = ctx.progress_comp;
+    Some(match cond_type {
+        "CheckShop" => {
+            let Some(pc) = pc else {
+                return Some(false);
+            };
+            let shop_id = get_param_int(lp, "ShopId").unwrap_or(0);
+            let item_id = get_param_int(lp, "ShopItemId").unwrap_or(0);
+            let count = if shop_id > 0 && item_id > 0 {
+                pc.info.get_shop_good_count(shop_id, item_id)
+            } else {
+                pc.info
+                    .shop
+                    .fixed_shop_bought
+                    .iter()
+                    .filter(|g| {
+                        (shop_id <= 0 || g.shop_id == shop_id)
+                            && (item_id <= 0 || g.goods_id == item_id)
+                    })
+                    .map(|g| g.count)
+                    .sum()
+            };
+            count.max(pc.info.get_key_int(&format!("shop:buy:{item_id}")) as i32)
+                >= cond.NeedNum.max(1)
+        }
+        "FishingTechLevel" => {
+            let Some(pc) = pc else {
+                return Some(false);
+            };
+            let tid = get_param_int(lp, "Id").unwrap_or(0);
+            let req_lv = get_param_int(lp, "Level").unwrap_or(cond.NeedNum.max(1));
+            let op = resolve_limit_op(cond, lp, "Level", "Ge");
+            if tid > 0 {
+                compare_ints(ProgressInfo::get_id_count(&pc.info.fishing.tech_levels, tid), req_lv, op)
+            } else {
+                let max_lv = pc
+                    .info
+                    .fishing
+                    .tech_levels
+                    .iter()
+                    .map(|e| e.count)
+                    .max()
+                    .unwrap_or(0);
+                compare_ints(max_lv, req_lv, op)
+            }
+        }
+        "EntityDie" | "EntityDieByTemplate" | "EntityDieByType" => {
+            let cid = get_param_int(lp, "EntityConfigId")
+                .or_else(|| get_param_int(lp, "Id"))
+                .unwrap_or(0);
+            let need = cond.NeedNum.max(1);
+            if cid > 0 {
+                let killed_in_quest = ctx
+                    .quest_comp
+                    .info
+                    .active_quests
+                    .iter()
+                    .filter(|aq| aq.has_killed_entity(cid))
+                    .count() as i32;
+                let simple = pc.map_or(0, |p| p.info.get_key_int(&format!("simple_kill:{cid}")) as i32);
+                let total = pc.map_or(0, |p| p.info.get_key_int("simple_combat:kills") as i32);
+                killed_in_quest.max(simple) >= need || (total >= need && simple > 0)
+            } else {
+                pc.is_some_and(|p| p.info.get_key_int("simple_combat:kills") >= i64::from(need))
+            }
+        }
+        "SceneStepState" => {
+            let gid = get_param_int(lp, "StepGroupId").unwrap_or(0);
+            let sid = get_param_int(lp, "StepID").unwrap_or(0);
+            let want = get_param_int(lp, "State").unwrap_or(4);
+            let saved = pc.map_or(0, |p| {
+                p.info
+                    .get_key_int(&format!("scene_step:{gid}:{sid}"))
+                    .clamp(0, i64::from(i32::MAX)) as i32
+            });
+            saved == want
+                || (want == 4
+                    && pc.is_some_and(|p| p.info.has_claim(&format!("scene_step:done:{gid}:{sid}"))))
+        }
+        "QuestStepState" => {
+            let qkey = get_param_str(lp, "QuestID").unwrap_or("");
+            let sid = get_param_int(lp, "StepID").unwrap_or(0);
+            let want = get_param_int(lp, "State").unwrap_or(2);
+            if let Ok(qid) = qkey.parse::<i32>() {
+                eval_quest_node_status(ctx, qid, sid, want)
+            } else {
+                pc.is_some_and(|p| {
+                    p.info.get_key_int(&format!("quest_step:{qkey}:{sid}")) == i64::from(want)
+                })
+            }
+        }
+        "TowerUnlockDifficulty" => {
+            let req = get_param_int(lp, "Difficulty").unwrap_or(1);
+            pc.is_some_and(|p| {
+                p.info
+                    .challenge
+                    .tower_floors
+                    .iter()
+                    .map(|f| f.difficulty)
+                    .max()
+                    .unwrap_or(0)
+                    >= req
+            })
+        }
+        "CheckAtmosphereVal" => {
+            let aid = get_param_int(lp, "ActivityId").unwrap_or(0);
+            let val = pc.map_or(0, |p| {
+                p.info
+                    .get_key_int("spring:atmosphere")
+                    .max(p.info.get_key_int("spring_manor:atmosphere"))
+                    .max(p.info.get_key_int(&format!("act:{aid}:atmosphere")))
+            });
+            val >= i64::from(cond.NeedNum)
+        }
+        "DragonPoolLevel" => {
+            let did = get_param_int(lp, "Id").unwrap_or(1);
+            let lv = pc.map_or(0, |p| {
+                p.info
+                    .get_key_int(&format!("dragon_pool:lv:{did}"))
+                    .max(p.info.get_key_int("dragon_pool:lv"))
+            });
+            lv >= i64::from(cond.NeedNum.max(1))
+        }
+        "TotalLoginDays" => {
+            let need = get_param_int(lp, "NeedNum").unwrap_or(cond.NeedNum).max(1);
+            let days = pc.map_or(1, |p| p.info.get_key_int("login:total_days").max(1));
+            days >= i64::from(need)
+        }
+        "CheckRangeByPbDataId" | "PawnInRange" => {
+            let Some(scene) = ctx.scene else {
+                return Some(false);
+            };
+            let Some(player_pos) = current_player_pos_3d(ctx) else {
+                return Some(false);
+            };
+            let dist = get_param_int(lp, "Distance").unwrap_or(1500) as f32;
+            if let Some(eid) = get_param_int(lp, "PbDataId") {
+                return Some(scene.entities.iter().any(|e| {
+                    e.config.config_id == eid
+                        && e.position.as_ref().is_some_and(|p| {
+                            is_pos_inside_range_shape(
+                                player_pos,
+                                p.location,
+                                p.rotation,
+                                &ShapeConfig::default(),
+                                dist,
+                                0.0,
+                            )
+                        })
+                }));
+            }
+            let pawn_bp = get_param_str(lp, "PawnId").unwrap_or("");
+            if pawn_bp.is_empty() || ctx.assets.is_none() {
+                return Some(false);
+            }
+            let a = ctx.assets.expect("checked");
+            scene.entities.iter().any(|e| {
+                a.find_level_entity(scene.instance_id, i64::from(e.config.config_id))
+                    .is_some_and(|le| le.BlueprintType == pawn_bp)
+                    && e.position.as_ref().is_some_and(|p| {
+                        is_pos_inside_range_shape(
+                            player_pos,
+                            p.location,
+                            p.rotation,
+                            &ShapeConfig::default(),
+                            dist,
+                            0.0,
+                        )
+                    })
+            })
+        }
+        "KillMonster" => {
+            let need = cond.NeedNum.max(1);
+            let kills = pc.map_or(0, |p| {
+                p.info
+                    .get_key_int("simple_combat:kills")
+                    .max(p.info.get_key_int("cond_cnt:KillMonster"))
+            });
+            kills >= i64::from(need)
+        }
+        "FightWithMonster" => {
+            let mid = get_param_int(lp, "MonsterId").unwrap_or(0);
+            pc.is_some_and(|p| {
+                (mid > 0 && p.info.has_claim(&format!("combat:fight:{mid}")))
+                    || p.info.get_key_int("simple_combat:kills") >= i64::from(cond.NeedNum.max(1))
+            })
+        }
+        "CheckDungeonTypes" => {
+            let Some(scene) = ctx.scene else {
+                return Some(false);
+            };
+            let Some(a) = ctx.assets else {
+                return Some(false);
+            };
+            let Some(inst) = a.tables.instance_dungeon.get_data_by_id(&scene.instance_id) else {
+                return Some(false);
+            };
+            let ty1 = get_param_int(lp, "Type1").unwrap_or(inst.InstType);
+            let sub1 = get_param_int(lp, "SubType1").unwrap_or(inst.InstSubType);
+            inst.InstType == ty1 && inst.InstSubType == sub1
+        }
+        "AdventureTaskFinishCheck" => {
+            let cid = get_param_int(lp, "ChapterId").unwrap_or(1);
+            let Some(a) = ctx.assets else {
+                return Some(false);
+            };
+            let Some(pc) = pc else {
+                return Some(false);
+            };
+            let done = a
+                .tables
+                .adventure_task
+                .items
+                .iter()
+                .filter(|t| t.ChapterId == cid && pc.info.has_claim(&format!("adv_task:{}", t.Id)))
+                .count() as i32;
+            done >= cond.NeedNum.max(1)
+        }
+        "AreaDecorationProgress" => {
+            let aid = get_param_int(lp, "ActivityId").unwrap_or(0);
+            let need = get_param_int(lp, "Count").unwrap_or(cond.NeedNum).max(1);
+            pc.is_some_and(|p| {
+                p.info
+                    .get_key_int("diy:decor_cnt")
+                    .max(p.info.get_key_int(&format!("spring:decor:{aid}")))
+                    >= i64::from(need)
+            })
+        }
+        "FurnitureIllustratedProgress" => {
+            let need = get_param_int(lp, "Count").unwrap_or(cond.NeedNum).max(1);
+            pc.is_some_and(|p| p.info.get_key_int("diy:furn_cnt") >= i64::from(need))
+        }
+        "OpenLevelPlay" => {
+            let Some(lpid) = get_param_int(lp, "LevelPlayId") else {
+                return Some(false);
+            };
+            ctx.quest_comp.info.progress.entered_level_plays.contains(&lpid)
+                || ctx.quest_comp.info.completed_level_plays.contains(&lpid)
+        }
+        "EnterArea" => {
+            let Some(aid) = get_param_int(lp, "AreaIds") else {
+                return Some(false);
+            };
+            ctx.basic_comp.info.attributes.area_id == aid
+                || ctx.map_comp.info.unlocked_areas.contains(&aid)
+        }
+        "CheckEquippedPhantom" => {
+            let want_eq = get_param_int(lp, "是否装备").unwrap_or(1) != 0;
+            let pos_raw = get_param_int(lp, "声骸位置").unwrap_or(1);
+            let slot_idx = pos_raw.saturating_sub(1).clamp(0, 4) as usize;
+            let has_eq = ctx.role_comp.is_some_and(|rc| {
+                rc.role_map
+                    .keys()
+                    .any(|&rid| ctx.echo_comp.role_equip(rid).slots[slot_idx] > 0)
+            });
+            has_eq == want_eq
+        }
+        "CheckDrop" => {
+            let Some(did) = get_param_int(lp, "DropId") else {
+                return Some(false);
+            };
+            pc.is_some_and(|p| p.info.has_claim(&format!("drop:got:{did}")))
+        }
+        "TargetTagCheck" | "CheckCreatureTag" => {
+            let eid = get_param_int(lp, "EntityConfigId")
+                .or_else(|| get_param_int(lp, "CreatureGen"))
+                .unwrap_or(ctx.self_entity_config_id);
+            let want_tag_name = get_param_str(lp, "CheckTag")
+                .or_else(|| get_param_str(lp, "Tag"))
+                .unwrap_or("");
+            let Some(scene) = ctx.scene else {
+                return Some(false);
+            };
+            let Some(a) = ctx.assets else {
+                return Some(false);
+            };
+            let Some(nid) = scene.find_entity_net_id_by_config_id(eid) else {
+                return Some(false);
+            };
+            let Some(st) = scene.entity(nid) else {
+                return Some(false);
+            };
+            if let Some(tid) = gameplay_tags::id_from_name(&a.tables.gameplay_tag_remap, want_tag_name)
+            {
+                st.tag
+                    .as_ref()
+                    .is_some_and(|tag| tag.has_tag(&a.tables.gameplay_tag_parent, tid))
+            } else {
+                resolve_current_entity_state_cow(ctx, eid).as_ref() == want_tag_name
+            }
+        }
+        "QuestNodeSpecificStatus" => {
+            let Some(qid) = get_param_int(lp, "NewQuestId") else {
+                return Some(false);
+            };
+            let Some(nid) = get_param_int(lp, "QuestNodeId") else {
+                return Some(false);
+            };
+            let st = get_param_int(lp, "State").unwrap_or(3);
+            eval_quest_node_status(ctx, qid, nid, st)
+        }
+        "AbyssPluginItemUnlockType" => {
+            let ty = get_param_int(lp, "Type").unwrap_or(0);
+            pc.is_some_and(|p| {
+                p.info
+                    .get_key_int(&format!("abyss:plugin_type:{ty}"))
+                    .max(p.info.get_key_int("abyss:plugin_cnt"))
+                    >= i64::from(cond.NeedNum.max(1))
+            })
+        }
+        "InfrV2TreeComplete" => {
+            let tid = get_param_int(lp, "Id").unwrap_or(0);
+            pc.is_some_and(|p| {
+                p.info.has_claim(&format!("infr2:tree:{tid}"))
+                    || p.info.get_key_int(&format!("infr2:tree:{tid}")) > 0
+            })
+        }
+        "OnRougeWeeklyScoreAdd" => {
+            pc.is_some_and(|p| p.info.get_key_int("rogue_weekly:score") >= i64::from(cond.NeedNum))
+        }
+        "ComboTeachingState" => pc.is_some_and(|p| {
+            p.info.get_key_int("combo_teach:done") >= i64::from(cond.NeedNum.max(1))
+        }),
+        "CheckRoomTypeFinishCount" => {
+            let op = resolve_limit_op(cond, lp, "Count", "Ge");
+            let val = pc.map_or(0, |p| p.info.get_key_int("rogue:layer") as i32);
+            compare_ints(val, cond.NeedNum, op)
+        }
+        "CheckSkillTypeKills" => {
+            let op = resolve_limit_op(cond, lp, "Count", "Ge");
+            let val = pc.map_or(0, |p| p.info.get_key_int("simple_combat:kills") as i32);
+            compare_ints(val, cond.NeedNum, op)
+        }
+        "EdgeRunnerLordGymSuccess" | "EdgeRunnerLordGymComplete" => {
+            pc.is_some_and(|p| !p.info.challenge.passed_lord_gyms.is_empty())
+        }
+        "EdgeRunnerBigWorldGolemCrackFinish" => {
+            pc.is_some_and(|p| p.info.get_key_int("golem:finish") >= i64::from(cond.NeedNum.max(1)))
+        }
+        "DrinksMixLevelCompleteNum" => {
+            pc.is_some_and(|p| p.info.get_key_int("drinks:done_cnt") >= i64::from(cond.NeedNum.max(1)))
+        }
+        "GuessJokerLevelCompleteNum" => {
+            pc.is_some_and(|p| p.info.get_key_int("joker:done_cnt") >= i64::from(cond.NeedNum.max(1)))
+        }
+        "EquipCharacterGiftFurniture" => {
+            pc.is_some_and(|p| p.info.get_key_int("diy:furn_cnt") >= i64::from(cond.NeedNum.max(1)))
+        }
+        "OneClickPreset" => pc.is_some_and(|p| p.info.has_claim("echo:preset_used")),
+        "KurotatoPropValue" => {
+            let op = resolve_limit_op(cond, lp, "Num", "Ge");
+            let val = pc.map_or(0, |p| p.info.get_key_int("kurotato:prop") as i32);
+            let req = get_param_int(lp, "Num").unwrap_or(cond.NeedNum);
+            compare_ints(val, req, op)
+        }
+        "CheckTetrisScore" => {
+            pc.is_some_and(|p| p.info.get_key_int("tetris:best") >= i64::from(cond.NeedNum))
+        }
+        "SelfTagCheck" => {
+            let Some(scene) = ctx.scene else {
+                return Some(false);
+            };
+            let Some(a) = ctx.assets else {
+                return Some(false);
+            };
+            let nid = scene.current_role_entity_id();
+            let want_tag = get_param_str(lp, "Tag").unwrap_or("");
+            if let Some(tid) = gameplay_tags::id_from_name(&a.tables.gameplay_tag_remap, want_tag)
+            {
+                scene
+                    .entity(nid)
+                    .and_then(|st| st.tag.as_ref())
+                    .is_some_and(|tag| tag.has_tag(&a.tables.gameplay_tag_parent, tid))
+            } else {
+                false
+            }
+        }
+        "PlayerRevive" => {
+            pc.is_some_and(|p| p.info.get_key_int("player:revive_cnt") >= i64::from(cond.NeedNum.max(1)))
+        }
+        "CheckTeamWeaponCouldLevelUp" => ctx
+            .weapon_comp
+            .is_some_and(|wc| wc.weapon_map.values().any(|w| w.level < 90)),
+        _ => return None,
+    })
 }
 
 pub fn eval_quest_provide_conditions(ctx: &EvalContext<'_>, provide_val: Option<&Value>) -> bool {
@@ -3251,6 +3873,14 @@ fn eval_extra_inline_condition(
 ) -> Option<bool> {
     let pc = ctx.progress_comp;
     let res = match ct {
+        "CheckRoleOwned" => {
+            let role_id = json_int(obj.get("RoleId"))?;
+            let want_owned = obj.get("Owned").and_then(Value::as_bool).unwrap_or(true);
+            let is_owned = ctx
+                .role_comp
+                .is_some_and(|rc| rc.role_map.contains_key(&role_id));
+            is_owned == want_owned
+        }
         "CheckFinishLoading" => ctx.scene.is_some(),
         "CheckElementalBoxState" => {
             let eid = obj
@@ -5231,7 +5861,7 @@ fn get_param_str<'a>(obj: &'a Map<String, Value>, key: &str) -> Option<&'a str> 
 }
 
 fn get_param_int(obj: &Map<String, Value>, key: &str) -> Option<i32> {
-    get_param_str(obj, key)?.parse::<i32>().ok()
+    json_int(obj.get(key))
 }
 
 fn json_int(v_opt: Option<&Value>) -> Option<i32> {
@@ -5284,13 +5914,13 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(role_meets_threshold(&role, RoleThresholdField::Level, 60));
-        assert!(!role_meets_threshold(&role, RoleThresholdField::Level, 70));
-        assert!(role_meets_threshold(&role, RoleThresholdField::Breach, 3));
-        assert!(role_meets_threshold(&role, RoleThresholdField::Favor, 4));
-        assert!(!role_meets_threshold(&role, RoleThresholdField::Favor, 5));
-        assert!(role_meets_threshold(&role, RoleThresholdField::Resonance, 2));
-        assert!(!role_meets_threshold(&role, RoleThresholdField::Resonance, 3));
+        assert!(role_meets_threshold(&role, RoleThresholdField::Level, 60, "Ge"));
+        assert!(!role_meets_threshold(&role, RoleThresholdField::Level, 70, "Ge"));
+        assert!(role_meets_threshold(&role, RoleThresholdField::Breach, 3, "Ge"));
+        assert!(role_meets_threshold(&role, RoleThresholdField::Favor, 4, "Ge"));
+        assert!(!role_meets_threshold(&role, RoleThresholdField::Favor, 5, "Ge"));
+        assert!(role_meets_threshold(&role, RoleThresholdField::Resonance, 2, "Ge"));
+        assert!(!role_meets_threshold(&role, RoleThresholdField::Resonance, 3, "Ge"));
     }
 
     #[test]

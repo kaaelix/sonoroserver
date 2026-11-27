@@ -1803,6 +1803,17 @@ impl Scene {
         });
     }
 
+    pub fn play_bubble_guids_for_entity(&self, entity_config_id: i32) -> Vec<String> {
+        if entity_config_id <= 0 {
+            return Vec::new();
+        }
+        self.play_bubbles
+            .iter()
+            .filter(|r| r.entity_config_id == entity_config_id)
+            .map(|r| r.action_guid.clone())
+            .collect()
+    }
+
     pub fn take_play_bubbles_for_entity(
         &mut self,
         entity_config_id: i32,

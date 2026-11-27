@@ -2166,10 +2166,27 @@ fn audit_110_speed_ring_lift_component_and_missing_actions() {
         true
     ));
 
-    let spawner_cfg = LevelEntityConfig {
+    let passerby_spawner_cfg = LevelEntityConfig {
         Id: 900_003,
         EntityId: 900_003,
         BlueprintType: "Gameplay581".to_string(),
+        MapId: 8,
+        AreaId: 1,
+        ..Default::default()
+    };
+    assert!(!scene_logic::is_blocked_world_entity_config(
+        &h.state.assets,
+        &h.state.player_components.quest.info,
+        8,
+        &passerby_spawner_cfg,
+        false,
+        false
+    ));
+
+    let blocked_spawner_cfg = LevelEntityConfig {
+        Id: 900_004,
+        EntityId: 900_004,
+        BlueprintType: "Gameplay101".to_string(),
         MapId: 8,
         AreaId: 1,
         ..Default::default()
@@ -2178,7 +2195,7 @@ fn audit_110_speed_ring_lift_component_and_missing_actions() {
         &h.state.assets,
         &h.state.player_components.quest.info,
         8,
-        &spawner_cfg,
+        &blocked_spawner_cfg,
         false,
         false
     ));
@@ -3258,8 +3275,23 @@ fn audit_116_remaining_conditions_actions_and_item_exchange() {
             "Params": { "Time": 1 }
         });
         execute_action(&mut qctx, &mut cbs, 1, 1, &client_fx).expect("Wait client action");
+    }
 
-        // 3. Evaluate remaining inline Condition variants directly.
+    let _ = crate::network::handlers::quest::handle_submit_photo_node_request(
+        &mut h.state,
+        &mut events,
+        sonoro_proto::pb::SubmitPhotoNodeRequest {
+            TreeIncId: 0,
+            NodeId: 0,
+            TreeOwnerId: 0,
+            EntityIds: Vec::new(),
+        },
+    )
+    .expect("submit_photo_node");
+
+    // 3. Evaluate remaining inline Condition variants directly.
+    {
+        let qctx = h.state.quest_context(&mut events);
         let ec = qctx.make_eval_context();
         assert!(eval_single_inline_condition(
             &ec,
@@ -3606,8 +3638,8 @@ fn audit_115_lift_initial_pos_dungeon_level_play_npc_priority_and_batch_spawn() 
         &cond_eq1,
     ));
 
-    // 3. Spatial world spawns must batch EntityAddNotify + JSPatchNotify, spawn lift via
-    // CustomSpeed ElevatorMoveNotify, and SceneLoadingFinishRequest must NOT flood active quest nodes.
+    // 3. Spatial world spawns must batch EntityAddNotify natively (without JSPatchNotify),
+    // spawn lift via CustomSpeed ElevatorMoveNotify, and SceneLoadingFinishRequest must NOT flood active quest nodes.
     let mut adds: Vec<EntityAddNotify> = Vec::new();
     let mut lift_moves: Vec<ElevatorMoveNotify> = Vec::new();
     let mut node_updates: Vec<UpdateNodeStatusNotify> = Vec::new();
@@ -3875,7 +3907,7 @@ fn audit_115_lift_initial_pos_dungeon_level_play_npc_priority_and_batch_spawn() 
             .iter()
             .filter(|&&id| id == JSPatchNotify::MSG_ID)
             .count(),
-        1
+        0
     );
     // Also verify pre-spawn DoInteract registration embeds DynamicInteractInfos into EntityAddNotify
     // without emitting EntityRemoveDynamicInteractNotify flicker on re-sync.
@@ -8520,6 +8552,673 @@ fn audit_150_doll_grab_exhibit_furniture_and_spring_festival() {
         assert!(info.Atmosphere > 0);
     }
 }
+
+#[test]
+fn audit_151_native_protobuf_replaces_jspatch_and_reset_pos_failure_flow() {
+    use sonoro_gamesv_logic::commands::js_patches;
+    use sonoro_gamesv_logic::helpers::quest_actions;
+    use sonoro_gamesv_logic::helpers::quest_engine;
+    use sonoro_proto::pb::{
+        ActionResetPosPrePerformanceEndRequest, ActionResetPosPrePerformanceNotify,
+        JSPatchNotify, TeleportNotify, WeatherNotify,
+    };
+
+    let mut h = TestHarness::new("audit_151_native_proto", Some(8));
+    h.drain_count();
+
+    // 1) Weather push emits native WeatherNotify and zero JSPatchNotify.
+    js_patches::weather::push(&mut h.state.conn, 2).expect("weather push");
+    let ids = h.drain_push_msg_ids();
+    assert!(ids.contains(&WeatherNotify::MSG_ID));
+    assert!(!ids.contains(&JSPatchNotify::MSG_ID));
+
+    // 2) ResetPlayerPosWithPresentation (Type=Failure) emits ActionResetPosPrePerformanceNotify,
+    //    then ActionResetPosPrePerformanceEndRequest completes TeleportNotify and clears state.
+    let mut events = EventQueue::default();
+    let act_val = serde_json::json!({
+        "Name": "ResetPlayerPosWithPresentation",
+        "Params": {
+            "Presentation": { "Type": "Failure", "Duration": 1.0, "GamePlayCues": [643901001] },
+            "ResetPosConfig": { "Type": "PosEntity", "Entity": 6700003 }
+        }
+    });
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = quest_engine::action_callbacks();
+        quest_actions::execute_action_list(&mut qctx, &mut cbs, 1, 1, &[act_val])
+            .expect("reset pos failure action");
+    }
+    let pre_notifies = h.drain_decoded::<ActionResetPosPrePerformanceNotify>(
+        ActionResetPosPrePerformanceNotify::MSG_ID,
+    );
+    assert_eq!(pre_notifies.len(), 1);
+    let inc_id = pre_notifies[0].IncId;
+    assert!(inc_id >= 1);
+    let pid = h.state.player_id;
+    let end_resp = crate::network::handlers::world_puzzle::handle_action_reset_pos_pre_performance_end_request(
+        &mut h.state,
+        ActionResetPosPrePerformanceEndRequest {
+            PlayerId: pid,
+            Index: 0,
+            ContinueExecute: true,
+            IncId: inc_id,
+        },
+    )
+    .expect("reset pos end");
+    assert_eq!(end_resp.Code, Some(ErrorCode::Success));
+    let tp_notifies = h.drain_decoded::<TeleportNotify>(TeleportNotify::MSG_ID);
+    assert!(!tp_notifies.is_empty(), "ContinueExecute must teleport player");
+    assert_eq!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int(&format!("act:reset_pos_target:{inc_id}:0")),
+        0,
+        "pending reset pos key must be cleared after end"
+    );
+
+    // 3) TakePlotPhoto action must NOT falsely set photo:submitted=1.
+    let photo_act = serde_json::json!({
+        "Name": "TakePlotPhoto",
+        "Params": { "PhotoId": 101 }
+    });
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = quest_engine::action_callbacks();
+        quest_actions::execute_action_list(&mut qctx, &mut cbs, 1, 2, &[photo_act])
+            .expect("take plot photo");
+    }
+    assert_eq!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int("photo:submitted"),
+        0,
+        "TakePlotPhoto must wait for real submission rather than pre-marking submitted"
+    );
+}
+
+#[test]
+fn audit_152_quest_mode_actions_and_condition_operators() {
+    use sonoro_gamesv_logic::helpers::condition;
+    use sonoro_gamesv_logic::helpers::quest_actions;
+    use sonoro_gamesv_logic::helpers::quest_engine;
+
+    let mut h = TestHarness::new("audit_152_actions_conds", Some(8));
+    let mut events = EventQueue::default();
+
+    // Test RogueGotoNextFloor, DangoAbyssGotoNextFloor, HonamiStoryInteractPickUp, RoverRogueActivate
+    let actions = vec![
+        serde_json::json!({ "Name": "RogueGotoNextFloor", "Params": { "Floor": 2 } }),
+        serde_json::json!({ "Name": "DangoAbyssGotoNextFloor", "Params": {} }),
+        serde_json::json!({ "Name": "HonamiStoryInteractPickUp", "Params": { "ItemId": 9001 } }),
+        serde_json::json!({ "Name": "RoverRogueActivate", "Params": {} }),
+    ];
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = quest_engine::action_callbacks();
+        quest_actions::execute_action_list(&mut qctx, &mut cbs, 10, 1, &actions)
+            .expect("quest mode actions");
+    }
+    assert!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int("rogue:layer")
+            >= 1
+    );
+    assert!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int("abyss:room")
+            >= 1
+    );
+
+    // Test inline & table condition evaluation (CheckRoleOwned & LimitParams operators)
+    let eval_ctx = {
+        use sonoro_gamesv_data::tables::condition::Condition as TableCondition;
+        let qctx = h.state.quest_context(&mut events);
+        let role_id = *qctx
+            .role_comp
+            .as_ref()
+            .and_then(|r| r.role_map.keys().next())
+            .expect("PlayerRoleComponent has starter role");
+        let owned_cond = serde_json::json!({
+            "Type": 0,
+            "Conditions": [{
+                "Type": "CheckRoleOwned",
+                "RoleId": role_id
+            }]
+        });
+        let ec = qctx.make_eval_context();
+        assert!(condition::eval_inline_condition_block(&ec, &owned_cond));
+        let owned_tbl = TableCondition {
+            Id: 9_999_001,
+            Type: "CheckRoleOwned".to_string(),
+            NeedNum: 1,
+            LimitParams: Some(serde_json::json!({ "RoleId": role_id })),
+            LimitParamsOpe: None,
+            IsClient: false,
+        };
+        assert!(condition::eval_condition_record(&ec, &owned_tbl));
+        let shop_cond = TableCondition {
+            Id: 9_999_002,
+            Type: "FishingTechLevel".to_string(),
+            NeedNum: 1,
+            LimitParams: Some(serde_json::json!({ "Level": 99 })),
+            LimitParamsOpe: Some(serde_json::json!({ "Level": "Ge" })),
+            IsClient: false,
+        };
+        !condition::eval_condition_record(&ec, &shop_cond)
+    };
+    assert!(eval_ctx, "FishingTechLevel >= 99 must be false at level 0");
+}
+
+#[test]
+fn audit_153_world_controllers_flower_pollution_seq_frame_and_patrol() {
+    use crate::network::handlers::{events_misc, world_puzzle};
+    use sonoro_gamesv_data::tables::entity_components::extra::ExtraEntry;
+    use sonoro_gamesv_logic::helpers::world_controllers;
+    use sonoro_proto::pb::{
+        FlowerPollutionSplinePush, MonsterPatrolPointReachedRequest,
+        SceneItemSequenceFrameEndRequest, SceneItemSequenceFrameStartRequest,
+    };
+
+    let mut h = TestHarness::new("audit_153_world_ctrl", Some(8));
+    h.drain_count();
+
+    // 1) AssetIndexes must expose world controllers on Map 8 / Map 100.
+    let ctrls_m8 = h.state.assets.world_controller_entities(8);
+    assert!(
+        !ctrls_m8.is_empty(),
+        "Map 8 must load cached RefreshGroup/EntityBatchRefresh/TimeSchedule controllers"
+    );
+
+    // 2) FlowerPollutionSplinePush persists splines & hydrates FlowerPollutionComponentPb.
+    events_misc::handle_flower_pollution_spline_push(
+        &mut h.state,
+        FlowerPollutionSplinePush {
+            ManagerEntityId: 1,
+            IsRemovePollution: true,
+            SplineConfigId: 101,
+        },
+    )
+    .expect("flower spline push");
+    let has_merged_well = h
+        .state
+        .assets
+        .find_level_entity(100, 138_501_78)
+        .is_some_and(|cfg| {
+            let mut m = cfg.ComponentsData.clone();
+            if let Some(tpl) = h.state.assets.find_template_config(&cfg.BlueprintType) {
+                tpl.ComponentsData.merge_into(&mut m);
+            }
+            m.extra
+                .iter()
+                .chain(m.template_extra.iter())
+                .any(|e| matches!(e, ExtraEntry::ElementalWellComponent(_)))
+        });
+    assert!(has_merged_well, "ElementalWell entity 13850178 must merge template well config");
+
+    // 3) MonsterPatrolPointReachedRequest resolves real SplineComponent point index on 16000135.
+    let patrol_resp = world_puzzle::handle_monster_patrol_point_reached_request(
+        &mut h.state,
+        MonsterPatrolPointReachedRequest {
+            EntityId: 16_000_135,
+            SplineEntityConfigId: 16_000_135,
+            Index: 1,
+        },
+    )
+    .expect("patrol point");
+    assert_eq!(patrol_resp.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int("patrol:pt:16000135"),
+        1
+    );
+
+    // 4) SequenceFrame start/end executes without error and records frame state.
+    let pid = h.state.player_id;
+    let seq_start = world_puzzle::handle_scene_item_sequence_frame_start_request(
+        &mut h.state,
+        SceneItemSequenceFrameStartRequest {
+            SeqGuid: b"939cd1ee14294e14bd68c2bfb112ca2e".to_vec(),
+            EventName: b"\xe6\x8c\x81\xe6\x9c\x89Tag".to_vec(),
+            HostPlayerId: pid,
+            EntityId: 13_750_003,
+        },
+    )
+    .expect("seq frame start");
+    assert_eq!(seq_start.Code, Some(ErrorCode::Success));
+    let seq_end = world_puzzle::handle_scene_item_sequence_frame_end_request(
+        &mut h.state,
+        SceneItemSequenceFrameEndRequest {
+            SeqGuid: b"939cd1ee14294e14bd68c2bfb112ca2e".to_vec(),
+            EventName: b"\xe6\x8c\x81\xe6\x9c\x89Tag".to_vec(),
+            HostPlayerId: pid,
+            EntityId: 13_750_003,
+        },
+    )
+    .expect("seq frame end");
+    assert_eq!(seq_end.Code, Some(ErrorCode::Success));
+
+    // 5) World controllers tick cleanly on Map 8.
+    let mut events = EventQueue::default();
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        world_controllers::tick_world_controllers(&mut qctx).expect("tick world controllers");
+    }
+}
+
+#[test]
+fn audit_154_activities_hydrated_from_assets_and_no_fake_fallbacks() {
+    use crate::network::handlers::{activity, endgame, roguelike};
+    use sonoro_proto::pb::{
+        ActivityDataDataOneof, BossRushClaimRewardRequest, RogueWeeklyBlackFlowerRequest,
+    };
+
+    let mut h = TestHarness::new("audit_154_act_real", Some(8));
+
+    // 1) build_activity_list hydrates real table rows across activity types.
+    let acts = activity::build_activity_list(
+        &h.state.assets,
+        &h.state.player_components.progress,
+        None,
+    );
+    assert!(!acts.is_empty());
+    let has_boss_rush = acts.iter().any(|a| matches!(
+        &a.Data,
+        Some(ActivityDataDataOneof::BossRushActivityData(br)) if !br.LevelDetailInfo.is_empty()
+    ));
+    let has_new_tower = acts.iter().any(|a| matches!(
+        &a.Data,
+        Some(ActivityDataDataOneof::NewTowerClimbingActivityData(nt)) if !nt.Records.is_empty()
+    ));
+    assert!(has_boss_rush, "BossRushActivityData must be hydrated from BossRushActivity table");
+    assert!(has_new_tower, "NewTowerClimbingActivityData must be hydrated from NewTowerLevel table");
+
+    // 2) Claiming an invalid endgame reward ID must NOT inject fake Astrite (item_id=3) / Credit.
+    let astrite_before = h
+        .state
+        .player_components
+        .inventory
+        .info
+        .normal_item_count(3);
+    let bad_claim = endgame::handle_boss_rush_claim_reward_request(
+        &mut h.state,
+        BossRushClaimRewardRequest {
+            ActivityId: 100_805_001,
+            RewardType: Some(sonoro_proto::enums::BossRushRewardType::Level),
+            RewardId: 999_999_999,
+        },
+    )
+    .expect("bad claim succeeds without fallback");
+    assert_eq!(bad_claim.ErrorCode, Some(ErrorCode::Success));
+    let astrite_after = h
+        .state
+        .player_components
+        .inventory
+        .info
+        .normal_item_count(3);
+    assert_eq!(
+        astrite_after, astrite_before,
+        "Invalid reward ID must NOT grant hardcoded Astrite fallback"
+    );
+
+    // 3) RogueWeekly black flower handles real RogueWeeklyBF SilentAreaDetectionId without fake fallback.
+    let bf = roguelike::handle_rogue_weekly_black_flower_request(
+        &mut h.state,
+        RogueWeeklyBlackFlowerRequest {
+            EntityConfigId: 1,
+            IsDouble: false,
+            Ret: true,
+            SilentAreaId: 30_010_001,
+        },
+    )
+    .expect("black flower");
+    assert_eq!(bf.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(bf.UseFreeCount, 1);
+}
+
+#[test]
+fn audit_155_throwable_pilot_throw_attributes_and_timeline_pb() {
+    use crate::network::handlers::world_puzzle;
+    use sonoro_gamesv_logic::commands::entity as entity_cmd;
+    use sonoro_proto::enums::{EControlState, PilotThrowOperationType};
+    use sonoro_proto::pb::{
+        BeControlledRequest, BeControlledThrowRequest, CombatReceivePackNotify,
+        EntityComponentPbComponentPbOneof, MoveSceneItemResetPositionRequest,
+        PilotThrowOperationRequest, TimelineTraceControlRequest, TimelineTraceStartRequest,
+    };
+
+    let mut h = TestHarness::new("audit_155_throw_attr_tl", Some(8));
+    let mut events = EventQueue::default();
+
+    // 1) Spawn real TeleControl2 throwable (122006287, DestroyCfg=[CreateBullet, LetGo]),
+    //    hold -> throw (LetGo triggers DestroyCfg hide) -> reset position restores visibility & clears BB.
+    {
+        let mut sc = h.state.scene.take().unwrap();
+        entity_cmd::call(
+            &mut events,
+            &mut sc,
+            &h.state.fs,
+            &h.state.assets,
+            &mut h.state.conn,
+            &h.state.player_components.basic,
+            122_006_287,
+            None,
+            None,
+        )
+        .expect("spawn throwable 122006287");
+        h.state.scene = Some(sc);
+    }
+    h.drain_count();
+    let throw_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(122_006_287)
+        .expect("122006287 net id");
+    let hold_resp = world_puzzle::handle_be_controlled_request(
+        &mut h.state,
+        BeControlledRequest {
+            EntityId: throw_nid,
+            IsControl: true,
+        },
+    )
+    .expect("be controlled hold");
+    assert_eq!(hold_resp.ErrorCode, Some(ErrorCode::Success));
+
+    let letgo_resp = world_puzzle::handle_be_controlled_throw_request(
+        &mut h.state,
+        BeControlledThrowRequest {
+            EntityId: throw_nid,
+            ControlState: Some(EControlState::LetGo),
+            ThrowType: 0,
+        },
+    )
+    .expect("be controlled let go");
+    assert_eq!(letgo_resp.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int("item_bb:122006287:0"),
+        11
+    );
+    assert!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .has_claim("be_ctrl:destroy:122006287"),
+        "LetGo must honor TeleControl2 DestroyCfg"
+    );
+    assert!(
+        !h.drain_decoded::<CombatReceivePackNotify>(CombatReceivePackNotify::MSG_ID)
+            .is_empty(),
+        "DestroyCfg hide must push CombatReceivePackNotify visibility update"
+    );
+    let throw_pb = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .entity(throw_nid)
+        .unwrap()
+        .to_proto(&h.state.assets, 0);
+    assert!(throw_pb.ComponentPbs.iter().any(|c| matches!(
+        &c.ComponentPb,
+        Some(EntityComponentPbComponentPbOneof::BlackboardParamComponent(bb)) if !bb.BlackboardParams.is_empty()
+    )));
+
+    let reset_resp = world_puzzle::handle_move_scene_item_reset_position_request(
+        &mut h.state,
+        MoveSceneItemResetPositionRequest {
+            EntityId: throw_nid,
+            ResetEntityId: throw_nid,
+            SceneOwnerId: 0,
+        },
+    )
+    .expect("reset throwable");
+    assert_eq!(reset_resp.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int("item_bb:122006287:0"),
+        0
+    );
+    assert!(
+        !h.state
+            .player_components
+            .progress
+            .info
+            .has_claim("be_ctrl:destroy:122006287")
+    );
+
+    // 2) PilotThrowOperationRequest clears hook active state and finishes active PilotThrow target.
+    {
+        let info = &mut h.state.player_components.progress.info;
+        info.set_key_int("hook_point:active:122006287", 1);
+        info.set_key_int("pilot_throw:hook_net", throw_nid);
+        info.set_key_int("pilot_throw:hook_cfg", 122_006_287);
+        info.set_key_int("pilot_throw:titan_cfg", 147_750_026);
+    }
+    let pilot_resp = world_puzzle::handle_pilot_throw_operation_request(
+        &mut h.state,
+        PilotThrowOperationRequest {
+            OpType: Some(PilotThrowOperationType::Ptothrow),
+        },
+    )
+    .expect("pilot throw");
+    assert_eq!(pilot_resp.ErrorCode, Some(ErrorCode::Success));
+    assert_eq!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int("pilot_throw:hook_cfg"),
+        0
+    );
+    assert_eq!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_entity_state(122_006_287),
+        Some("关卡.Common.状态.完成")
+    );
+
+    // 3) TimelineTrackComponentPb and SceneItemAttributeComponentPb emit cleanly on spawn & trace control.
+    {
+        let mut sc = h.state.scene.take().unwrap();
+        entity_cmd::call(
+            &mut events,
+            &mut sc,
+            &h.state.fs,
+            &h.state.assets,
+            &mut h.state.conn,
+            &h.state.player_components.basic,
+            133_003_532,
+            None,
+            None,
+        )
+        .expect("spawn timeline 133003532");
+        entity_cmd::call(
+            &mut events,
+            &mut sc,
+            &h.state.fs,
+            &h.state.assets,
+            &mut h.state.conn,
+            &h.state.player_components.basic,
+            147_750_026,
+            None,
+            None,
+        )
+        .expect("spawn attr entity 147750026");
+        h.state.scene = Some(sc);
+    }
+    let tl_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(133_003_532)
+        .expect("133003532 net id");
+    let tl_pb = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .entity(tl_nid)
+        .unwrap()
+        .to_proto(&h.state.assets, 0);
+    assert!(tl_pb.ComponentPbs.iter().any(|c| matches!(
+        &c.ComponentPb,
+        Some(EntityComponentPbComponentPbOneof::TimelineTrackComponentPb(t)) if !t.ControlDatas.is_empty()
+    )));
+    let attr_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(147_750_026)
+        .expect("147750026 net id");
+    let attr_pb = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .entity(attr_nid)
+        .unwrap()
+        .to_proto(&h.state.assets, 0);
+    assert!(attr_pb.ComponentPbs.iter().any(|c| matches!(
+        &c.ComponentPb,
+        Some(EntityComponentPbComponentPbOneof::AttributesIdsComponentPb(a)) if !a.PbSceneItemAttributeIds.is_empty()
+    )));
+
+    let tl_start = world_puzzle::handle_timeline_trace_start_request(
+        &mut h.state,
+        TimelineTraceStartRequest {
+            EntityId: tl_nid,
+            Index: 0,
+        },
+    )
+    .expect("timeline start");
+    assert_eq!(tl_start.Code, Some(ErrorCode::Success));
+    let tl_ctrl = world_puzzle::handle_timeline_trace_control_request(
+        &mut h.state,
+        TimelineTraceControlRequest {
+            EntityId: tl_nid,
+            Forward: true,
+        },
+    )
+    .expect("timeline forward");
+    assert_eq!(tl_ctrl.Code, Some(ErrorCode::Success));
+    assert_eq!(tl_ctrl.ControlPoint, 1);
+
+    // 4) EntityRewardItemPb and BubbleComponent emit cleanly for TreasureBox and active play bubbles.
+    {
+        let mut sc = h.state.scene.take().unwrap();
+        sc.add_play_bubble(102_002_186, "test-bubble-guid");
+        entity_cmd::call(
+            &mut events,
+            &mut sc,
+            &h.state.fs,
+            &h.state.assets,
+            &mut h.state.conn,
+            &h.state.player_components.basic,
+            102_002_186,
+            None,
+            None,
+        )
+        .expect("spawn chest 102002186");
+        h.state.scene = Some(sc);
+    }
+    let box_nid = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(102_002_186)
+        .expect("102002186 net id");
+    let box_pb = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .entity(box_nid)
+        .unwrap()
+        .to_proto(&h.state.assets, 0);
+    assert!(box_pb.ComponentPbs.iter().any(|c| matches!(
+        &c.ComponentPb,
+        Some(EntityComponentPbComponentPbOneof::EntityRewardItemPb(r)) if r.HasCount == 1
+    )));
+    assert!(box_pb.ComponentPbs.iter().any(|c| matches!(
+        &c.ComponentPb,
+        Some(EntityComponentPbComponentPbOneof::BubbleComponent(b)) if !b.BubbleInfos.is_empty()
+    )));
+
+    // 5) RoadNetworkComponentPb emits on RoadNetworkNavigationComponent entity and updates on push.
+    let mut h_road = TestHarness::new("audit_155_road", Some(100));
+    {
+        let mut sc = h_road.state.scene.take().unwrap();
+        entity_cmd::call(
+            &mut events,
+            &mut sc,
+            &h_road.state.fs,
+            &h_road.state.assets,
+            &mut h_road.state.conn,
+            &h_road.state.player_components.basic,
+            36_000_411,
+            None,
+            None,
+        )
+        .expect("spawn road nav entity 36000411");
+        h_road.state.scene = Some(sc);
+    }
+    let road_nid = h_road
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(36_000_411)
+        .expect("36000411 net id");
+    world_puzzle::handle_road_network_entity_update_cur_road_push(
+        &mut h_road.state,
+        sonoro_proto::pb::RoadNetworkEntityUpdateCurRoadPush {
+            EntityId: road_nid,
+            CurRoadId: 12,
+            CurRoadIndex: 3,
+        },
+    )
+    .expect("road nav push");
+    let road_pb = h_road
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .entity(road_nid)
+        .unwrap()
+        .to_proto(&h_road.state.assets, 0);
+    assert!(road_pb.ComponentPbs.iter().any(|c| matches!(
+        &c.ComponentPb,
+        Some(EntityComponentPbComponentPbOneof::RoadNetworkComponentPb(rn)) if rn.DestRoadId == 12 && rn.DestIndex == 3
+    )));
+}
+
 
 
 

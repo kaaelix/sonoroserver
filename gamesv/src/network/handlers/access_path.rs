@@ -1,3 +1,4 @@
+use sonoro_gamesv_logic::helpers::energy;
 use sonoro_proto::pb::{
     AccessPathTimeServerConfig, AccessPathTimeServerConfigRequest, AccessPathTimeServerConfigResponse,
 };
@@ -9,7 +10,9 @@ pub fn handle_access_path_time_server_config_request(
     _req: AccessPathTimeServerConfigRequest,
 ) -> Result<AccessPathTimeServerConfigResponse, String> {
     let rows = state.assets.reward_index.get_rows("AccessPath");
-    let mut configs = Vec::new();
+    // SkipInterfaceModel.IsAccessPathInOpenTime compares against server timestamp in milliseconds.
+    let end_ms = (energy::now_seconds() + 315_360_000).saturating_mul(1000);
+    let mut configs = Vec::with_capacity(rows.len());
     for row in rows.iter() {
         if row.key <= 0 {
             continue;
@@ -17,11 +20,8 @@ pub fn handle_access_path_time_server_config_request(
         configs.push(AccessPathTimeServerConfig {
             Id: row.key as i32,
             BeginTime: 1,
-            EndTime: 2_000_000_000,
+            EndTime: end_ms,
         });
-        if configs.len() >= 128 {
-            break;
-        }
     }
     Ok(AccessPathTimeServerConfigResponse {
         AccessPathTimeServerConfig: configs,

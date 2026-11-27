@@ -144,6 +144,14 @@ pub fn handle_change_player_title_request(
                 PlayerTitleExtraParam: if req.PlayerTitleId == 0 { 0 } else { 1 },
             },
         );
+        if let Some(coop) = state.coop_service.as_ref() {
+            coop.notify_player_info_change(
+                state.player_id,
+                sonoro_proto::enums::WorldTeamPlayerChangeType::PlayerTitle,
+                req.PlayerTitleId,
+                "",
+            );
+        }
     }
     Ok(ChangePlayerTitleResponse {
         ErrorCode: Some(ErrorCode::Success),
@@ -205,6 +213,14 @@ pub fn handle_modify_name_request(
             LastModifyNameTime: last_modify,
         },
     );
+    if let Some(coop) = state.coop_service.as_ref() {
+        coop.notify_player_info_change(
+            state.player_id,
+            sonoro_proto::enums::WorldTeamPlayerChangeType::Name,
+            0,
+            &state.player_components.basic.info.attributes.name,
+        );
+    }
 
     Ok(ModifyNameResponse {
         Name: name_bytes,
@@ -227,6 +243,14 @@ pub fn handle_change_head_photo_request(
     {
         state.player_components.basic.info.attributes.head_photo = req.HeadPhotoId;
         save_basic_info(state)?;
+        if let Some(coop) = state.coop_service.as_ref() {
+            coop.notify_player_info_change(
+                state.player_id,
+                sonoro_proto::enums::WorldTeamPlayerChangeType::Head,
+                req.HeadPhotoId,
+                "",
+            );
+        }
     }
     Ok(ChangeHeadPhotoResponse {
         HeadPhotoId: state.player_components.basic.info.attributes.head_photo,
@@ -275,6 +299,14 @@ pub fn handle_modify_signature_request(
             }],
         },
     );
+    if let Some(coop) = state.coop_service.as_ref() {
+        coop.notify_player_info_change(
+            state.player_id,
+            sonoro_proto::enums::WorldTeamPlayerChangeType::Signature,
+            0,
+            &state.player_components.basic.info.attributes.sign,
+        );
+    }
 
     Ok(ModifySignatureResponse {
         Signature: sig_bytes,

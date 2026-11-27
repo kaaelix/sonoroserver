@@ -6,6 +6,8 @@ pub struct HookInteractConfig {
     #[serde(default)]
     pub Type: Option<String>,
     #[serde(default)]
+    pub TitanEntityId: Option<i64>,
+    #[serde(default)]
     pub GravityDirection: Option<crate::tables::entity_components::base_info::GravityDirection>,
     #[serde(default)]
     pub HookActions: Option<Vec<serde_json::Value>>,
@@ -371,6 +373,8 @@ pub struct DynamicPortalCreatorComponent {
 pub struct DynamicSpawnMonsterComponent {
     #[serde(default)]
     pub Disabled: Option<bool>,
+    #[serde(default)]
+    pub Group: Vec<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]
@@ -461,11 +465,11 @@ pub struct EnrichmentAreaComponent {
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct EntityBatchRefreshComponent {
     #[serde(default)]
-    pub EndCondition: Option<crate::tables::EmptyObj>,
+    pub EndCondition: Option<serde_json::Value>,
     #[serde(default)]
-    pub EntityBatchRefresh: Option<crate::tables::EmptyObj>,
+    pub EntityBatchRefresh: Option<serde_json::Value>,
     #[serde(default)]
-    pub StartCondition: Option<crate::tables::EmptyObj>,
+    pub StartCondition: Option<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]
@@ -925,9 +929,28 @@ pub struct LevelQteComponent {
 
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct LevelSequenceSectionInfo {
+    #[serde(default)]
+    pub Type: String,
+    #[serde(default)]
+    pub Key: String,
+    #[serde(default)]
+    pub FrameId: i32,
+    #[serde(default)]
+    pub State: Option<String>,
+    #[serde(default)]
+    pub ActionList: Vec<serde_json::Value>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct LevelSequenceFrameEventComponent {
     #[serde(default)]
     pub Disabled: Option<bool>,
+    #[serde(default)]
+    pub ForwardSections: Vec<LevelSequenceSectionInfo>,
+    #[serde(default)]
+    pub BackWardSections: Vec<LevelSequenceSectionInfo>,
 }
 
 #[allow(non_snake_case)]
@@ -1341,6 +1364,8 @@ pub struct SceneItemAttributeComponent {
 pub struct SceneItemEventListenerComponent {
     #[serde(default)]
     pub Disabled: Option<bool>,
+    #[serde(default)]
+    pub Events: Vec<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]
@@ -1539,6 +1564,8 @@ pub struct TemplateEntitySpawnerComponent {
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct TimeScheduleComponent {
+    #[serde(default)]
+    pub TimeScheduleConfigs: Vec<serde_json::Value>,
 }
 
 #[allow(non_snake_case)]

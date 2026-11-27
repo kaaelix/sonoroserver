@@ -405,6 +405,15 @@ pub fn handle_role_sex_change_request(
             ..Default::default()
         },
     );
+    if let Some(coop) = state.coop_service.as_ref() {
+        coop.update_active_role(state.player_id, target_role_id);
+        coop.notify_player_info_change(
+            state.player_id,
+            sonoro_proto::enums::WorldTeamPlayerChangeType::Sex,
+            target_gender,
+            "",
+        );
+    }
 
     Ok(RoleSexChangeResponse {
         ErrorCode: Some(ErrorCode::Success),
@@ -635,6 +644,9 @@ pub fn handle_switch_role_request(
     if let Err(err) = scene.save_persistent(fs) {
         tracing::error!("switch_role save_persistent failed: {err}");
     }
+    if let Some(coop) = state.coop_service.as_ref() {
+        coop.update_active_role(state.player_id, req.RoleId);
+    }
     SwitchRoleResponse {
         ErrorCode: Some(ErrorCode::Success),
         RoleId: req.RoleId,
@@ -653,6 +665,9 @@ pub fn handle_client_current_role_report_push(
         && let Err(err) = scene.save_persistent(&state.fs)
     {
         tracing::error!("client_current_role_report_push save_persistent failed: {err}");
+    }
+    if let Some(coop) = state.coop_service.as_ref() {
+        coop.update_active_role(state.player_id, push.CurrentRoleId);
     }
 }
 

@@ -740,16 +740,6 @@ pub fn register_all(map: &mut HashMap<u16, HandlerFn>) {
             },
         )
     });
-    map.insert(msg_id::MUTIPLAYER_TEAM_REFRESH_NEAR_LIST_REQUEST, |_, _| {
-        ok_resp(
-            msg_id::MUTIPLAYER_TEAM_REFRESH_NEAR_LIST_RESPONSE,
-            &MutiplayerTeamRefreshNearListResponse {
-                ErrorCode: Some(ErrorCode::Success),
-                NextRefreshTime: 5,
-                ..Default::default()
-            },
-        )
-    });
     map.insert(msg_id::PLAYER_CREATE_XBOX_SESSION_REQUEST, |_, _| {
         ok_resp(
             msg_id::PLAYER_CREATE_XBOX_SESSION_RESPONSE,

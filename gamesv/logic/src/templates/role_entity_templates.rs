@@ -416,6 +416,14 @@ pub fn create_role_entity(
             ..Default::default()
         });
     }
+    if instance_dungeon.InstType == 1 && !role_base_buffs.iter().any(|b| b.id == 64_001_2051) {
+        role_base_buffs.push(BuffAdditionEntry {
+            id: 64_001_2051,
+            stack_count: 1,
+            is_active: true,
+            ..Default::default()
+        });
+    }
 
     let ornament_born_buff_ids =
         cosmetics::build_ornament_born_buff_ids_for_ids(assets, &ornament_ids);

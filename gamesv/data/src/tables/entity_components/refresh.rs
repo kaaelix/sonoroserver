@@ -10,4 +10,8 @@ pub struct RefreshComponent {
     pub IsDisableRefreshAfterDroppingReward: Option<bool>,
     #[serde(default)]
     pub RefreshRule: serde_json::Value,
+    #[serde(default)]
+    pub RefreshContent: serde_json::Value,
+    #[serde(default)]
+    pub EntityIds: Vec<i64>,
 }

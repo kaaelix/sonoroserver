@@ -13,33 +13,33 @@ use sonoro_gamesv_logic::helpers::{
 };
 use sonoro_proto::enums::{BuffOperateType, EAttributeType, ErrorCode, LivingStatus};
 use sonoro_proto::pb::{
-    ANStartPush, ActivateBuffPush, ActiveBuffPush, ActorVisiblePush, AnimationGameplayTagPush,
-    AnimationStateChangedPush, AnimationStateChangedRequest, AnimationStateChangedResponse,
-    AnimationStateInitPush, ApplyBuffS2cResponsePush, ApplyGameplayEffectPush,
-    AtomicProcessAddBuffRequest, AtomicProcessAddBuffResponse, AtomicProcessRemoveBuffRequest,
-    AtomicProcessRemoveBuffResponse, AtomicProcessTeleportRequest, AtomicProcessTeleportResponse,
-    AvoidBlockClientInitDoneRequest, AvoidBlockClientInitDoneResponse,
-    AvoidBlockSubmitOverNodeRequest, AvoidBlockSubmitOverNodeResponse, BeamCastHitPlayerRequest,
-    BeamCastHitPlayerResponse, BeforeHitPush, BoneVisibleChangePush, BuffEffectExecutePush,
-    BuffEffectPush, BuffItem, BuffItemRequest, BuffItemResponse, BuffStackCountPush,
-    BulletPatternPush, CaughtPush, ChangeStateConfirmPush, ChangeStateRequest,
-    ChangeStateResponse, ChangeSummonEntityStateRequest, ChangeSummonEntityStateResponse,
-    CheckClientPush, CheckUseSoundBoxSkillRequest, CheckUseSoundBoxSkillResponse,
-    ClientBasicInfoRequest, ClientBasicInfoResponse, ClientCurrentRoleReportPush,
-    CombatCommon, CombatNotifyData, CombatNotifyDataMessageOneof, CombatPushDataMessageOneof,
-    CombatReceiveData, CombatReceiveDataMessageOneof, CombatReceivePackNotify,
-    CombatRequestDataMessageOneof, CombatResponseDataMessageOneof, CreateBulletPush,
-    CreateBulletRequest, CreateBulletResponse, DErrorResult, DamageExecuteRequest,
-    DamageExecuteResponse,
-    DeadeyeShootHitRequest, DeadeyeShootHitResponse, DestroyBulletPush, DetectionEntityPosInfo,
-    DodgeInfoPush, DrownEndTeleportPush, DrownPush, EndSkillPush, EnterViewDirectionPush,
+    ANStartPush, ActivateBuffPush, ActiveBuffPush, ActorVisiblePush, AiBlackboardsPush,
+    AnimationGameplayTagPush, AnimationStateChangedPush, AnimationStateChangedRequest,
+    AnimationStateChangedResponse, AnimationStateInitPush, ApplyBuffS2cResponsePush,
+    ApplyGameplayEffectPush, AtomicProcessAddBuffRequest, AtomicProcessAddBuffResponse,
+    AtomicProcessRemoveBuffRequest, AtomicProcessRemoveBuffResponse, AtomicProcessTeleportRequest,
+    AtomicProcessTeleportResponse, AvoidBlockClientInitDoneRequest,
+    AvoidBlockClientInitDoneResponse, AvoidBlockSubmitOverNodeRequest,
+    AvoidBlockSubmitOverNodeResponse, BeamCastHitPlayerRequest, BeamCastHitPlayerResponse,
+    BeforeHitPush, BoneVisibleChangePush, BuffEffectExecutePush, BuffEffectPush, BuffItem,
+    BuffItemRequest, BuffItemResponse, BuffStackCountPush, BulletPatternPush, CaughtPush,
+    ChangeStateConfirmPush, ChangeStateRequest, ChangeStateResponse,
+    ChangeSummonEntityStateRequest, ChangeSummonEntityStateResponse, CheckClientPush,
+    CheckUseSoundBoxSkillRequest, CheckUseSoundBoxSkillResponse, ClientBasicInfoRequest,
+    ClientBasicInfoResponse, ClientCurrentRoleReportPush, CombatCommon, CombatNotifyData,
+    CombatNotifyDataMessageOneof, CombatPushDataMessageOneof, CombatReceiveData,
+    CombatReceiveDataMessageOneof, CombatReceivePackNotify, CombatRequestDataMessageOneof,
+    CombatResponseDataMessageOneof, CreateBulletPush, CreateBulletRequest, CreateBulletResponse,
+    DErrorResult, DamageExecuteRequest, DamageExecuteResponse, DeadeyeShootHitRequest,
+    DeadeyeShootHitResponse, DestroyBulletPush, DetectionEntityPosInfo, DodgeInfoPush,
+    DrownEndTeleportPush, DrownPush, EndSkillPush, EnterViewDirectionPush,
     EntityBuffProducerOperateRequest, EntityBuffProducerOperateResponse,
     EntityBuffProducerRequest, EntityBuffProducerResponse, EntityIsVisiblePush,
     EntityIsVisibleRequest, EntityIsVisibleResponse, EntityLivingStatusNotify,
-    EntityStaticHookMovePush, EntityStaticHookMoveRequest, EntityStaticHookMoveResponse,
-    ExecuteQtePush, ExecuteQteRequest, ExecuteQteResponse, ExitViewDirectionPush,
-    ExploreSkillActionRequest, ExploreSkillActionResponse, FragileChangeRequest,
-    FragileChangeResponse, FsmConditionPassPush, FsmStateBehaviorRequest,
+    EntityRemoveInfo, EntityRemoveNotify, EntityStaticHookMovePush, EntityStaticHookMoveRequest,
+    EntityStaticHookMoveResponse, ExecuteQtePush, ExecuteQteRequest, ExecuteQteResponse,
+    ExitViewDirectionPush, ExploreSkillActionRequest, ExploreSkillActionResponse,
+    FragileChangeRequest, FragileChangeResponse, FsmConditionPassPush, FsmStateBehaviorRequest,
     FsmStateBehaviorResponse, GameplayCuePush, GameplayTagPush, GmEntityFsmGroupInfoRequest,
     GmEntityFsmGroupInfoResponse, GmEntityFsmMachineInfo, GmEntityFsmStateInfo, HitEndPush,
     HitRequest, HitResponse, InterruptSkillInDelayPush, LogicStateInitPush, MaterialPush,
@@ -47,22 +47,22 @@ use sonoro_proto::pb::{
     OrderApplyBuffRequest, OrderApplyBuffResponse, OrderRemoveBuffByTagsRequest,
     OrderRemoveBuffByTagsResponse, OrderRemoveBuffRequest, OrderRemoveBuffResponse,
     PassiveSkillAddPush, PassiveSkillRemovePush, QuickHackOpenPush, QuickHackRamVerifyPush,
-    QuickHackSkillRequest, QuickHackSkillResponse, RTimeStopAnimPush, RTimeStopPush,
-    RefreshBuffDurationPush, RemoveBuffByIdS2cResponsePush, RemoveBuffS2cResponsePush,
-    RemoveGameplayEffectPush, RoleGoDownPush, RoleSkinTrialUiEndPush, RoleTrialUiEndPush,
-    SecFBRoundEndFlowReportRequest, SecFBRoundEndFlowReportResponse, SecFBRoundStartFlowRequest,
-    SecFBRoundStartFlowResponse, SecRoleFightFlowRequest, SecRoleFightFlowResponse,
-    SecWorldInfoFlowRequest, SecWorldInfoFlowResponse, SecWorldSEndFlowRequest,
-    SecWorldSEndFlowResponse, SecWorldStartFlowRequest, SecWorldStartFlowResponse,
-    SetClientGlobalVarRequest, SetClientGlobalVarResponse,
-    SimpleCombatEntityDieRequest, SimpleCombatEntityDieResponse,
+    QuickHackSkillRequest, QuickHackSkillResponse, RTimeStopAnimPush, RTimeStopInstPush,
+    RTimeStopPush, RefreshBuffDurationPush, RemoveBuffByIdS2cResponsePush,
+    RemoveBuffS2cResponsePush, RemoveGameplayEffectPush, RoleGoDownPush, RoleSkinTrialUiEndPush,
+    RoleTrialSceneRollbackPush, RoleTrialUiEndPush, SecFBRoundEndFlowReportRequest,
+    SecFBRoundEndFlowReportResponse, SecFBRoundStartFlowRequest, SecFBRoundStartFlowResponse,
+    SecRoleFightFlowRequest, SecRoleFightFlowResponse, SecWorldInfoFlowRequest,
+    SecWorldInfoFlowResponse, SecWorldSEndFlowRequest, SecWorldSEndFlowResponse,
+    SecWorldStartFlowRequest, SecWorldStartFlowResponse, SetClientGlobalVarRequest,
+    SetClientGlobalVarResponse, SimpleCombatEntityDieRequest, SimpleCombatEntityDieResponse,
     SimpleCombatEntitySyncAttributePush, SimpleTrackReportMsg, SimpleTrackReportRequest,
-    SimpleTrackReportResponse, SkillRequest, SkillResponse, SlowTimePush,
-    SwitchLogicStatePush, SwitchRoleRequest, SwitchRoleResponse, TargetGearHitRequest,
-    TargetGearHitResponse, ThrowDamageNotify, ThrowDamageRequest, ThrowDamageResponse,
-    ToughCalcExtraRatioChangePush, UseSkillFailPush, UseSkillRequest, UseSkillResponse,
-    UseSoundBoxSkillRequest, UseSoundBoxSkillResponse, VarDefinePbValueOneof, Vector,
-    VisionTriggerPush, EntityRemoveInfo, EntityRemoveNotify,
+    SimpleTrackReportResponse, SkillRequest, SkillResponse, SlowTimePush, SwitchLogicStatePush,
+    SwitchRoleRequest, SwitchRoleResponse, TargetGearHitRequest, TargetGearHitResponse,
+    ThrowDamageNotify, ThrowDamageRequest, ThrowDamageResponse, ToughCalcExtraRatioChangePush,
+    TriggerExitSkillPush, TsAnimNotifyStateAbsoluteTimeStopPush, UseSkillFailPush,
+    UseSkillRequest, UseSkillResponse, UseSoundBoxSkillRequest, UseSoundBoxSkillResponse,
+    VarDefinePbValueOneof, Vector, VisionTriggerPush,
 };
 use sonoro_proto::wire::PbEnum;
 
@@ -109,6 +109,21 @@ impl_combat_success_error_code!(
     FragileChangeResponse,
 );
 
+fn broadcast_combat_pack(state: &State, receive_pack: &[CombatReceiveData]) {
+    if receive_pack.is_empty() {
+        return;
+    }
+    if let Some(coop) = state.coop_service.as_ref() {
+        coop.broadcast_room_except(
+            state.player_id,
+            CombatReceivePackNotify::MSG_ID,
+            &CombatReceivePackNotify {
+                Data: receive_pack.to_vec(),
+            },
+        );
+    }
+}
+
 fn forward_combat_req<T, F>(
     state: &mut State,
     events: &mut EventQueue,
@@ -124,6 +139,7 @@ where
     let resp_msg =
         super::combat::dispatch_combat_request(state, events, common, req, &mut receive_pack);
     if !receive_pack.is_empty() {
+        broadcast_combat_pack(state, &receive_pack);
         let _ = state.conn.push_msg(
             CombatReceivePackNotify::MSG_ID,
             &CombatReceivePackNotify { Data: receive_pack },
@@ -143,6 +159,7 @@ fn forward_combat_push(
     let mut receive_pack = Vec::new();
     super::combat::dispatch_combat_push(state, events, common, push, &mut receive_pack);
     if !receive_pack.is_empty() {
+        broadcast_combat_pack(state, &receive_pack);
         let _ = state.conn.push_msg(
             CombatReceivePackNotify::MSG_ID,
             &CombatReceivePackNotify { Data: receive_pack },
@@ -718,10 +735,77 @@ pub fn handle_gameplay_tag_push(
 }
 
 pub fn handle_r_time_stop_anim_push(
-    _state: &mut State,
-    _events: &mut EventQueue,
-    _msg: RTimeStopAnimPush,
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: RTimeStopAnimPush,
 ) -> Result<(), String> {
+    forward_combat_push(
+        state,
+        events,
+        None,
+        CombatPushDataMessageOneof::TsAnimNotifyStateAbsoluteTimeStopPush(
+            TsAnimNotifyStateAbsoluteTimeStopPush {
+                Duration: msg.Duration,
+                Dilation: msg.Dilation,
+            },
+        ),
+    );
+    Ok(())
+}
+
+pub fn handle_ai_blackboards_push(
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: AiBlackboardsPush,
+) -> Result<(), String> {
+    forward_combat_push(
+        state,
+        events,
+        None,
+        CombatPushDataMessageOneof::AiBlackboardsPush(msg),
+    );
+    Ok(())
+}
+
+pub fn handle_trigger_exit_skill_push(
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: TriggerExitSkillPush,
+) -> Result<(), String> {
+    forward_combat_push(
+        state,
+        events,
+        None,
+        CombatPushDataMessageOneof::TriggerExitSkillPush(msg),
+    );
+    Ok(())
+}
+
+pub fn handle_r_time_stop_inst_push(
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: RTimeStopInstPush,
+) -> Result<(), String> {
+    forward_combat_push(
+        state,
+        events,
+        None,
+        CombatPushDataMessageOneof::RTimeStopInstPush(msg),
+    );
+    Ok(())
+}
+
+pub fn handle_role_trial_scene_rollback_push(
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: RoleTrialSceneRollbackPush,
+) -> Result<(), String> {
+    forward_combat_push(
+        state,
+        events,
+        None,
+        CombatPushDataMessageOneof::RoleTrialSceneRollbackPush(msg),
+    );
     Ok(())
 }
 

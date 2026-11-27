@@ -3309,6 +3309,7 @@ pub fn on_time_changed<S: PushSink + ?Sized>(
     };
     ctx.quest_comp.info.env.time_lock_hour = hour;
     ctx.quest_comp.info.env.time_lock_minute = minute;
+    crate::helpers::world_controllers::tick_time_schedules(ctx, hour, minute)?;
 
     let cur_day = ctx
         .scene

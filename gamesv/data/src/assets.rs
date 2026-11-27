@@ -291,6 +291,7 @@ pub struct Assets {
     pub spring_festival_areas: Vec<SpringFestivalAreaEntry>,
     pub spring_festival_skip_entries: Vec<SpringFestivalSkipEntryCfg>,
     pub spring_festival_rewards: Vec<SpringFestivalRewardEntry>,
+    pub gameplay_cache: crate::gameplay_tables::GameplayTableCache,
 }
 
 fn read_raw_table_str(
@@ -422,6 +423,7 @@ impl Assets {
             spring_festival_areas,
             spring_festival_skip_entries,
             spring_festival_rewards,
+            gameplay_cache: Default::default(),
         })
     }
 
@@ -452,10 +454,263 @@ impl Assets {
     }
 
     pub fn read_raw_json_array(&self, table_name: &str) -> Vec<serde_json::Value> {
-        self.read_raw_file(table_name)
+        self.raw_json_cached(table_name).as_ref().clone()
+    }
+
+    pub fn raw_json_cached(&self, table_name: &str) -> Arc<Vec<serde_json::Value>> {
+        {
+            let guard = self
+                .gameplay_cache
+                .raw_json_arrays
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(hit) = guard.get(table_name) {
+                return Arc::clone(hit);
+            }
+        }
+        let parsed = self
+            .read_raw_file(table_name)
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
             .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        let arc = Arc::new(parsed);
+        let mut guard = self
+            .gameplay_cache
+            .raw_json_arrays
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        Arc::clone(
+            guard
+                .entry(table_name.to_string())
+                .or_insert_with(|| Arc::clone(&arc)),
+        )
+    }
+
+    pub fn parse_raw_vec_cached<T: serde::de::DeserializeOwned>(&self, table_name: &str) -> Vec<T> {
+        self.read_raw_file(table_name)
+            .and_then(|raw| serde_json::from_str::<Vec<T>>(&raw).ok())
             .unwrap_or_default()
+    }
+
+    pub fn direct_train_activities(
+        &self,
+    ) -> &[crate::gameplay_tables::DirectTrainActivityEntry] {
+        self.gameplay_cache
+            .direct_train_activities
+            .get_or_init(|| self.parse_raw_vec_cached("DirectTrainActivity"))
+    }
+
+    pub fn direct_train_main(&self) -> &[crate::gameplay_tables::DirectTrainMainEntry] {
+        self.gameplay_cache
+            .direct_train_main
+            .get_or_init(|| self.parse_raw_vec_cached("DirectTrainMain"))
+    }
+
+    pub fn level_play_mappings(
+        &self,
+    ) -> &[crate::gameplay_tables::LevelPlayInfoMappingEntry] {
+        self.gameplay_cache
+            .level_play_mappings
+            .get_or_init(|| self.parse_raw_vec_cached("LevelPlayInfoMappingConfig"))
+    }
+
+    pub fn punish_reports(&self) -> &[crate::gameplay_tables::PunishReportEntry] {
+        self.gameplay_cache
+            .punish_reports
+            .get_or_init(|| self.parse_raw_vec_cached("PunishReport"))
+    }
+
+    pub fn coop_roles(&self) -> &[crate::gameplay_tables::CoopRoleEntry] {
+        self.gameplay_cache
+            .coop_roles
+            .get_or_init(|| self.parse_raw_vec_cached("CoopRole"))
+    }
+
+    pub fn coop_role_levels(&self) -> &[crate::gameplay_tables::CoopRoleLevelEntry] {
+        self.gameplay_cache
+            .coop_role_levels
+            .get_or_init(|| self.parse_raw_vec_cached("CoopRoleLevel"))
+    }
+
+    pub fn coop_tasks(&self) -> &[crate::gameplay_tables::CoopTaskConfigEntry] {
+        self.gameplay_cache
+            .coop_tasks
+            .get_or_init(|| self.parse_raw_vec_cached("CoopTaskConfig"))
+    }
+
+    pub fn coop_sp_rewards(&self) -> &[crate::gameplay_tables::CoopSpRewardEntry] {
+        self.gameplay_cache
+            .coop_sp_rewards
+            .get_or_init(|| self.parse_raw_vec_cached("CoopSpReward"))
+    }
+
+    pub fn team_parkour_cfgs(&self) -> &[crate::gameplay_tables::TeamParkourCfgEntry] {
+        self.gameplay_cache
+            .team_parkour_cfgs
+            .get_or_init(|| self.parse_raw_vec_cached("TeamParKOurCfg"))
+    }
+
+    pub fn team_parkour_rewards(&self) -> &[crate::gameplay_tables::TeamParkourRewardEntry] {
+        self.gameplay_cache
+            .team_parkour_rewards
+            .get_or_init(|| self.parse_raw_vec_cached("TeamParKOurReward"))
+    }
+
+    pub fn time_schedules(&self) -> &[crate::gameplay_tables::TimeScheduleEntry] {
+        self.gameplay_cache
+            .time_schedules
+            .get_or_init(|| self.parse_raw_vec_cached("TimeSchedule"))
+    }
+
+    pub fn mow_tower_levels(&self) -> &[crate::gameplay_tables::MultiHalfInstLevelEntry] {
+        self.gameplay_cache
+            .mow_tower_levels
+            .get_or_init(|| self.parse_raw_vec_cached("MowTowerLevelsRe"))
+    }
+
+    pub fn slash_and_tower_cfgs(&self) -> &[crate::gameplay_tables::MultiHalfInstLevelEntry] {
+        self.gameplay_cache
+            .slash_and_tower_cfgs
+            .get_or_init(|| self.parse_raw_vec_cached("SlashAndTowerCfg"))
+    }
+
+    pub fn boss_piling_levels(&self) -> &[crate::gameplay_tables::MultiHalfInstLevelEntry] {
+        self.gameplay_cache
+            .boss_piling_levels
+            .get_or_init(|| self.parse_raw_vec_cached("BossPilingLevels"))
+    }
+
+    pub fn rogue_room_pools(&self) -> &[crate::gameplay_tables::RogueRoomPoolEntry] {
+        self.gameplay_cache
+            .rogue_room_pools
+            .get_or_init(|| self.parse_raw_vec_cached("RogueRoomPool"))
+    }
+
+    pub fn rogue_room_types(&self) -> &[crate::gameplay_tables::RogueRoomTypeEntry] {
+        self.gameplay_cache
+            .rogue_room_types
+            .get_or_init(|| self.parse_raw_vec_cached("RogueRoomType"))
+    }
+
+    pub fn rogue_season_rewards(&self) -> &[crate::gameplay_tables::RogueSeasonRewardEntry] {
+        self.gameplay_cache
+            .rogue_season_rewards
+            .get_or_init(|| self.parse_raw_vec_cached("RogueSeasonReward"))
+    }
+
+    pub fn abyss_insts(&self) -> &[crate::gameplay_tables::AbyssInstEntry] {
+        self.gameplay_cache
+            .abyss_insts
+            .get_or_init(|| self.parse_raw_vec_cached("AbyssInst"))
+    }
+
+    pub fn abyss_rooms(&self) -> &[crate::gameplay_tables::AbyssRoomEntry] {
+        self.gameplay_cache
+            .abyss_rooms
+            .get_or_init(|| self.parse_raw_vec_cached("AbyssRoom"))
+    }
+
+    pub fn honami_items(&self) -> &[crate::gameplay_tables::HonamiStoryItemEntry] {
+        self.gameplay_cache
+            .honami_items
+            .get_or_init(|| self.parse_raw_vec_cached("HonamiStoryItem"))
+    }
+
+    pub fn honami_backpacks(&self) -> &[crate::gameplay_tables::HonamiStoryBackPackEntry] {
+        self.gameplay_cache
+            .honami_backpacks
+            .get_or_init(|| self.parse_raw_vec_cached("HonamiStoryBackPack"))
+    }
+
+    pub fn rover_rogue_rooms(&self) -> &[crate::gameplay_tables::RoverRogueRoomEntry] {
+        self.gameplay_cache
+            .rover_rogue_rooms
+            .get_or_init(|| self.parse_raw_vec_cached("RoverRogueRoom"))
+    }
+
+    pub fn rover_rogue_goods(&self) -> &[crate::gameplay_tables::RoverRogueGoodsEntry] {
+        self.gameplay_cache
+            .rover_rogue_goods
+            .get_or_init(|| self.parse_raw_vec_cached("RoverRogueGoods"))
+    }
+
+    pub fn rover_rogue_bless_groups(&self) -> &[crate::gameplay_tables::RoverRogueBlessGroupEntry] {
+        self.gameplay_cache
+            .rover_rogue_bless_groups
+            .get_or_init(|| self.parse_raw_vec_cached("RoverRogueBlessGroup"))
+    }
+
+    pub fn rover_rogue_event_groups(&self) -> &[crate::gameplay_tables::RoverRogueEventGroupEntry] {
+        self.gameplay_cache
+            .rover_rogue_event_groups
+            .get_or_init(|| self.parse_raw_vec_cached("RoverRogueEventGroup"))
+    }
+
+    pub fn rover_rogue_loots(&self) -> &[crate::gameplay_tables::RoverRogueLootEntry] {
+        self.gameplay_cache
+            .rover_rogue_loots
+            .get_or_init(|| self.parse_raw_vec_cached("RoverRogueLoot"))
+    }
+
+    pub fn random_summons(&self) -> &[serde_json::Value] {
+        self.gameplay_cache
+            .random_summons
+            .get_or_init(|| self.read_raw_json_array("RandomSummon"))
+    }
+
+    pub fn world_controller_entities(&self, map_id: i32) -> Arc<Vec<Arc<LevelEntityConfig>>> {
+        let resolved_map_id = self.resolve_map_config_id(map_id);
+        {
+            let guard = self
+                .gameplay_cache
+                .world_controllers_by_map
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(hit) = guard.get(&resolved_map_id) {
+                return Arc::clone(hit);
+            }
+        }
+
+        let loaded: Vec<Arc<LevelEntityConfig>> = if let Some(db) = self.tables.assets_db() {
+            db.query_world_controller_entities(resolved_map_id)
+                .unwrap_or_default()
+        } else {
+            self.tables
+                .level_entity_config
+                .as_slice()
+                .iter()
+                .filter(|cfg| cfg.MapId == resolved_map_id)
+                .filter(|cfg| {
+                    let mut merged = cfg.ComponentsData.clone();
+                    if let Some(tpl) = self.find_template_config(&cfg.BlueprintType) {
+                        tpl.ComponentsData.merge_into(&mut merged);
+                    }
+                    merged.RefreshGroupComponent.is_some()
+                        || merged.extra.iter().chain(merged.template_extra.iter()).any(|e| {
+                            matches!(
+                                e,
+                                crate::tables::entity_components::extra::ExtraEntry::EntityBatchRefreshComponent(_)
+                                    | crate::tables::entity_components::extra::ExtraEntry::DynamicSpawnMonsterComponent(_)
+                                    | crate::tables::entity_components::extra::ExtraEntry::DynamicSpawnMonsterPointComponent(_)
+                                    | crate::tables::entity_components::extra::ExtraEntry::TimeScheduleComponent(_)
+                            )
+                        })
+                })
+                .cloned()
+                .map(Arc::new)
+                .collect()
+        };
+        let arc = Arc::new(loaded);
+        let mut guard = self
+            .gameplay_cache
+            .world_controllers_by_map
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        Arc::clone(
+            guard
+                .entry(resolved_map_id)
+                .or_insert_with(|| Arc::clone(&arc)),
+        )
     }
 
     pub fn resolve_map_config_id(&self, instance_id: i32) -> i32 {
@@ -519,6 +774,13 @@ impl Assets {
 
     pub fn find_template_config(&self, blueprint_type: &str) -> Option<TableRef<'_, TemplateConfig>> {
         self.indexes.find_template_config(&self.tables, blueprint_type)
+    }
+
+    pub fn find_template_config_by_id(&self, id: i32) -> Option<TableRef<'_, TemplateConfig>> {
+        if let Some(db) = self.tables.assets_db() {
+            return db.get_template_by_id(id).map(TableRef::Owned);
+        }
+        self.tables.template_config.get_data_by_id(&id)
     }
 
     pub fn spawn_monster_configs(

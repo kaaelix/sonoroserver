@@ -2,7 +2,6 @@ use sonoro_gamesv_logic::coop_service::CoopService;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::level_play::LevelPlayEventKind;
 use sonoro_gamesv_logic::helpers::quest_engine;
-use sonoro_gamesv_logic::helpers::reward::RewardItem;
 use sonoro_gamesv_logic::helpers::{energy, level_play, pb_kv, reward};
 use sonoro_proto::enums::{ActivityTaskState, ErrorCode};
 use sonoro_proto::pb::{
@@ -67,16 +66,6 @@ fn claim_reward_list(
     table_name: &str,
     ids: &[i32],
 ) -> Result<Vec<i32>, String> {
-    const FALLBACK: [RewardItem; 2] = [
-        RewardItem {
-            item_id: 3,
-            count: 50,
-        },
-        RewardItem {
-            item_id: 2,
-            count: 15000,
-        },
-    ];
     let mut claimed = Vec::new();
     let mut dirty = false;
     for &id in ids {
@@ -94,7 +83,7 @@ fn claim_reward_list(
             false,
             true,
             19500,
-            &FALLBACK,
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;

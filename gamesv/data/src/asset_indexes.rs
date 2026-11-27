@@ -350,6 +350,9 @@ pub fn is_spawnable_item_config(cfg: &LevelEntityConfig, entity_type: EntityType
         }
         return true;
     }
+    if cfg.BlueprintType == "Gameplay365" {
+        return true;
+    }
     !matches!(
         entity_type,
         EntityType::AdviseItem
@@ -361,7 +364,6 @@ pub fn is_spawnable_item_config(cfg: &LevelEntityConfig, entity_type: EntityType
             | EntityType::EntityBatchRefresh
             | EntityType::EntityList
             | EntityType::EntityPackage
-            | EntityType::FlowerPollutionManager
             | EntityType::FollowDecorationChair
             | EntityType::FurnitureSlot
             | EntityType::GroupAi
@@ -376,9 +378,7 @@ pub fn is_spawnable_item_config(cfg: &LevelEntityConfig, entity_type: EntityType
             | EntityType::RenderSpecifiedRange2
             | EntityType::SceneItemStateHint
             | EntityType::SceneText
-            | EntityType::Slots
             | EntityType::SpawnMonster
-            | EntityType::SpawnPasserbyNpc
             | EntityType::Spline
             | EntityType::SplineFX
             | EntityType::SplineRange
@@ -571,7 +571,11 @@ fn build_level_entity_indexes_from_db(
                 | EntityType::DaemonHack
                 | EntityType::DollGrabShowcase
                 | EntityType::ExhibitBase
-                | EntityType::Furniture => true,
+                | EntityType::FlowerPollutionManager
+                | EntityType::Furniture
+                | EntityType::Slots
+                | EntityType::SpawnPasserbyNpc => true,
+                EntityType::RefreshGroup => r.blueprint_type == "Gameplay365",
                 EntityType::Chair | EntityType::Chair2 => {
                     !r.is_client_flag && r.blueprint_type != "MonsterChair"
                 }

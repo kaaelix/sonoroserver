@@ -5,32 +5,34 @@ use sonoro_gamesv_logic::coop_service::{
     self, AdviceContentEntry, AdviceRecord, CoopService,
 };
 use sonoro_gamesv_logic::event_queue::EventQueue;
-use sonoro_gamesv_logic::helpers::reward::RewardItem;
 use sonoro_gamesv_logic::helpers::{energy, pb_kv, quest_engine, reward};
 use sonoro_proto::enums::{
-    EMatchPlayerUiState, ErrorCode, MatchPlayerLeaveReason, PbAdviceContentType, PbAdviceVoteType,
-    WorldEnterPermission, WorldTeamLeaveReason,
+    ActivityTaskState, EMatchPlayerUiState, ErrorCode, MatchPlayerLeaveReason, PbAdviceContentType,
+    PbAdviceVoteType, WorldEnterPermission, WorldTeamLeaveReason,
 };
 use sonoro_proto::pb::{
-    AdviceCreateRequest, AdviceCreateResponse, AdviceDeleteRequest, AdviceDeleteResponse,
-    AdviceModifyRequest, AdviceModifyResponse, AdviceRequest, AdviceResponse, AdviceVoteRequest,
-    AdviceVoteResponse, AdviceVoteUpdateNotify, AgreeJoinResultRequest, AgreeJoinResultResponse,
-    ApplyJoinWorldRequest, ApplyJoinWorldResponse, BlackboardParamValueOneof, CancelMatchRequest,
-    CancelMatchResponse, CoopRoleRewardRequest, CoopRoleRewardResponse, CoopSpRewardRequest,
-    CoopSpRewardResponse, EnterMatchInstRequest, EnterMatchInstResponse, KickMatchTeamPlayerRequest,
-    KickMatchTeamPlayerResponse, KickWorldTeamRequest, KickWorldTeamResponse,
-    LeaveMatchTeamNotify, LeaveMatchTeamRequest, LeaveMatchTeamResponse, LeaveWorldTeamRequest,
-    LeaveWorldTeamResponse, LobbyListRequest, LobbyListResponse, LobbyQueryPlayersRequest,
-    LobbyQueryPlayersResponse, MatchChangePlayerUiStateNotify, MatchChangePlayerUiStateRequest,
-    MatchChangePlayerUiStateResponse, MatchChangeReadyNotify, MatchChangeReadyRequest,
-    MatchChangeReadyResponse, MatchChangeRoleNotify, MatchChangeRoleRequest,
-    MatchChangeRoleResponse, MatchConfirmRequest, MatchConfirmResponse, MatchRoleInfo, PbAdvice,
-    PbAdviceContent, PlayerDetails, QueryOnlinePlayersAreaRequest, QueryOnlinePlayersAreaResponse,
-    SetMatchTeamMatchFlagRequest, SetMatchTeamMatchFlagResponse, StartMatchRequest,
-    StartMatchResponse, TeamChallengeRequest, TeamChallengeResponse,
-    TeamMatchAcceptInviteNotify, TeamMatchAcceptInviteRequest, TeamMatchAcceptInviteResponse,
-    TeamMatchInviteRequest, TeamMatchInviteResponse, TeamMatchInviteRetToHostNotify,
-    TeamParkourRewardRequest, TeamParkourRewardResponse, WorldBlackboardRequest,
+    ActivityTask, AdviceCreateRequest, AdviceCreateResponse, AdviceDeleteRequest,
+    AdviceDeleteResponse, AdviceModifyRequest, AdviceModifyResponse, AdviceRequest, AdviceResponse,
+    AdviceVoteRequest, AdviceVoteResponse, AdviceVoteUpdateNotify, AgreeJoinResultRequest,
+    AgreeJoinResultResponse, ApplyJoinWorldRequest, ApplyJoinWorldResponse, BlackboardParam,
+    BlackboardParamValueOneof, CancelMatchRequest, CancelMatchResponse, CoopRoleInfo,
+    CoopRoleInfoUpdateNotify, CoopRoleRewardRequest, CoopRoleRewardResponse, CoopSpRewardRequest,
+    CoopSpRewardResponse, EnterMatchInstRequest, EnterMatchInstResponse,
+    KickMatchTeamPlayerRequest, KickMatchTeamPlayerResponse, KickWorldTeamRequest,
+    KickWorldTeamResponse, LeaveMatchTeamNotify, LeaveMatchTeamRequest, LeaveMatchTeamResponse,
+    LeaveWorldTeamRequest, LeaveWorldTeamResponse, LobbyListRequest, LobbyListResponse,
+    LobbyQueryPlayersRequest, LobbyQueryPlayersResponse, MatchChangePlayerUiStateNotify,
+    MatchChangePlayerUiStateRequest, MatchChangePlayerUiStateResponse, MatchChangeReadyNotify,
+    MatchChangeReadyRequest, MatchChangeReadyResponse, MatchChangeRoleNotify,
+    MatchChangeRoleRequest, MatchChangeRoleResponse, MatchConfirmRequest, MatchConfirmResponse,
+    MatchRoleInfo, MutiplayerInfo, MutiplayerTeamRefreshNearListRequest,
+    MutiplayerTeamRefreshNearListResponse, PbAdvice, PbAdviceContent, PlayerDetails,
+    QueryOnlinePlayersAreaRequest, QueryOnlinePlayersAreaResponse, SetMatchTeamMatchFlagRequest,
+    SetMatchTeamMatchFlagResponse, StartMatchRequest, StartMatchResponse, TeamChallengeRequest,
+    TeamChallengeResponse, TeamMatchAcceptInviteNotify, TeamMatchAcceptInviteRequest,
+    TeamMatchAcceptInviteResponse, TeamMatchInviteRequest, TeamMatchInviteResponse,
+    TeamMatchInviteRetToHostNotify, TeamParkourRewardRequest, TeamParkourRewardResponse,
+    TeamParkourTaskNotify, WorldBlackboardNotify, WorldBlackboardRequest,
     WorldBlackboardResponse, WorldEnterPermissionsRequest, WorldEnterPermissionsResponse,
     WorldLevelDownRequest, WorldLevelDownResponse, WorldLevelRegainRequest,
     WorldLevelRegainResponse,
@@ -38,6 +40,35 @@ use sonoro_proto::pb::{
 use sonoro_proto::wire::PbEnum;
 
 use super::State;
+
+pub fn handle_mutiplayer_team_refresh_near_list_request(
+    state: &mut State,
+    _req: MutiplayerTeamRefreshNearListRequest,
+) -> Result<MutiplayerTeamRefreshNearListResponse, String> {
+    let info_list = state
+        .coop_service
+        .as_ref()
+        .map(|coop| {
+            coop.build_lobby_list(state.player_id)
+                .into_iter()
+                .map(|det| MutiplayerInfo {
+                    PlayerId: det.PlayerId,
+                    Name: det.Name,
+                    IconId: det.HeadId,
+                    Level: det.Level,
+                    GuildName: Vec::new(),
+                    GuildIntro: det.Signature,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(MutiplayerTeamRefreshNearListResponse {
+        ErrorCode: Some(ErrorCode::Success),
+        InfoList: info_list,
+        NextRefreshTime: 5,
+        ..Default::default()
+    })
+}
 
 pub fn handle_lobby_list_request(
     state: &mut State,
@@ -477,6 +508,12 @@ pub fn handle_team_parkour_reward_request(
     state: &mut State,
     req: TeamParkourRewardRequest,
 ) -> Result<TeamParkourRewardResponse, String> {
+    let reward_row = state
+        .assets
+        .team_parkour_rewards()
+        .iter()
+        .find(|r| r.Id == req.RewardId)
+        .cloned();
     let key = format!("team_pk:{}:{}", req.ActivityId, req.RewardId);
     if state.player_components.progress.info.mark_claim(&key) {
         state
@@ -485,20 +522,37 @@ pub fn handle_team_parkour_reward_request(
             .save(&state.fs)
             .map_err(|e| e.to_string())?;
         let mut rctx = state.reward_context();
-        reward::grant_table_reward(
-            &mut rctx,
-            "TeamParKOurReward",
-            i64::from(req.RewardId),
-            false,
-            true,
-            1,
-            &[RewardItem {
-                item_id: 3,
-                count: 40,
-            }],
-            None,
-        )
-        .map_err(|e| e.to_string())?;
+        if let Some(ref row) = reward_row
+            && row.Reward > 0
+        {
+            reward::grant_drop_package_popup(&mut rctx, row.Reward, 19500)
+                .map_err(|e| e.to_string())?;
+        } else {
+            reward::grant_table_reward(
+                &mut rctx,
+                "TeamParKOurReward",
+                i64::from(req.RewardId),
+                false,
+                true,
+                1,
+                &[],
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let target = reward_row.as_ref().map_or(1, |r| r.RewardThreshold.max(1));
+        let _ = state.conn.push_msg(
+            TeamParkourTaskNotify::MSG_ID,
+            &TeamParkourTaskNotify {
+                ActivityTask: Some(ActivityTask {
+                    Id: req.RewardId,
+                    Current: target,
+                    Target: target,
+                    Status: Some(ActivityTaskState::ActivityTaskTaken),
+                    ..Default::default()
+                }),
+            },
+        );
     }
     Ok(TeamParkourRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
@@ -509,28 +563,53 @@ pub fn handle_coop_role_reward_request(
     state: &mut State,
     req: CoopRoleRewardRequest,
 ) -> Result<CoopRoleRewardResponse, String> {
+    let level_row = state
+        .assets
+        .coop_role_levels()
+        .iter()
+        .find(|r| r.Id == req.CoopId)
+        .cloned();
+    let Some(row) = level_row else {
+        return Ok(CoopRoleRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    };
     let key = format!("coop:role:{}", req.CoopId);
     if state.player_components.progress.info.mark_claim(&key) {
+        let role_id = row.CoopRoleId;
+        let role_lv = {
+            let info = &mut state.player_components.progress.info;
+            let lv_key = format!("coop:role_lv:{role_id}");
+            let cur_lv = info.get_key_int(&lv_key).max(i64::from(row.CoopLevel)) as i32;
+            info.set_key_int(&lv_key, i64::from(cur_lv));
+            let rw_key = format!("coop:role_rw:{role_id}");
+            let cur_rw = info.get_key_int(&rw_key).max(i64::from(row.CoopLevel)) as i32;
+            info.set_key_int(&rw_key, i64::from(cur_rw));
+            cur_lv
+        };
         state
             .player_components
             .progress
             .save(&state.fs)
             .map_err(|e| e.to_string())?;
-        let mut rctx = state.reward_context();
-        reward::grant_table_reward(
-            &mut rctx,
-            "CoopTaskConfig",
-            i64::from(req.CoopId),
-            false,
-            true,
-            1,
-            &[RewardItem {
-                item_id: 3,
-                count: 40,
-            }],
-            None,
-        )
-        .map_err(|e| e.to_string())?;
+        if row.Reward > 0 {
+            let mut rctx = state.reward_context();
+            reward::grant_drop_package_popup(&mut rctx, row.Reward, 19500)
+                .map_err(|e| e.to_string())?;
+        }
+        let _ = state.conn.push_msg(
+            CoopRoleInfoUpdateNotify::MSG_ID,
+            &CoopRoleInfoUpdateNotify {
+                ActivityId: row.ActivityId,
+                CoopRoleInfo: Some(CoopRoleInfo {
+                    CoopRoleId: role_id,
+                    RoleLevel: role_lv,
+                    RewardLevel: role_lv,
+                    FinishTime: energy::now_seconds(),
+                }),
+                ..Default::default()
+            },
+        );
     }
     Ok(CoopRoleRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
@@ -541,26 +620,50 @@ pub fn handle_coop_sp_reward_request(
     state: &mut State,
     req: CoopSpRewardRequest,
 ) -> Result<CoopSpRewardResponse, String> {
+    let sp_rows = state.assets.coop_sp_rewards().to_vec();
+    let role_sum: i32 = state
+        .assets
+        .coop_roles()
+        .iter()
+        .map(|r| {
+            state
+                .player_components
+                .progress
+                .info
+                .get_key_int(&format!("coop:role_lv:{}", r.Id)) as i32
+        })
+        .sum();
     let mut dirty = false;
     for rid in req.RewardIds {
+        let Some(sp_row) = sp_rows.iter().find(|r| r.Id == rid) else {
+            continue;
+        };
+        if sp_row.RoleLevelSum > role_sum {
+            // Auto-sync role level sum only if claims were already unlocked via quest progression.
+            let unlocked_by_claims: i32 = state
+                .assets
+                .coop_role_levels()
+                .iter()
+                .filter(|cl| {
+                    state
+                        .player_components
+                        .progress
+                        .info
+                        .has_claim(&format!("coop:role:{}", cl.Id))
+                })
+                .count() as i32;
+            if sp_row.RoleLevelSum > unlocked_by_claims.max(role_sum) {
+                continue;
+            }
+        }
         let key = format!("coop:sp:{rid}");
         if state.player_components.progress.info.mark_claim(&key) {
             dirty = true;
-            let mut rctx = state.reward_context();
-            reward::grant_table_reward(
-                &mut rctx,
-                "CoopSpReward",
-                i64::from(rid),
-                false,
-                true,
-                1,
-                &[RewardItem {
-                    item_id: 3,
-                    count: 50,
-                }],
-                None,
-            )
-            .map_err(|e| e.to_string())?;
+            if sp_row.Reward > 0 {
+                let mut rctx = state.reward_context();
+                reward::grant_drop_package_popup(&mut rctx, sp_row.Reward, 19500)
+                    .map_err(|e| e.to_string())?;
+            }
         }
     }
     if dirty {
@@ -633,47 +736,54 @@ pub fn handle_world_blackboard_request(
     req: WorldBlackboardRequest,
 ) -> Result<WorldBlackboardResponse, String> {
     let mut dirty = false;
-    let info = &mut state.player_components.progress.info;
+    let mut synced_params: Vec<BlackboardParam> = Vec::with_capacity(req.Params.len());
     for param in req.Params {
-        if param.Key.is_empty() {
+        if param.Key.is_empty() || param.Value.is_none() {
             continue;
         }
-        let Some(val) = param.Value else {
-            continue;
-        };
-        let key = format!("world_bb:{}", String::from_utf8_lossy(&param.Key));
-        match val {
-            BlackboardParamValueOneof::IntValue(v) => {
-                info.set_key_int(&key, i64::from(v));
-                dirty = true;
+        let raw_key = String::from_utf8_lossy(&param.Key).into_owned();
+        let key = format!("world_bb:{raw_key}");
+        let info = &mut state.player_components.progress.info;
+        let is_scalar = match &param.Value {
+            Some(BlackboardParamValueOneof::IntValue(v)) => {
+                info.set_key_int(&key, i64::from(*v));
+                true
             }
-            BlackboardParamValueOneof::LongValue(v) => {
-                info.set_key_int(&key, v);
-                dirty = true;
+            Some(BlackboardParamValueOneof::LongValue(v)) => {
+                info.set_key_int(&key, *v);
+                true
             }
-            BlackboardParamValueOneof::BooleanValue(v) => {
-                info.set_key_int(&key, i64::from(v));
-                dirty = true;
+            Some(BlackboardParamValueOneof::BooleanValue(v)) => {
+                info.set_key_int(&key, i64::from(*v));
+                true
             }
-            BlackboardParamValueOneof::StringValue(v) => {
-                info.set_key_str(&key, &String::from_utf8_lossy(&v));
-                dirty = true;
+            Some(BlackboardParamValueOneof::StringValue(v)) => {
+                info.set_key_str(&key, &String::from_utf8_lossy(v));
+                true
             }
-            BlackboardParamValueOneof::FloatValue(v) => {
-                let scaled = f64::from(v) * 1000.0;
+            Some(BlackboardParamValueOneof::FloatValue(v)) => {
+                let scaled = f64::from(*v) * 1000.0;
                 let iv = if scaled.is_finite() {
                     scaled.clamp(-9e18, 9e18) as i64
                 } else {
                     0
                 };
                 info.set_key_int(&key, iv);
-                dirty = true;
+                true
             }
-            _ => {
-                info.mark_claim(&key);
-                dirty = true;
-            }
+            _ => false,
+        };
+        if !is_scalar {
+            pb_kv::save_msg(
+                &state.fs,
+                &mut state.player_components.progress,
+                &format!("world_bb_pb:{raw_key}"),
+                &param,
+            )
+            .map_err(|e| e.to_string())?;
         }
+        synced_params.push(param);
+        dirty = true;
     }
     if dirty {
         state
@@ -681,6 +791,17 @@ pub fn handle_world_blackboard_request(
             .progress
             .save(&state.fs)
             .map_err(|e| e.to_string())?;
+        if let Some(coop) = state.coop_service.as_ref()
+            && !synced_params.is_empty()
+        {
+            coop.broadcast_room_except(
+                state.player_id,
+                WorldBlackboardNotify::MSG_ID,
+                &WorldBlackboardNotify {
+                    Params: synced_params,
+                },
+            );
+        }
     }
     Ok(WorldBlackboardResponse {
         ErrorCode: Some(ErrorCode::Success),

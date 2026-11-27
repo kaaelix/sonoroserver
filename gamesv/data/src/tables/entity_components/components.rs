@@ -413,6 +413,9 @@ impl MergeFields for super::tele_control2::TeleControl2 {
     fn merge_fields_from(&mut self, template: &Self) {
         if self.Disabled.is_none() { self.Disabled = template.Disabled.clone(); }
         if self.PlayerStateRestritionId.is_none() { self.PlayerStateRestritionId = template.PlayerStateRestritionId.clone(); }
+        if self.DestroyCfg.is_none() { self.DestroyCfg = template.DestroyCfg.clone(); }
+        if self.ThrowCfg.is_none() { self.ThrowCfg = template.ThrowCfg.clone(); }
+        if self.BulletCfg.is_none() { self.BulletCfg = template.BulletCfg.clone(); }
     }
 }
 

@@ -71,7 +71,7 @@ fn reward_to_map(
     state: &mut State,
     table_name: &str,
     key: i64,
-    fallback: &[RewardItem],
+    _fallback: &[RewardItem],
 ) -> Result<BTreeMap<i32, i32>, String> {
     let mut granted = Vec::new();
     let mut rctx = state.reward_context();
@@ -82,7 +82,7 @@ fn reward_to_map(
         false,
         true,
         19500,
-        fallback,
+        &[],
         Some(&mut granted),
     )
     .map_err(|e| e.to_string())?;
@@ -607,16 +607,7 @@ pub fn handle_rogue_black_flower_request(
             false,
             true,
             1,
-            &[
-                RewardItem {
-                    item_id: 3,
-                    count: 20,
-                },
-                RewardItem {
-                    item_id: 2,
-                    count: 10000,
-                },
-            ],
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -835,10 +826,7 @@ pub fn handle_rogue_res_ending_reward_request(
             false,
             true,
             1,
-            &[RewardItem {
-                item_id: 3,
-                count: 50,
-            }],
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -872,10 +860,7 @@ pub fn handle_rogue_res_illustration_award_request(
                 false,
                 true,
                 1,
-                &[RewardItem {
-                    item_id: 3,
-                    count: 20,
-                }],
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;
@@ -910,10 +895,7 @@ pub fn handle_rogue_res_task_award_request(
             false,
             true,
             1,
-            &[RewardItem {
-                item_id: 3,
-                count: 40,
-            }],
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -1125,27 +1107,45 @@ pub fn handle_rogue_weekly_black_flower_request(
         .info
         .add_key_int("rogue_weekly:bf_used", 1)
         .clamp(0, 3) as i32;
+    let exchange_drop_id = state
+        .assets
+        .raw_json_cached("RogueWeeklyBF")
+        .iter()
+        .filter_map(|v| v.as_object())
+        .find(|o| {
+            o.get("SilentAreaDetectionId").and_then(|v| v.as_i64())
+                == Some(i64::from(req.SilentAreaId))
+                || o.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(req.SilentAreaId))
+        })
+        .and_then(|o| o.get("ExchangeRewardId").and_then(|v| v.as_i64()))
+        .and_then(|id| i32::try_from(id).ok())
+        .unwrap_or(0);
     let mut rctx = state.reward_context();
-    reward::grant_table_reward(
-        &mut rctx,
-        "RogueWeeklyReward",
-        i64::from(req.SilentAreaId),
-        false,
-        true,
-        1,
-        &[
-            RewardItem {
-                item_id: 3,
-                count: 40,
-            },
-            RewardItem {
-                item_id: 2,
-                count: 20000,
-            },
-        ],
-        None,
-    )
-    .map_err(|e| e.to_string())?;
+    if exchange_drop_id > 0 {
+        reward::grant_table_reward(
+            &mut rctx,
+            "RogueWeeklyBF",
+            i64::from(req.SilentAreaId),
+            false,
+            true,
+            1,
+            &[],
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        reward::grant_table_reward(
+            &mut rctx,
+            "RogueWeeklyReward",
+            i64::from(req.SilentAreaId),
+            false,
+            true,
+            1,
+            &[],
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     state
         .player_components
         .progress
@@ -1190,10 +1190,7 @@ pub fn handle_mul_rogue_weekly_reward_request(
                 false,
                 true,
                 1,
-                &[RewardItem {
-                    item_id: 3,
-                    count: 40,
-                }],
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;
@@ -1228,10 +1225,7 @@ pub fn handle_rogue_white_cat_limited_reward_request(
             false,
             true,
             1,
-            &[RewardItem {
-                item_id: 3,
-                count: 40,
-            }],
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -1277,10 +1271,7 @@ pub fn handle_mul_roguelike_write_cat_reward_request(
                 false,
                 true,
                 1,
-                &[RewardItem {
-                    item_id: 3,
-                    count: 40,
-                }],
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;
@@ -1311,10 +1302,7 @@ pub fn handle_roguelike_write_cat_boss_reward_request(
             false,
             true,
             1,
-            &[RewardItem {
-                item_id: 3,
-                count: 40,
-            }],
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -1343,10 +1331,7 @@ pub fn handle_roguelike_write_cat_level_play_reward_request(
             false,
             true,
             1,
-            &[RewardItem {
-                item_id: 3,
-                count: 40,
-            }],
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -1642,10 +1627,7 @@ pub fn handle_rover_rogue_task_reward_take_request(
                 false,
                 true,
                 1,
-                &[RewardItem {
-                    item_id: 3,
-                    count: 40,
-                }],
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;

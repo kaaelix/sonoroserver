@@ -15,7 +15,7 @@ use sonoro_proto::enums::{
     IllustratedType, LiftMoveType, MoveStatus, SuspendType, TeleportReason,
 };
 use sonoro_proto::pb::{
-    AddGuestNotify, AudioStatePb, AudioStateUpdateNotify,
+    ActionResetPosPrePerformanceNotify, AddGuestNotify, AudioStatePb, AudioStateUpdateNotify,
     BehaviorTreeCtxPb, BtSuspendNotify, BtVarUpdateNotify, CommonTagData, ElevatorMoveNotify,
     EnableNearbyTrackingNotify, EntityAddBubbleNotify, EntityAddDynamicInteractNotify,
     EntityCommonTagNotify, EntityCtxPb,
@@ -480,15 +480,13 @@ pub fn execute_action<S: PushSink + ?Sized>(
         "FinishDungeon" => apply_finish_dungeon(ctx, params)?,
         "SettlementDungeon" => apply_settlement_dungeon(ctx)?,
         "RogueActivatePortal" => record_progress_int(ctx, "rogue:portal_active", 1, false)?,
-        "RogueGotoNextFloor" => {
-            record_progress_add(ctx, "rogue:floor", 1)?;
-        }
+        "RogueGotoNextFloor" => super::quest_mode_actions::apply_rogue_goto_next_floor(ctx)?,
         "DangoAbyssActivatePortal" => record_progress_int(ctx, "abyss:portal_active", 1, false)?,
         "DangoAbyssGotoNextFloor" => {
-            record_progress_add(ctx, "abyss:floor", 1)?;
+            super::quest_mode_actions::apply_dango_abyss_goto_next_floor(ctx)?;
         }
         "DangoAbyssCreateRewardTreasureBox" => {
-            record_progress_add(ctx, "abyss:reward_box", 1)?;
+            super::quest_mode_actions::apply_dango_abyss_create_reward_box(ctx)?;
         }
         "ChangeTimer" | "ToggleTimerPauseState" => apply_timer_action(ctx, name, params)?,
         "RecordDungeonEvent" => {
@@ -559,8 +557,7 @@ pub fn execute_action<S: PushSink + ?Sized>(
             }
         }
         "HonamiStoryInteractPickUp" => {
-            record_progress_add(ctx, "honami:pickup", 1)?;
-            apply_destroy_self(ctx)?;
+            super::quest_mode_actions::apply_honami_story_interact_pickup(ctx)?;
         }
         "HonamiStoryReceiveCorruptedChestReward" => {
             record_progress_add(ctx, "honami:corrupted_chest_cnt", 1)?;
@@ -580,7 +577,7 @@ pub fn execute_action<S: PushSink + ?Sized>(
             }
         }
         "ChangeFightTeam" => {
-            record_progress_add(ctx, "team:fight_change", 1)?;
+            super::quest_mode_actions::switch_team_to_second_roles(ctx)?;
         }
         "ExecResurrection" => apply_exec_resurrection(ctx, params)?,
         "ChangePhantomFormation" => {
@@ -628,32 +625,32 @@ pub fn execute_action<S: PushSink + ?Sized>(
         }
         "ResetLevelPlay" => apply_reset_level_play_action(ctx, params)?,
         "MowingTowerGotoNextFloor" => {
-            record_progress_add(ctx, "mow:floor", 1)?;
+            super::quest_mode_actions::apply_mow_tower_goto_next_floor(ctx)?;
         }
         "SlashAndTowerGotoNextFloor" => {
-            record_progress_add(ctx, "slash:floor", 1)?;
+            super::quest_mode_actions::apply_slash_and_tower_goto_next_floor(ctx)?;
         }
         "BossPilingEnterNextInst" => {
-            record_progress_add(ctx, "bp:inst_step", 1)?;
+            super::quest_mode_actions::apply_boss_piling_enter_next_inst(ctx)?;
         }
         "DangoAbyssReceiveReward" => {
-            record_progress_add(ctx, "abyss:reward_cnt", 1)?;
+            super::quest_mode_actions::apply_dango_abyss_receive_reward(ctx)?;
         }
         "RogueSelectRoom" => {
-            record_progress_add(ctx, "rogue:room_sel", 1)?;
+            super::quest_mode_actions::apply_rogue_select_room(ctx, params)?;
         }
         "RogueReceiveReward" => {
-            record_progress_add(ctx, "rogue:reward_cnt", 1)?;
+            super::quest_mode_actions::apply_rogue_receive_reward(ctx)?;
         }
         "RollBlockGetReward" => {
             crate::helpers::roll_block::try_grant_action_reward(ctx, params);
             record_progress_add(ctx, "rb_blk:rw", 1)?;
         }
         "HonamiStoryActivateSafeEvacuation" => {
-            record_progress_int(ctx, "honami:safe_leave", 1, false)?;
+            super::quest_mode_actions::apply_honami_story_activate_safe_evacuation(ctx)?;
         }
         "RoverRogueActivate" => {
-            record_progress_add(ctx, "rover_rogue:activate", 1)?;
+            super::quest_mode_actions::apply_rover_rogue_activate(ctx, params)?;
         }
         "RecoverDurability" => {
             if let Some(eid) = resolve_action_entity_cfg_id(ctx.scene.as_deref(), params) {
@@ -854,6 +851,45 @@ pub fn execute_action<S: PushSink + ?Sized>(
         "CreatePrefab" | "DestroyPrefab" => {
             apply_prefab_action(ctx, name, params)?;
         }
+        "ClientUnlockAchievementSystemItem" => {
+            super::quest_mode_actions::apply_client_unlock_achievement(ctx, params)?;
+        }
+        "ClientModifyTargetTag" => {
+            let is_add = json_bool(params.get("IsAddTag")).unwrap_or(true);
+            let is_player = params
+                .get("Target")
+                .and_then(Value::as_object)
+                .and_then(|t| json_str(t.get("Type")))
+                .is_some_and(|ty| ty == "Player");
+            let tag_names = parse_str_list(params.get("PerformanceTag"));
+            if let Some(scene) = ctx.scene.as_deref_mut() {
+                let target_nid = if is_player {
+                    scene.current_role_entity_id()
+                } else {
+                    scene.active_flow_owner_entity_id
+                };
+                if target_nid > 0
+                    && let Some(storage) = scene.entity_mut(target_nid)
+                {
+                    let delta = if is_add { 1 } else { -1 };
+                    let tag_comp = storage.tag.get_or_insert_with(Default::default);
+                    for tname in &tag_names {
+                        if let Some(tid) =
+                            gameplay_tags::id_from_name(&ctx.assets.tables.gameplay_tag_remap, tname)
+                        {
+                            tag_comp.add_tag(tid, delta);
+                        }
+                    }
+                }
+            }
+        }
+        "SlideRailStart" => {
+            record_progress_int(ctx, "slide_rail:active", 1, false)?;
+        }
+        "OpenQte" => {
+            let qid = json_int(params.get("QteId")).unwrap_or(1);
+            record_progress_int(ctx, "qte:open", i64::from(qid), false)?;
+        }
         _ if is_tracked_or_client_action(name) => return Ok(()),
         "ClearEntityVisibleTag" => apply_entity_visibility_list(ctx, params.get("EntityIds"), true)?,
         "MoveSceneItem"
@@ -1007,7 +1043,7 @@ pub fn execute_action<S: PushSink + ?Sized>(
             record_progress_int(ctx, "slide_rail:active", 0, false)?;
         }
         "TakePlotPhoto" => {
-            record_progress_claim(ctx, "photo:submitted")?;
+            record_progress_claim(ctx, "photo:view_opened")?;
         }
         "WaitBattleCondition" => {
             let eid = params
@@ -3073,16 +3109,10 @@ fn apply_reset_player_pos_presentation<S: PushSink + ?Sized>(
     let Some(inst_id) = ctx.scene.as_deref().map(|s| s.instance_id) else {
         return Ok(());
     };
-    if let Some(pres) = params.get("Presentation").and_then(|v| v.as_object()) {
-        for cue_id in parse_int_list(pres.get("GamePlayCues")) {
-            ctx.sink.push(
-                GameplayCueNotify::MSG_ID,
-                &GameplayCueNotify {
-                    GameplayCueId: i64::from(cue_id),
-                },
-            );
-        }
-    }
+    let pres_obj = params.get("Presentation").and_then(|v| v.as_object());
+    let pres_type = pres_obj
+        .and_then(|o| json_str(o.get("Type")))
+        .unwrap_or("");
     let Some(rpc) = params.get("ResetPosConfig").and_then(|v| v.as_object()) else {
         return Ok(());
     };
@@ -3095,6 +3125,51 @@ fn apply_reset_player_pos_presentation<S: PushSink + ?Sized>(
     let Some(cfg) = ctx.assets.find_level_entity(inst_id, i64::from(eid)) else {
         return Ok(());
     };
+
+    if pres_type == "Failure" {
+        let next_seq = ctx
+            .progress_comp
+            .as_ref()
+            .map(|p| p.info.get_key_int("act:reset_pos_seq") + 1)
+            .unwrap_or(1)
+            .max(1);
+        let inc_id = i32::try_from(next_seq).unwrap_or(1);
+        record_progress_int(ctx, "act:reset_pos_seq", i64::from(inc_id), false)?;
+        record_progress_int(
+            ctx,
+            &format!("act:reset_pos_target:{inc_id}:0"),
+            i64::from(eid),
+            false,
+        )?;
+        record_progress_int(
+            ctx,
+            &format!("act:reset_pos_map:{inc_id}:0"),
+            i64::from(inst_id),
+            false,
+        )?;
+        ctx.sink.push(
+            ActionResetPosPrePerformanceNotify::MSG_ID,
+            &ActionResetPosPrePerformanceNotify {
+                Params: serde_json::to_vec(&Value::Object(params.clone())).unwrap_or_default(),
+                GameCtx: None,
+                IncId: inc_id,
+                Index: 0,
+                PlayerId: ctx.basic_comp.player_id,
+            },
+        );
+        return Ok(());
+    }
+
+    if let Some(pres) = pres_obj {
+        for cue_id in parse_int_list(pres.get("GamePlayCues")) {
+            ctx.sink.push(
+                GameplayCueNotify::MSG_ID,
+                &GameplayCueNotify {
+                    GameplayCueId: i64::from(cue_id),
+                },
+            );
+        }
+    }
     let Some(pos) = asset_indexes::entity_world_pos(&cfg) else {
         return Ok(());
     };
@@ -3134,7 +3209,9 @@ fn is_tracked_or_client_action(name: &str) -> bool {
             | "ClearFishingCabinInSaleItems"
             | "ClientPreEnableSubLevels"
             | "ClientSetPlayerOperationRestriction"
+            | "ClientSetPlayerPos"
             | "ClientSetSeasonState"
+            | "ToggleAirWall"
             | "ClientVehicleTeleport"
             | "CloseWalkingOverlayMontage"
             | "DisableEntityLookAt"
@@ -4314,7 +4391,9 @@ fn apply_destroy_entity<S: PushSink + ?Sized>(
     destroy_config_ids(ctx, &ids)
 }
 
-fn apply_destroy_self<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>) -> io::Result<()> {
+pub(crate) fn apply_destroy_self<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+) -> io::Result<()> {
     let Some(scene) = ctx.scene.as_deref() else {
         return Ok(());
     };
@@ -4737,7 +4816,7 @@ fn apply_reset_level_play_action<S: PushSink + ?Sized>(
     Ok(())
 }
 
-fn resolve_spawn_anchor<S: PushSink + ?Sized>(
+pub(crate) fn resolve_spawn_anchor<S: PushSink + ?Sized>(
     ctx: &QuestContext<'_, S>,
     pos_eid: i32,
 ) -> ([f32; 3], [f32; 3]) {
@@ -5145,6 +5224,11 @@ fn apply_add_play_bubble<S: PushSink + ?Sized>(
         }
         scene.add_play_bubble(cfg_id, guid);
         if let Some(nid) = scene.find_entity_net_id_by_config_id(cfg_id) {
+            if let Some(st) = scene.entity_mut(nid)
+                && !st.world_item.bubble_guids.iter().any(|g| g == guid)
+            {
+                st.world_item.bubble_guids.push(guid.to_string());
+            }
             ctx.sink.push(
                 EntityAddBubbleNotify::MSG_ID,
                 &EntityAddBubbleNotify {
@@ -5169,6 +5253,11 @@ fn apply_clear_play_bubble<S: PushSink + ?Sized>(
         }
         let removed = scene.take_play_bubbles_for_entity(cfg_id);
         let net_id = scene.find_entity_net_id_by_config_id(cfg_id);
+        if let Some(nid) = net_id
+            && let Some(st) = scene.entity_mut(nid)
+        {
+            st.world_item.bubble_guids.clear();
+        }
         for rec in removed {
             if let Some(nid) = net_id {
                 ctx.sink.push(
@@ -5601,7 +5690,7 @@ fn apply_timer_action<S: PushSink + ?Sized>(
     Ok(())
 }
 
-fn record_progress_add<S: PushSink + ?Sized>(
+pub(crate) fn record_progress_add<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     key: &str,
     delta: i64,
@@ -5614,7 +5703,7 @@ fn record_progress_add<S: PushSink + ?Sized>(
     Ok(next)
 }
 
-fn record_progress_int<S: PushSink + ?Sized>(
+pub(crate) fn record_progress_int<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     key: &str,
     val: i64,
@@ -5630,7 +5719,7 @@ fn record_progress_int<S: PushSink + ?Sized>(
     pc.save(ctx.fs)
 }
 
-fn record_progress_claim<S: PushSink + ?Sized>(
+pub(crate) fn record_progress_claim<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     key: &str,
 ) -> io::Result<()> {
@@ -5745,7 +5834,7 @@ fn wake_entity_fsm(scene: &mut Scene, cfg_id: i32, reason: u16) {
     }
 }
 
-fn apply_entity_gameplay_tag_change<S: PushSink + ?Sized>(
+pub fn apply_entity_gameplay_tag_change<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     net_id: i64,
     tag_ids: &[i32],

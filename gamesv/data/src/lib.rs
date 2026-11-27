@@ -5,6 +5,7 @@ pub mod assets;
 pub mod assets_db;
 pub mod data_tables;
 pub mod fsm_graph_registry;
+pub mod gameplay_tables;
 pub mod inline_tables;
 pub mod lazy_flow_store;
 pub mod lazy_node_store;

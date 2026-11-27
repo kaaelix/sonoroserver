@@ -501,10 +501,7 @@ pub fn handle_fishing_activity_limit_reward_request(
             false,
             true,
             1,
-            &[RewardItem {
-                item_id: 3,
-                count: 40,
-            }],
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -535,10 +532,7 @@ pub fn handle_fishing_activity_milestone_reward_request(
                 false,
                 true,
                 1,
-                &[RewardItem {
-                    item_id: 3,
-                    count: 60,
-                }],
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;
@@ -579,10 +573,7 @@ pub fn handle_fishing_illustrated_reward_request(
             false,
             true,
             1,
-            &[RewardItem {
-                item_id: 3,
-                count: 30,
-            }],
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -666,10 +657,7 @@ pub fn handle_fishing_entrust_hand_in_request(
             false,
             true,
             1,
-            &[RewardItem {
-                item_id: 80100001,
-                count: 200,
-            }],
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -748,23 +736,17 @@ pub fn handle_fishing_hand_in_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
-    let total_cnt = (req.LeftFishingItems.len() + req.RightFishingItems.len()).max(1) as i32;
+    let _ = (req.LeftFishingItems.len(), req.RightFishingItems.len());
     let mut rctx = state.reward_context();
-    reward::grant_items(
+    reward::grant_table_reward(
         &mut rctx,
-        0,
+        "FishingDelivery",
+        i64::from(req.Id),
+        false,
         true,
-        &[
-            RewardItem {
-                item_id: 3,
-                count: 20,
-            },
-            RewardItem {
-                item_id: 2,
-                count: 2000 * total_cnt,
-            },
-        ],
         1,
+        &[],
+        None,
     )
     .map_err(|e| e.to_string())?;
     Ok(FishingHandInResponse {

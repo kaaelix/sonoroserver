@@ -7,7 +7,8 @@ use sonoro_proto::enums::{ErrorCode, TeleportReason};
 use sonoro_proto::pb::{
     ApplyRechallengeRequest, ApplyRechallengeResponse, ChangeDataLayerFinishRequest,
     ChangeDataLayerFinishResponse, EnterBigWorldInstRequest, EnterBigWorldInstResponse,
-    EnterInstRequest, EnterInstResponse, ExchangeRewardInfoNotify, ExchangeRewardInfoRequest,
+    EnterInstContextEnterCtxOneof, EnterInstRequest, EnterInstResponse, ExchangeRewardInfoNotify,
+    ExchangeRewardInfoRequest,
     ExchangeRewardInfoResponse, FlowRestartRequest, FlowRestartResponse,
     GetLevelPlayRewardsRequest, GetLevelPlayRewardsResponse, InstFightEndPush, LeaveInstRequest,
     LeaveInstResponse, LeaveSceneNotify, LevelPlayFastReturnPosRequest,
@@ -36,6 +37,63 @@ pub fn handle_enter_inst_request(
         return Ok(EnterInstResponse {
             ErrorCode: Some(ErrorCode::ErrInstanceConfigNotFound),
         });
+    }
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int("inst:entry_id", i64::from(req.InstanceId));
+        info.set_key_int("inst:half_idx", 0);
+        info.set_key_str("inst:second_roles", "");
+        info.set_key_str("inst:skill_branches", "");
+        if let Some(ctx_oneof) = req.EnterInstContext.as_ref().and_then(|c| c.EnterCtx.as_ref()) {
+            match ctx_oneof {
+                EnterInstContextEnterCtxOneof::MowTowerCtx(m) => {
+                    info.set_key_int("mow:level_id", i64::from(m.LevelsId));
+                    info.set_key_int("mow:floor", 1);
+                    let roles_csv = m
+                        .SecondRoles
+                        .iter()
+                        .filter(|&&r| r > 0)
+                        .map(|r| r.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    info.set_key_str("inst:second_roles", &roles_csv);
+                }
+                EnterInstContextEnterCtxOneof::SlashAndTowerCtx(s) => {
+                    info.set_key_int("slash:level_id", i64::from(s.LevelsId));
+                    info.set_key_int("slash:floor", 1);
+                    let roles_csv = s
+                        .SecondRoles
+                        .iter()
+                        .filter(|&&r| r > 0)
+                        .map(|r| r.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    info.set_key_str("inst:second_roles", &roles_csv);
+                    let branches_csv = s
+                        .SkillBranchIds
+                        .iter()
+                        .filter(|&&b| b > 0)
+                        .map(|b| b.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    info.set_key_str("inst:skill_branches", &branches_csv);
+                }
+                EnterInstContextEnterCtxOneof::BossPilingCtx(b) => {
+                    info.set_key_int("bp:level_id", i64::from(b.BossPilingLevelId));
+                    info.set_key_int("bp:inst_step", 1);
+                    let branches_csv = b
+                        .SkillBranchId
+                        .iter()
+                        .filter(|&&id| id > 0)
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    info.set_key_str("inst:skill_branches", &branches_csv);
+                }
+                _ => {}
+            }
+        }
+        let _ = state.player_components.progress.save(&state.fs);
     }
     let mut qctx = state.quest_context(events);
     quest_engine::enter_inst(&mut qctx, req.InstanceId, req.PosEntityId)

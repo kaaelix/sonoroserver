@@ -1,6 +1,7 @@
 pub mod access_path;
 pub mod achievement;
 pub mod activity;
+pub mod activity_data;
 pub mod adventure;
 pub mod attach;
 pub mod auth;
@@ -4145,6 +4146,34 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             pb::RTimeStopAnimPush,
             combat_sync::handle_r_time_stop_anim_push
         ),
+        pb::AiBlackboardsPush::MSG_ID => push_ev!(
+            state,
+            msg_id,
+            payload,
+            pb::AiBlackboardsPush,
+            combat_sync::handle_ai_blackboards_push
+        ),
+        pb::TriggerExitSkillPush::MSG_ID => push_ev!(
+            state,
+            msg_id,
+            payload,
+            pb::TriggerExitSkillPush,
+            combat_sync::handle_trigger_exit_skill_push
+        ),
+        pb::RTimeStopInstPush::MSG_ID => push_ev!(
+            state,
+            msg_id,
+            payload,
+            pb::RTimeStopInstPush,
+            combat_sync::handle_r_time_stop_inst_push
+        ),
+        pb::RoleTrialSceneRollbackPush::MSG_ID => push_ev!(
+            state,
+            msg_id,
+            payload,
+            pb::RoleTrialSceneRollbackPush,
+            combat_sync::handle_role_trial_scene_rollback_push
+        ),
         pb::SlowTimePush::MSG_ID => push_ev!(
             state,
             msg_id,
@@ -5086,6 +5115,15 @@ pub fn dispatch_message(state: &mut State, message: &Message) -> Result<(), Disp
             region_prog::handle_through_train_finish_view_request
         ),
         // coop
+        pb::MutiplayerTeamRefreshNearListRequest::MSG_ID => req_noev!(
+            state,
+            rpc_id,
+            msg_id,
+            payload,
+            pb::MutiplayerTeamRefreshNearListRequest,
+            pb::MutiplayerTeamRefreshNearListResponse,
+            coop::handle_mutiplayer_team_refresh_near_list_request
+        ),
         pb::LobbyListRequest::MSG_ID => req_noev!(
             state,
             rpc_id,

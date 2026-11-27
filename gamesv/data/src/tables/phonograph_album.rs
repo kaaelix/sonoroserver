@@ -8,4 +8,6 @@ pub struct PhonographAlbum {
     pub Id: i32,
     #[serde(default, deserialize_with = "super::de_null_default")]
     pub Title: String,
+    #[serde(default, deserialize_with = "super::de_null_default")]
+    pub TimeQuantum: i32,
 }

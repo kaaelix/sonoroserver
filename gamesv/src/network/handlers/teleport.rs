@@ -5,7 +5,7 @@ use sonoro_gamesv_logic::component::comp_util;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::events::Event;
 use sonoro_gamesv_logic::helpers::{gravity as gravity_helper, quest_actions, quest_engine, role as role_helper};
-use sonoro_proto::enums::{ErrorCode, LivingStatus, TeleportReason};
+use sonoro_proto::enums::{EPlayerTeleportState, ErrorCode, LivingStatus, TeleportReason};
 use sonoro_proto::pb::{
     AddTemporaryTeleportInfoNotify, AddTemporaryTeleportRequest, AddTemporaryTeleportResponse,
     CombatReceivePackNotify, GameCtxPb, GameCtxPbCtxInfoOneof, LeaveSceneNotify,
@@ -283,7 +283,29 @@ pub fn handle_teleport_transfer_request(
                 ..Default::default()
             },
         );
+        if let Some(coop) = state.coop_service.as_ref() {
+            let role_nid = state
+                .scene
+                .as_ref()
+                .map_or(0, |s| s.current_role_entity_id());
+            coop.notify_teleport_state(
+                state.player_id,
+                EPlayerTeleportState::Default,
+                role_nid,
+                target_pos,
+                [0.0, 0.0, spawn.yaw],
+            );
+        }
     } else {
+        if let Some(coop) = state.coop_service.as_ref() {
+            coop.notify_teleport_state(
+                state.player_id,
+                EPlayerTeleportState::Teleporting,
+                0,
+                target_pos,
+                [0.0, 0.0, spawn.yaw],
+            );
+        }
         enqueue_scene_transfer(state, events, target_inst_id, target_pos, spawn.yaw)?;
     }
 

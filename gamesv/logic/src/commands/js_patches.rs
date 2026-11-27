@@ -1,7 +1,7 @@
 use std::fs;
 use std::io;
 
-use sonoro_proto::pb::JSPatchNotify;
+use sonoro_proto::pb::{JSPatchNotify, WeatherNotify};
 
 use crate::event_queue::EventQueue;
 use crate::events::Event;
@@ -69,11 +69,15 @@ pub mod weather {
     pub const ALIAS: &str = "wx";
     pub const DESCRIPTION: &str = "sets the current weather to the inputted id.\nusage: weather [id]";
 
-    /// Pushes a weather change patch script to the client without sending chat output.
+    /// Pushes a native `WeatherNotify` to update weather cleanly across desktop & mobile clients.
     pub fn push<S: PushSink + ?Sized>(sink: &mut S, weather_id: i32) -> io::Result<()> {
-        let js_raw = fs::read_to_string("assets/scripts/misc_patches/set_weather.js")?;
-        let js = js_raw.replace("{WEATHER_ID}", &weather_id.to_string());
-        sink.push(JSPatchNotify::MSG_ID, &JSPatchNotify { Content: js.into() });
+        sink.push(
+            WeatherNotify::MSG_ID,
+            &WeatherNotify {
+                WeatherId: weather_id,
+                IsClient: false,
+            },
+        );
         Ok(())
     }
 

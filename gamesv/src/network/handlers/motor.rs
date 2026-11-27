@@ -1520,10 +1520,7 @@ pub fn handle_motor_decal_task_request(
                 false,
                 true,
                 1,
-                &[RewardItem {
-                    item_id: 3,
-                    count: 40,
-                }],
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;
@@ -1544,10 +1541,7 @@ pub fn handle_motor_decal_task_request(
             false,
             true,
             1,
-            &[RewardItem {
-                item_id: 3,
-                count: 40,
-            }],
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -1586,10 +1580,7 @@ pub fn handle_motor_develop_task_reward_request(
                 false,
                 true,
                 8001,
-                &[RewardItem {
-                    item_id: 3,
-                    count: 40,
-                }],
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;
@@ -1639,10 +1630,7 @@ pub fn handle_motor_link_task_request(
                 false,
                 true,
                 8001,
-                &[RewardItem {
-                    item_id: 3,
-                    count: 40,
-                }],
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;
@@ -1656,15 +1644,15 @@ pub fn handle_motor_link_task_request(
     {
         dirty = true;
         let mut rctx = state.reward_context();
-        reward::grant_items(
+        reward::grant_table_reward(
             &mut rctx,
-            0,
+            "MotorLinkageIp",
+            i64::from(req.MotorIp),
+            false,
             true,
-            &[RewardItem {
-                item_id: 3,
-                count: 40,
-            }],
             8001,
+            &[],
+            None,
         )
         .map_err(|e| e.to_string())?;
     }
@@ -1709,10 +1697,7 @@ pub fn handle_motor_parkour_level_reward_request(
                 false,
                 true,
                 8001,
-                &[RewardItem {
-                    item_id: 3,
-                    count: 30,
-                }],
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;
@@ -1824,10 +1809,7 @@ pub fn handle_motor_fight_one_key_reward_request(
                 false,
                 true,
                 8001,
-                &[RewardItem {
-                    item_id: 3,
-                    count: 40,
-                }],
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;
@@ -2054,16 +2036,7 @@ pub fn handle_motor_fight_settle_request(
             false,
             true,
             1,
-            &[
-                RewardItem {
-                    item_id: 3,
-                    count: 40,
-                },
-                RewardItem {
-                    item_id: 2,
-                    count: 10000,
-                },
-            ],
+            &[],
             None,
         )
         .map_err(|e| e.to_string())?;

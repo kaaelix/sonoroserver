@@ -21,7 +21,7 @@ use sonoro_proto::enums::{EAttributeType, GameCtxType, VehicleSource};
 use sonoro_proto::pb::{
     BehaviorTreeCtxPb, DynamicInteractInfo, EntityAddNotify, EntityComponentPb,
     EntityComponentPbComponentPbOneof, EntityCtxPb, EntityPb, GameCtxPb, GameCtxPbCtxInfoOneof,
-    InteractComponentPb, JSPatchNotify,
+    InteractComponentPb,
 };
 
 use crate::commands::respond;
@@ -459,11 +459,14 @@ fn prepare_debug_spawn<S: PushSink + ?Sized>(
     components: &Components,
     is_frozen: bool,
     is_tune_broken: bool,
-) -> Result<(EntityPb, String), &'static str> {
+) -> Result<EntityPb, &'static str> {
     scene.register_debug_spawn_route(entity.net_id, config_id, source_map_id, repeat_boss)?;
 
     let mut buff_ids = Vec::new();
     append_configured_buff_ids(&mut buff_ids, components);
+    if repeat_boss && !buff_ids.contains(&70_000_103) {
+        buff_ids.push(70_000_103);
+    }
     if is_tune_broken {
         buff_ids.extend_from_slice(TUNE_BROKEN_BUFFS);
     }
@@ -495,12 +498,7 @@ fn prepare_debug_spawn<S: PushSink + ?Sized>(
         .ok_or("EntityNotFound")?
         .to_proto(assets, now_ms);
     attach_dynamic_interact_infos(scene, &mut entity_pb);
-    let patch_js = format!(
-        "globalThis.__akiSetEntitySourceMap?.({config_id},{source_map_id},{},{});",
-        if repeat_boss { "true" } else { "false" },
-        entity.net_id
-    );
-    Ok((entity_pb, patch_js))
+    Ok(entity_pb)
 }
 
 fn publish_debug_spawn<S: PushSink + ?Sized>(
@@ -516,7 +514,7 @@ fn publish_debug_spawn<S: PushSink + ?Sized>(
     is_frozen: bool,
     is_tune_broken: bool,
 ) -> Result<(), &'static str> {
-    let (entity_pb, patch_js) = prepare_debug_spawn(
+    let entity_pb = prepare_debug_spawn(
         scene,
         fs,
         assets,
@@ -530,12 +528,6 @@ fn publish_debug_spawn<S: PushSink + ?Sized>(
         is_tune_broken,
     )?;
 
-    sink.push(
-        JSPatchNotify::MSG_ID,
-        &JSPatchNotify {
-            Content: patch_js.into(),
-        },
-    );
     sink.push(
         EntityAddNotify::MSG_ID,
         &EntityAddNotify {
@@ -1001,12 +993,12 @@ pub fn publish_world_spawn_batch<S: PushSink + ?Sized>(
     if items.is_empty() {
         return Vec::new();
     }
-    let mut prepared: Vec<(EntityHandle, EntityPb, String)> = Vec::with_capacity(items.len());
+    let mut prepared: Vec<(EntityHandle, EntityPb)> = Vec::with_capacity(items.len());
     for &(entity, entity_id, source_map_id) in items {
         let Some(selected) =
             select_spawn_config(assets, entity_id, scene.instance_id, Some(source_map_id))
         else {
-            prepared.push((entity, EntityPb::default(), String::new()));
+            prepared.push((entity, EntityPb::default()));
             continue;
         };
         let ai_id = selected
@@ -1029,18 +1021,8 @@ pub fn publish_world_spawn_batch<S: PushSink + ?Sized>(
             false,
             false,
         ) {
-            Ok((pb, js)) => prepared.push((entity, pb, js)),
+            Ok(pb) => prepared.push((entity, pb)),
             Err(_) => {
-                sink.push(
-                    JSPatchNotify::MSG_ID,
-                    &JSPatchNotify {
-                        Content: format!(
-                            "globalThis.__akiRemoveEntitySourceOwner?.({entity_id},{});",
-                            entity.net_id
-                        )
-                        .into(),
-                    },
-                );
                 scene.rollback_spawn(entity.net_id);
             }
         }
@@ -1048,28 +1030,13 @@ pub fn publish_world_spawn_batch<S: PushSink + ?Sized>(
 
     let mut published = Vec::with_capacity(prepared.len());
     for chunk in prepared.chunks(WORLD_SPAWN_BATCH_SIZE) {
-        let mut js_batch = String::new();
         let mut pbs = Vec::with_capacity(chunk.len());
-        for (handle, pb, js) in chunk {
+        for (handle, pb) in chunk {
             published.push(*handle);
-            if pb.Id == 0 && js.is_empty() {
+            if pb.Id == 0 {
                 continue;
             }
-            if !js.is_empty() {
-                if !js_batch.is_empty() {
-                    js_batch.push('\n');
-                }
-                js_batch.push_str(js);
-            }
             pbs.push(pb.clone());
-        }
-        if !js_batch.is_empty() {
-            sink.push(
-                JSPatchNotify::MSG_ID,
-                &JSPatchNotify {
-                    Content: js_batch.into(),
-                },
-            );
         }
         if !pbs.is_empty() {
             sink.push(
@@ -1456,6 +1423,15 @@ fn spawn_with_location_internal<S: PushSink + ?Sized>(
             }
             ExtraEntry::FlowerPollutionComponent(_) => {
                 storage.world_item.flower_pollution = true;
+                if let Some(pi) = progress_info {
+                    let key = format!("flower_unpolluted:{entity_id}");
+                    storage.world_item.flower_unpolluted_splines = pi
+                        .get_key_str(&key)
+                        .split(',')
+                        .filter_map(|tok| tok.trim().parse::<i32>().ok())
+                        .filter(|&id| id > 0)
+                        .collect();
+                }
             }
             ExtraEntry::BuffProducerComponent(_) => {
                 storage.world_item.buff_producer_present = true;
@@ -1465,6 +1441,7 @@ fn spawn_with_location_internal<S: PushSink + ?Sized>(
             }
             ExtraEntry::SceneItemEventListenerComponent(_) => {
                 storage.world_item.listener_present = true;
+                storage.world_item.listener_constate_id = entity_id;
             }
             ExtraEntry::BatchBulletCasterComponent(_) => {
                 storage.world_item.batch_bullet_cast_present = true;
@@ -1627,6 +1604,30 @@ fn spawn_with_location_internal<S: PushSink + ?Sized>(
                 }
                 storage.world_item.doll_showcase_items = Some(items);
             }
+            ExtraEntry::SceneItemAttributeComponent(sa) => {
+                if let Some(ids) = crate::component::entity::resolve_scene_item_attribute_ids(sa) {
+                    storage.world_item.scene_item_attributes = Some(ids);
+                }
+            }
+            ExtraEntry::TimelineTrackControlComponent(ttc) => {
+                if let Some(tt) = crate::component::entity::resolve_timeline_track_pb_state(
+                    ttc,
+                    progress_info,
+                    entity_id,
+                    entity_id,
+                ) {
+                    storage.world_item.timeline_track = Some(tt);
+                }
+            }
+            ExtraEntry::RoadNetworkNavigationComponent(_) => {
+                let road = progress_info
+                    .map(|pi| pi.get_key_int(&format!("road:cur:{entity_id}")) as i32)
+                    .unwrap_or(0);
+                let ridx = progress_info
+                    .map(|pi| pi.get_key_int(&format!("road:idx:{entity_id}")) as i32)
+                    .unwrap_or(0);
+                storage.world_item.road_network = Some((road, ridx, road, ridx));
+            }
             _ => {}
         }
     }
@@ -1637,6 +1638,12 @@ fn spawn_with_location_internal<S: PushSink + ?Sized>(
         storage.world_item.npc_spawn_id = cid32;
     }
     let cfg_id = storage.config.config_id;
+    storage.world_item.bubble_guids = scene.play_bubble_guids_for_entity(cfg_id);
+    if components_data.RewardComponent.is_some() || components_data.TreasureBoxComponent.is_some() {
+        let claimed =
+            progress_info.is_some_and(|pi| pi.has_claim(&format!("reward_claimed:{entity_id}")));
+        storage.world_item.reward_count = Some(i32::from(!claimed));
+    }
     if spawn_base.entity_type == EntityType::SceneItem {
         let default_progress = ProgressInfo::default();
         storage.world_item.scene_item = Some(SceneItemComponent::from_progress(
@@ -1664,16 +1671,6 @@ fn spawn_with_location_internal<S: PushSink + ?Sized>(
             is_tune_broken.unwrap_or(false),
         )
     {
-        sink.push(
-            JSPatchNotify::MSG_ID,
-            &JSPatchNotify {
-                Content: format!(
-                    "globalThis.__akiRemoveEntitySourceOwner?.({entity_id},{});",
-                    handle.net_id
-                )
-                .into(),
-            },
-        );
         scene.rollback_spawn(handle.net_id);
         return Err(err);
     }

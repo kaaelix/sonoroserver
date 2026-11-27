@@ -1,11 +1,13 @@
 use sonoro_gamesv_logic::event_queue::EventQueue;
+use sonoro_gamesv_logic::helpers::pb_kv;
 use sonoro_gamesv_logic::scene::now_millis;
 use sonoro_proto::enums::ErrorCode;
 use sonoro_proto::pb::{
-    CombatCommon, CombatNotifyData, CombatNotifyDataMessageOneof, CombatPushDataMessageOneof,
-    CombatReceiveData, CombatReceiveDataMessageOneof, CombatReceivePackNotify,
-    CombatRequestDataMessageOneof, CombatResponseData, CombatResponseDataMessageOneof,
-    CombatSendDataMessageOneof, CombatSendPackRequest, CombatSendPackResponse, EntityRemoveNotify,
+    BlackboardParamValueOneof, CombatCommon, CombatNotifyData, CombatNotifyDataMessageOneof,
+    CombatPushDataMessageOneof, CombatReceiveData, CombatReceiveDataMessageOneof,
+    CombatReceivePackNotify, CombatRequestDataMessageOneof, CombatResponseData,
+    CombatResponseDataMessageOneof, CombatSendDataMessageOneof, CombatSendPackRequest,
+    CombatSendPackResponse, EntityBlackboardNotify, EntityRemoveNotify,
 };
 
 use super::{State, attach, buff, combat_envelope_handlers, damage, fsm, skill};
@@ -183,6 +185,91 @@ fn handle_combat_push(
         }
         CombatPushDataMessageOneof::SwitchLogicStatePush(p) => {
             fsm::handle_switch_logic_state_push(state, events, common.as_ref(), pack, p);
+        }
+        CombatPushDataMessageOneof::AiBlackboardsPush(p) => {
+            let eid = common.as_ref().map_or(0, |c| c.EntityId);
+            let cfg_id = if eid != 0 {
+                state
+                    .scene
+                    .as_ref()
+                    .and_then(|sc| sc.find_config_id_by_net_id(eid))
+                    .map_or(eid, i64::from)
+            } else {
+                0
+            };
+            let info = &mut state.player_components.progress.info;
+            let mut dirty = false;
+            for param in &p.AiBlackboards {
+                if param.Key.is_empty() {
+                    continue;
+                }
+                let pkey = String::from_utf8_lossy(&param.Key);
+                let full_k = format!("ent_bb:{cfg_id}:{pkey}");
+                match &param.Value {
+                    Some(BlackboardParamValueOneof::IntValue(v)) => {
+                        info.set_key_int(&full_k, i64::from(*v));
+                        dirty = true;
+                    }
+                    Some(BlackboardParamValueOneof::LongValue(v)) => {
+                        info.set_key_int(&full_k, *v);
+                        dirty = true;
+                    }
+                    Some(BlackboardParamValueOneof::BooleanValue(v)) => {
+                        info.set_key_int(&full_k, i64::from(*v));
+                        dirty = true;
+                    }
+                    Some(BlackboardParamValueOneof::StringValue(s)) => {
+                        info.set_key_str(&full_k, &String::from_utf8_lossy(s));
+                        dirty = true;
+                    }
+                    Some(BlackboardParamValueOneof::FloatValue(f)) if f.is_finite() => {
+                        info.set_key_int(&full_k, (*f * 1000.0) as i64);
+                        dirty = true;
+                    }
+                    _ => {}
+                }
+            }
+            if dirty {
+                let _ = state.player_components.progress.save(&state.fs);
+            }
+            if let Some(coop) = state.coop_service.as_ref()
+                && !p.AiBlackboards.is_empty()
+            {
+                coop.broadcast_room_except(
+                    state.player_id,
+                    EntityBlackboardNotify::MSG_ID,
+                    &EntityBlackboardNotify {
+                        EntityId: eid,
+                        Params: p.AiBlackboards,
+                    },
+                );
+            }
+        }
+        CombatPushDataMessageOneof::TsAnimNotifyStateAbsoluteTimeStopPush(p) => {
+            if let Some(scene) = state.scene.as_mut() {
+                let dilation = if p.Duration <= 0 || p.Dilation >= 100 {
+                    1.0
+                } else {
+                    (f64::from(p.Dilation) / 100.0).clamp(0.0, 10.0)
+                };
+                scene.scene_time.set_dilation(now_millis(), dilation);
+            }
+        }
+        CombatPushDataMessageOneof::RTimeStopInstPush(p) => {
+            if let Some(scene) = state.scene.as_mut() {
+                let dilation = if p.Flag { 0.0 } else { 1.0 };
+                scene.scene_time.set_dilation(now_millis(), dilation);
+            }
+        }
+        CombatPushDataMessageOneof::TriggerExitSkillPush(p) => {
+            let key = format!("skill:exit_trig:{}:{}", p.EnterEntityId, p.LeaveEntityId);
+            let _ = pb_kv::persist_int(&state.fs, &mut state.player_components.progress, &key, 1);
+        }
+        CombatPushDataMessageOneof::RoleTrialSceneRollbackPush(_) => {
+            let mut qctx = state.quest_context(events);
+            let _ = sonoro_gamesv_logic::helpers::quest_engine::events::on_condition_state_changed(
+                &mut qctx,
+            );
         }
         other => {
             tracing::trace!(target: "combat", "combat push passthrough: {:?}", std::mem::discriminant(&other));
@@ -475,6 +562,17 @@ pub fn handle_combat_send_pack_request(
         }
     }
 
+    if !receive_data_pack.is_empty()
+        && let Some(coop) = state.coop_service.as_ref()
+    {
+        coop.broadcast_room_except(
+            state.player_id,
+            CombatReceivePackNotify::MSG_ID,
+            &CombatReceivePackNotify {
+                Data: receive_data_pack.clone(),
+            },
+        );
+    }
     let resp = Ok(CombatSendPackResponse {
         ErrorCode: Some(ErrorCode::Success),
         ReceivePackNotify: Some(CombatReceivePackNotify {

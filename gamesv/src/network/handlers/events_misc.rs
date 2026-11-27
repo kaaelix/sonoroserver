@@ -113,16 +113,6 @@ fn claim_id_list(
     table: &str,
     ids: &[i32],
 ) -> Result<BTreeMap<i32, i32>, String> {
-    const FALLBACK: [RewardItem; 2] = [
-        RewardItem {
-            item_id: 3,
-            count: 40,
-        },
-        RewardItem {
-            item_id: 2,
-            count: 15000,
-        },
-    ];
     let mut granted_map = BTreeMap::new();
     for &id in ids {
         let key = format!("{prefix}:{id}");
@@ -136,7 +126,7 @@ fn claim_id_list(
                 false,
                 true,
                 19500,
-                &FALLBACK,
+                &[],
                 Some(&mut tmp),
             )
             .map_err(|e| e.to_string())?;
@@ -231,16 +221,6 @@ pub fn handle_sign_activity_request(
     state: &mut State,
     req: SignActivityRequest,
 ) -> Result<SignActivityResponse, String> {
-    const FALLBACK: [RewardItem; 2] = [
-        RewardItem {
-            item_id: 3,
-            count: 40,
-        },
-        RewardItem {
-            item_id: 2,
-            count: 15000,
-        },
-    ];
     let key = format!("sign_act:{}:{}", req.ActivityId, req.Index);
     let mut item_map = BTreeMap::new();
     if state.player_components.progress.info.mark_claim(&key) {
@@ -274,7 +254,7 @@ pub fn handle_sign_activity_request(
                 false,
                 true,
                 19500,
-                &FALLBACK,
+                &[],
                 Some(&mut tmp),
             )
             .map_err(|e| e.to_string())?;
@@ -1956,10 +1936,47 @@ pub fn handle_flower_pollution_spline_push(
         },
     )
     .map_err(|e| e.to_string())?;
+    let mgr_cfg_id = state
+        .scene
+        .as_ref()
+        .and_then(|s| s.find_config_id_by_net_id(push.ManagerEntityId))
+        .map(i64::from)
+        .unwrap_or(push.ManagerEntityId);
+    let sp_key = format!("flower_unpolluted:{mgr_cfg_id}");
+    let mut splines: Vec<i32> = state
+        .player_components
+        .progress
+        .info
+        .get_key_str(&sp_key)
+        .split(',')
+        .filter_map(|tok| tok.trim().parse::<i32>().ok())
+        .filter(|&id| id > 0)
+        .collect();
+    if push.SplineConfigId > 0 {
+        if push.IsRemovePollution {
+            if !splines.contains(&push.SplineConfigId) {
+                splines.push(push.SplineConfigId);
+            }
+        } else {
+            splines.retain(|&id| id != push.SplineConfigId);
+        }
+        let csv = splines
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_str(&sp_key, &csv);
+        let _ = state.player_components.progress.save(&state.fs);
+    }
     if let Some(scene) = state.scene.as_mut()
         && let Some(&idx) = scene.net_id_map.get(&push.ManagerEntityId)
     {
         scene.entities[idx].world_item.flower_pollution = !push.IsRemovePollution;
+        scene.entities[idx].world_item.flower_unpolluted_splines = splines;
     }
     let mut events = EventQueue::new();
     {

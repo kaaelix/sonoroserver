@@ -2,7 +2,6 @@ use sonoro_gamesv_data::tables::entity_components::extra::ExtraEntry;
 use sonoro_gamesv_logic::coop_service::CoopService;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::level_play::LevelPlayEventKind;
-use sonoro_gamesv_logic::helpers::reward::RewardItem;
 use sonoro_gamesv_logic::helpers::{energy, level_play, pb_kv, reward};
 use sonoro_proto::enums::{
     ErrorCode, FloroRanchPlayTaskType, JokerActionType, JokerGuessActor, JokerGuessSkillOp,
@@ -170,16 +169,6 @@ fn claim_id_list(
     table: &str,
     ids: &[i32],
 ) -> Result<(), String> {
-    const FALLBACK: [RewardItem; 2] = [
-        RewardItem {
-            item_id: 3,
-            count: 40,
-        },
-        RewardItem {
-            item_id: 2,
-            count: 15000,
-        },
-    ];
     for &id in ids {
         let key = format!("{prefix}:{id}");
         if state.player_components.progress.info.mark_claim(&key) {
@@ -191,7 +180,7 @@ fn claim_id_list(
                 false,
                 true,
                 19500,
-                &FALLBACK,
+                &[],
                 None,
             )
             .map_err(|e| e.to_string())?;

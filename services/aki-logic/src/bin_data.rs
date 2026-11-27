@@ -68,6 +68,12 @@ pub struct PayItemDef {
 }
 
 #[derive(Debug, Clone)]
+pub struct TrapDefenseRewardCfg {
+    pub id: i32,
+    pub activity_id: i32,
+}
+
+#[derive(Debug, Clone)]
 pub struct ActivityConfigItem {
     pub id: i32,
     pub activity_type: i32,
@@ -94,6 +100,8 @@ pub struct BinDataCache {
     pub phonograph_albums: BTreeMap<i32, Vec<i32>>,
     pub all_music_ids: HashSet<i32>,
     pub activities: Vec<ActivityConfigItem>,
+    pub trap_defense_rewards: Vec<TrapDefenseRewardCfg>,
+    pub trap_defense_special_rewards: Vec<TrapDefenseRewardCfg>,
 }
 
 static REPO_ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -178,8 +186,30 @@ impl BinDataCache {
             phonograph_albums,
             all_music_ids,
             activities,
+            trap_defense_rewards: load_trap_defense_rewards(&dir, "TrapDefenseReward.json"),
+            trap_defense_special_rewards: load_trap_defense_rewards(
+                &dir,
+                "TrapDefenseSpecialReward.json",
+            ),
         }
     }
+}
+
+fn load_trap_defense_rewards(dir: &Path, file_name: &str) -> Vec<TrapDefenseRewardCfg> {
+    let mut res = Vec::new();
+    for el in open_json_array(dir, file_name) {
+        let Some(id) = as_i32(&el, "Id") else {
+            continue;
+        };
+        if id <= 0 {
+            continue;
+        }
+        res.push(TrapDefenseRewardCfg {
+            id,
+            activity_id: as_i32(&el, "ActivityId").unwrap_or(0),
+        });
+    }
+    res
 }
 
 fn open_assets_db() -> Option<rusqlite::Connection> {

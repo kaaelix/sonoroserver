@@ -2,8 +2,8 @@ use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::quest_engine;
 use sonoro_proto::enums::{BtType, ErrorCode};
 use sonoro_proto::pb::{
-    FlowActionRequest, FlowActionResponse, FlowEndRequest, FlowEndResponse, FlowServerSkipNotify,
-    GameCtxPb, GameCtxPbCtxInfoOneof, JSPatchNotify,
+    FlowActionRequest, FlowActionResponse, FlowEndNotify, FlowEndRequest, FlowEndResponse,
+    FlowServerSkipNotify, GameCtxPb, GameCtxPbCtxInfoOneof,
 };
 
 use super::State;
@@ -57,13 +57,14 @@ pub fn handle_flow_end_request(
         .as_ref()
         .map_or(0, |scene| scene.active_flow_inc_id);
 
-    if active_flow_inc_id == 0
-        && had_active_flow
-        && let Ok(js) = std::fs::read("assets/scripts/misc_patches/close_flow_loading_and_subtitle.js")
-    {
+    if active_flow_inc_id == 0 && had_active_flow {
         let _ = state.conn.push_msg(
-            JSPatchNotify::MSG_ID,
-            &JSPatchNotify { Content: js },
+            FlowEndNotify::MSG_ID,
+            &FlowEndNotify {
+                FlowIncId: req.FlowIncId,
+                Async: false,
+                IsFinished: true,
+            },
         );
     }
 

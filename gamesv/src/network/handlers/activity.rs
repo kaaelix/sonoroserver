@@ -4,39 +4,19 @@ use sonoro_gamesv_logic::helpers::condition::{self, EvalContext};
 use sonoro_gamesv_logic::helpers::{energy, pb_kv};
 use sonoro_gamesv_logic::sink::PushSink;
 use sonoro_proto::PbMessage;
-use sonoro_proto::enums::{ActivityOpenType, ActivityType, ConditionTaskState, ErrorCode, SignState};
+use sonoro_proto::enums::{
+    ActivityOpenType, ActivityTaskState, ActivityType, ConditionTaskState, ErrorCode, SignState,
+};
 use sonoro_proto::pb::{
-    ActivityAvignon, ActivityBetHorsesData, ActivityBlackCoastData, ActivityCiacconaGalData,
-    ActivityCorniceMeetingData, ActivityDangoMonopolyData, ActivityData, ActivityDataDataOneof,
-    ActivityFishingData, ActivityFunPlayData, ActivityInviteNewbie, ActivityLineCrossData,
-    ActivityLinkageData, ActivityLongShanMain, ActivityMapExploreData, ActivityMoonSignInData,
-    ActivityMoraleData, ActivityPermanentRogueData, ActivityPrizeDrawingData, ActivityRegressData,
-    ActivityRequest, ActivityResponse, ActivityRogueData, ActivityScratchTicketData,
-    ActivityTaskData, ActivityTimePointRewarData, ActivityTrapDefenseData, ActivityTurnTableData,
-    ActivityUpdateNotify, ActivityWeeklyRogueData, AdvertisingPageInfo, AreaInfo, ArtemisActivityInfo,
-    BabelTowerActivity, BeginnerCarnivalData, BossPilingActivityInfo, BossRushActivityData,
-    ConditionTask, CumulativeShopData, DailyAdventureActivityData, DangoAbyssActivityData,
-    DangoBrawlActivityInfo, DoubleInstActivityReward, DreamLinkActivityData, DropCatchActivityInfo,
-    EdgeRunnerActivityInfo, EncircleActivityPb, FarmGoldData, FeiXuePreheatActivityInfo,
-    FightPhotoActivityData, FlagChallengeActivityInfo, FloroRanchActivityData,
-    FurnitureDiySlotInfo, GatherActivityInfo, GiantActivityInfo, GolemCrackActivityInfo,
-    H5ViewActivityData, HarvestActivity, HonamiStoryActivityData, InfrThemeActivityPb,
-    KurotatoActivityData, LifePointDrawActivityData, LinkageCheckInActivityData,
-    MapTravelActivityData, MatchThreeActivityInfo, MotorCycleIpActivityData,
-    MotorDecalActivityData, MotorDevelopActivityData, MotorFightActivityPb,
-    MotorFightTalentTreePb, MotorParkourActivityInfo, MowTowerActivityData, NewBieCourseActivity,
-    NewPlayerSupportActivityData, NewPlayerSupportActivityV2Pb, NewTowerClimbingActivityData,
-    NewbieAdventureV2Pb, NewbieCourseV2ActivityPb, NewbieMainActivityPb, OnlineMotorActivityData,
-    ParkourActivity, PhantomArenaActivityData, PhantomBattleGuideActivity, PhantomCollectActivity,
-    PinballActivityData, PreheatSignActivityData, QingXiaoActivityInfo, RealmBetweenActivityInfo,
-    RhythmActivityPb, RiskHarvestActivityData, RoadBookActivityInfo, RoleCoopActivityData,
-    RoleGiftActivityData, RoleSkinTrialActivity, RoleTowerActivityData, RoleTrialInfoActivity,
-    RoguelikeSeason, RoverRogueActivityData, RoverRogueHistoryInsInfo, SignActivity,
-    SkinRewardActivityData, SolarSchoolActivityPb, SolarisSpeedActivity,
-    SpringFestivalActivityInfo, SpringSignData, SpringSkipEntry, SurvivorsActivityData,
-    TetrisActivityInfo, ThemeCelebration, ThroughTrainActivityData,
-    ThroughTrainSummaryActivityData, TotalTopUpActivityInfo, TowerDefenseActivityInfo,
-    WuWuWeekActivity,
+    ActivityBetHorsesData, ActivityData, ActivityDataDataOneof, ActivityInviteNewbie,
+    ActivityLinkageData, ActivityRequest, ActivityResponse, ActivityTask, ActivityTaskData,
+    ActivityUpdateNotify, AdvertisingPageInfo, AreaInfo, ArtemisActivityInfo,
+    BeginnerCarnivalData, ConditionTask, CoopRoleInfo, CoopTaskCompleteInfo, CumulativeShopData,
+    FurnitureDiySlotInfo, H5ViewActivityData, NewBieCourseActivity, NewPlayerSupportActivityData,
+    NewPlayerSupportActivityV2Pb, NewbieAdventureV2Pb, NewbieCourseV2ActivityPb,
+    NewbieMainActivityPb, PhantomBattleGuideActivity, RoleCoopActivityData, SignActivity,
+    SolarSpeedContext, SolarisSpeedActivity, SpringFestivalActivityInfo, SpringSkipEntry,
+    ThroughTrainSummaryActivityData, TotalTopUpActivityInfo,
 };
 use sonoro_proto::wire::PbEnum;
 
@@ -130,165 +110,175 @@ pub fn build_activity_entry(
     })
 }
 
-fn rogue_season_id_for_activity(activity_id: i32) -> i32 {
-    match activity_id {
-        100600001 => 1,
-        100600002 => 2,
-        100600003 => 3,
-        100600004 => 4,
-        102600001 => 5,
-        100600005 => 6,
-        100600006 => 7,
-        _ => 1,
+fn rogue_season_id_for_activity(assets: &Assets, activity_id: i32) -> i32 {
+    super::activity_data::rogue_season_id_for_activity(assets, activity_id)
+}
+
+fn build_team_parkour_activity(
+    assets: &Assets,
+    progress_comp: &PlayerProgressComponent,
+    activity_id: i32,
+) -> SolarisSpeedActivity {
+    let info = &progress_comp.info;
+    let contexts: Vec<SolarSpeedContext> = assets
+        .team_parkour_cfgs()
+        .iter()
+        .filter(|cfg| cfg.ActivityId == activity_id)
+        .map(|cfg| {
+            let score = info.get_key_int(&format!("team_pk:score:{}", cfg.Id)) as i32;
+            let rank = info.get_key_int(&format!("team_pk:rank:{}", cfg.Id)) as i32;
+            let lap = info.get_key_int(&format!("team_pk:lap:{}", cfg.Id)) as i32;
+            SolarSpeedContext {
+                LevelId: cfg.Id,
+                Score: score,
+                Ranking: rank,
+                StartTime: 1,
+                LapRecord: lap,
+            }
+        })
+        .collect();
+    let tasks: Vec<ActivityTask> = assets
+        .team_parkour_rewards()
+        .iter()
+        .filter(|r| r.ActivityId == activity_id)
+        .map(|r| {
+            let target = r.RewardThreshold.max(1);
+            let claimed = info.has_claim(&format!("team_pk:{activity_id}:{}", r.Id));
+            ActivityTask {
+                Id: r.Id,
+                Current: target,
+                Target: target,
+                Status: Some(if claimed {
+                    ActivityTaskState::ActivityTaskTaken
+                } else {
+                    ActivityTaskState::ActivityTaskFinish
+                }),
+                ..Default::default()
+            }
+        })
+        .collect();
+    SolarisSpeedActivity {
+        SolarSpeedContext: contexts,
+        ActivityTaskDatas: Some(ActivityTaskData {
+            ActivityTasks: tasks,
+        }),
     }
 }
 
-fn giant_total_stable_value(progress_comp: &PlayerProgressComponent) -> i32 {
-    let mut total = 0i64;
-    for eco_type in 0..3 {
-        let key = format!("giant:stable:{eco_type}");
-        total += progress_comp.info.get_key_int(&key).max(0);
+fn build_role_coop_activity(
+    assets: &Assets,
+    progress_comp: &PlayerProgressComponent,
+    cond_ctx: Option<&EvalContext<'_>>,
+    activity_id: i32,
+) -> RoleCoopActivityData {
+    let info = &progress_comp.info;
+    let mut coop_roles = Vec::new();
+    for role in assets.coop_roles() {
+        let unlocked = role.UnlockQuestId <= 0
+            || cond_ctx.is_some_and(|c| c.quest_comp.info.finished_quests.contains(&role.UnlockQuestId));
+        let stored_lv = info.get_key_int(&format!("coop:role_lv:{}", role.Id)) as i32;
+        let claimed_lv = assets
+            .coop_role_levels()
+            .iter()
+            .filter(|lv| lv.CoopRoleId == role.Id && info.has_claim(&format!("coop:role:{}", lv.Id)))
+            .map(|lv| lv.CoopLevel)
+            .max()
+            .unwrap_or(0);
+        let role_lv = if stored_lv > 0 {
+            stored_lv.max(claimed_lv)
+        } else if unlocked {
+            claimed_lv.max(1)
+        } else {
+            claimed_lv
+        };
+        let rw_lv = (info.get_key_int(&format!("coop:role_rw:{}", role.Id)) as i32).max(claimed_lv);
+        coop_roles.push(CoopRoleInfo {
+            CoopRoleId: role.Id,
+            RoleLevel: role_lv,
+            RewardLevel: rw_lv,
+            FinishTime: 0,
+        });
     }
-    total.min(i64::from(i32::MAX)) as i32
+    let sp_claimed: Vec<i32> = assets
+        .coop_sp_rewards()
+        .iter()
+        .filter(|r| r.ActivityId == activity_id && info.has_claim(&format!("coop:sp:{}", r.Id)))
+        .map(|r| r.Id)
+        .collect();
+    let task_infos: Vec<CoopTaskCompleteInfo> = assets
+        .coop_tasks()
+        .iter()
+        .map(|t| {
+            let cond_done = t.ConditionGroup <= 0
+                || cond_ctx.is_none_or(|c| condition::eval_condition_group(c, t.ConditionGroup));
+            let lp1_done = t.LevelId1 <= 0
+                || cond_ctx.is_some_and(|c| {
+                    c.quest_comp.info.completed_level_plays.contains(&t.LevelId1)
+                        || c.quest_comp.info.finished_quests.contains(&t.CoopPreQuest)
+                });
+            let lp2_done = t.LevelId2 <= 0
+                || cond_ctx.is_some_and(|c| {
+                    c.quest_comp.info.completed_level_plays.contains(&t.LevelId2)
+                });
+            CoopTaskCompleteInfo {
+                CoopTaskId: t.Id,
+                Task: Some(ConditionTask {
+                    Id: t.Id,
+                    Current: i32::from(cond_done),
+                    Target: 1,
+                    Status: Some(if cond_done {
+                        ConditionTaskState::ConditionTaskFinish
+                    } else {
+                        ConditionTaskState::ConditionTaskRunning
+                    }),
+                }),
+                UnLockTime: 1,
+                LevelPlay1Done: lp1_done,
+                LevelPlay2Done: lp2_done,
+            }
+        })
+        .collect();
+    RoleCoopActivityData {
+        CoopRoleInfos: coop_roles,
+        RewardGetList: sp_claimed,
+        CoopTaskCompleteInfos: task_infos,
+        PreCompleteIds: Vec::new(),
+    }
 }
 
 fn default_data_for_type(
     act_type: ActivityType,
     id: i32,
     now_s: i64,
+    assets: &Assets,
     progress_comp: &PlayerProgressComponent,
+    cond_ctx: Option<&EvalContext<'_>>,
 ) -> Option<ActivityDataDataOneof> {
-    let end_s = now_s + 30 * 86_400;
+    if act_type == ActivityType::TeamParkOurActivity {
+        return Some(ActivityDataDataOneof::SolarisSpeedActivity(
+            build_team_parkour_activity(assets, progress_comp, id),
+        ));
+    }
+    if act_type == ActivityType::CoopActivity {
+        return Some(ActivityDataDataOneof::RoleCoopActivityData(
+            build_role_coop_activity(assets, progress_comp, cond_ctx, id),
+        ));
+    }
+    if let Some(built) =
+        super::activity_data::build_activity_data(act_type, id, now_s, assets, progress_comp, cond_ctx)
+    {
+        return Some(built);
+    }
+    let _end_s = now_s + 30 * 86_400;
+    let _ = rogue_season_id_for_activity(assets, id);
     Some(match act_type {
-        ActivityType::Parkour => ActivityDataDataOneof::ParkourActivity(ParkourActivity::default()),
-        ActivityType::GatherActivity => {
-            ActivityDataDataOneof::GatherActivityInfo(GatherActivityInfo::default())
-        }
-        ActivityType::Sign => ActivityDataDataOneof::SignActivity(SignActivity::default()),
         ActivityType::TowerGuide | ActivityType::TowerGuideNew | ActivityType::CircumFluence
         | ActivityType::TrackMoonPhase => return None,
-        ActivityType::NewBieCourse => {
-            ActivityDataDataOneof::NewBieCourseActivity(NewBieCourseActivity::default())
-        }
-        ActivityType::RougeActivity => ActivityDataDataOneof::ActivityRogueData(ActivityRogueData {
-            BeginOpenTime: 1,
-            EndOpenTime: end_s,
-            RoguelikeSeason: Some(RoguelikeSeason {
-                SeasonId: rogue_season_id_for_activity(id),
-                EndTime: end_s,
-                ..Default::default()
-            }),
-        }),
-        ActivityType::DoubleInstanceRewardActivity => {
-            ActivityDataDataOneof::DoubleInstActivityReward(DoubleInstActivityReward::default())
-        }
-        ActivityType::RoleTrialActivity => {
-            ActivityDataDataOneof::RoleTrialInfoActivity(RoleTrialInfoActivity::default())
-        }
-        ActivityType::Harvest => ActivityDataDataOneof::HarvestActivity(HarvestActivity::default()),
-        ActivityType::PhantomCollect => {
-            ActivityDataDataOneof::PhantomCollectActivity(PhantomCollectActivity::default())
-        }
-        ActivityType::DailyAdventureActivity => {
-            ActivityDataDataOneof::DailyAdventureActivityData(DailyAdventureActivityData::default())
-        }
-        ActivityType::LongShanMainActivity => {
-            ActivityDataDataOneof::ActivityLongShanMain(ActivityLongShanMain::default())
-        }
-        ActivityType::BossRushActivity => {
-            ActivityDataDataOneof::BossRushActivityData(BossRushActivityData::default())
-        }
-        ActivityType::TurnTableActivity => {
-            ActivityDataDataOneof::ActivityTurnTableData(ActivityTurnTableData::default())
-        }
-        ActivityType::TrackMoonActivity => {
-            ActivityDataDataOneof::TrackMoonActivityTaskData(ActivityTaskData::default())
-        }
-        ActivityType::TowerDefenceActivity => {
-            ActivityDataDataOneof::TowerDefenseActivityInfo(TowerDefenseActivityInfo::default())
-        }
-        ActivityType::TimePointRewardActivity => {
-            ActivityDataDataOneof::ActivityTimePointRewarData(ActivityTimePointRewarData::default())
-        }
-        ActivityType::RiskHarvest => {
-            ActivityDataDataOneof::RiskHarvestActivityData(RiskHarvestActivityData::default())
-        }
-        ActivityType::CorniceMeeting => {
-            ActivityDataDataOneof::ActivityCorniceMeetingData(ActivityCorniceMeetingData::default())
-        }
-        ActivityType::BlackCoastTheme => {
-            ActivityDataDataOneof::ActivityBlackCoastData(ActivityBlackCoastData::default())
-        }
-        ActivityType::RogueWhiteCat => {
-            ActivityDataDataOneof::DreamLinkActivityData(DreamLinkActivityData::default())
-        }
-        ActivityType::ScratchCard => {
-            ActivityDataDataOneof::ActivityScratchTicketData(ActivityScratchTicketData::default())
-        }
-        ActivityType::PreheatSign => {
-            ActivityDataDataOneof::PreheatSignActivityData(PreheatSignActivityData::default())
-        }
-        ActivityType::MowTower => {
-            ActivityDataDataOneof::MowTowerActivityData(MowTowerActivityData::default())
-        }
-        ActivityType::ThroughTrain => {
-            ActivityDataDataOneof::ThroughTrainActivityData(ThroughTrainActivityData::default())
-        }
-        ActivityType::SprintSign => ActivityDataDataOneof::SpringSignData(SpringSignData::default()),
-        ActivityType::MapTravelActivity => {
-            ActivityDataDataOneof::MapTravelActivityData(MapTravelActivityData::default())
-        }
-        ActivityType::FarmGold => ActivityDataDataOneof::FarmGoldData(FarmGoldData::default()),
-        ActivityType::RoleSkinTrialActivity => {
-            ActivityDataDataOneof::RoleSkinTrialActivity(RoleSkinTrialActivity::default())
-        }
-        ActivityType::RogueWeekly => {
-            ActivityDataDataOneof::ActivityWeeklyRogueData(ActivityWeeklyRogueData {
-                CycleId: progress_comp.info.get_key_int("rogue_weekly:cycle").max(1) as i32,
-                MaxFreeCount: 3,
-                UseFreeCount: progress_comp.info.get_key_int("rogue_weekly:bf_used") as i32,
-                ..Default::default()
-            })
-        }
-        ActivityType::FishingActivity => {
-            ActivityDataDataOneof::ActivityFishingData(ActivityFishingData::default())
-        }
-        ActivityType::TeamParkOurActivity => {
-            ActivityDataDataOneof::SolarisSpeedActivity(SolarisSpeedActivity::default())
-        }
-        ActivityType::BabelTower => {
-            ActivityDataDataOneof::BabelTowerActivity(BabelTowerActivity::default())
-        }
         ActivityType::BetHorses => {
             ActivityDataDataOneof::ActivityBetHorsesData(ActivityBetHorsesData {
                 ActivityId: id,
                 ..Default::default()
             })
-        }
-        ActivityType::Explore => {
-            ActivityDataDataOneof::ActivityMapExploreData(ActivityMapExploreData::default())
-        }
-        ActivityType::Abyss => {
-            ActivityDataDataOneof::DangoAbyssActivityData(DangoAbyssActivityData {
-                StartTime: 1,
-                EndTime: end_s * 1000,
-                ..Default::default()
-            })
-        }
-        ActivityType::RogueRes => {
-            ActivityDataDataOneof::ActivityPermanentRogueData(ActivityPermanentRogueData::default())
-        }
-        ActivityType::DangoMonopoly => {
-            ActivityDataDataOneof::ActivityDangoMonopolyData(ActivityDangoMonopolyData {
-                CurrentBoardId: 1,
-                ..Default::default()
-            })
-        }
-        ActivityType::CiacconaActivity => {
-            ActivityDataDataOneof::ActivityCiacconaGalData(ActivityCiacconaGalData::default())
-        }
-        ActivityType::Avignon => {
-            ActivityDataDataOneof::ActivityAvignon(ActivityAvignon::default())
         }
         ActivityType::H5CircumFluence => {
             ActivityDataDataOneof::ActivityInviteNewbie(ActivityInviteNewbie::default())
@@ -302,27 +292,12 @@ fn default_data_for_type(
                 ..Default::default()
             })
         }
-        ActivityType::RegressActivity => {
-            ActivityDataDataOneof::ActivityRegressData(ActivityRegressData {
-                EndTime: end_s,
-                Grade: 1,
-                ..Default::default()
-            })
-        }
         ActivityType::ConsumptiveActivity => {
             ActivityDataDataOneof::CumulativeShopData(CumulativeShopData {
                 ActivityId: id,
                 TotalScore: progress_comp.info.get_key_int("cons:score") as i32,
                 ..Default::default()
             })
-        }
-        ActivityType::PhantomBattle => {
-            ActivityDataDataOneof::PhantomArenaActivityData(PhantomArenaActivityData::default())
-        }
-        ActivityType::PhantomBattleRecord => {
-            ActivityDataDataOneof::PhantomBattleRecordActivityInfo(
-                PhantomArenaActivityData::default(),
-            )
         }
         ActivityType::PhantomBattleRecordGuide => {
             ActivityDataDataOneof::PhantomBattleGuideActivity(PhantomBattleGuideActivity::default())
@@ -336,141 +311,16 @@ fn default_data_for_type(
         ActivityType::NewbieCarnival => {
             ActivityDataDataOneof::BeginnerCarnivalData(BeginnerCarnivalData::default())
         }
-        ActivityType::MoraleActivity => {
-            ActivityDataDataOneof::ActivityMoraleData(ActivityMoraleData::default())
-        }
-        ActivityType::FloroRanchActivity => {
-            ActivityDataDataOneof::FloroRanchActivityData(FloroRanchActivityData::default())
-        }
-        ActivityType::LifePointChallenge => {
-            ActivityDataDataOneof::LifePointDrawActivityData(LifePointDrawActivityData::default())
-        }
-        ActivityType::TrapDefense => {
-            ActivityDataDataOneof::ActivityTrapDefenseData(ActivityTrapDefenseData::default())
-        }
-        ActivityType::FunPlay => {
-            ActivityDataDataOneof::ActivityFunPlayData(ActivityFunPlayData::default())
-        }
-        ActivityType::MoonPhase => {
-            ActivityDataDataOneof::ActivityMoonSignInData(ActivityMoonSignInData::default())
-        }
-        ActivityType::LineCross => {
-            ActivityDataDataOneof::ActivityLineCrossData(ActivityLineCrossData::default())
-        }
-        ActivityType::HonamiStory => {
-            ActivityDataDataOneof::HonamiStoryActivityData(HonamiStoryActivityData::default())
-        }
-        ActivityType::Survivors => {
-            ActivityDataDataOneof::SurvivorsActivityData(SurvivorsActivityData::default())
-        }
-        ActivityType::PhotoFight => {
-            ActivityDataDataOneof::FightPhotoActivityData(FightPhotoActivityData::default())
-        }
-        ActivityType::WuWuKuji => {
-            ActivityDataDataOneof::ActivityPrizeDrawingData(ActivityPrizeDrawingData::default())
-        }
-        ActivityType::InfrTheme => {
-            ActivityDataDataOneof::InfrThemeActivityPb(InfrThemeActivityPb::default())
-        }
-        ActivityType::CoopActivity => {
-            ActivityDataDataOneof::RoleCoopActivityData(RoleCoopActivityData::default())
-        }
-        ActivityType::MotorcycleIpLink => {
-            ActivityDataDataOneof::MotorCycleIpActivityData(MotorCycleIpActivityData::default())
-        }
-        ActivityType::SkinRewardActivity => {
-            ActivityDataDataOneof::SkinRewardActivityData(SkinRewardActivityData::default())
-        }
-        ActivityType::RoadBookActivity => {
-            ActivityDataDataOneof::RoadBookActivityInfo(RoadBookActivityInfo::default())
-        }
-        ActivityType::NewTowerClimbing => {
-            ActivityDataDataOneof::NewTowerClimbingActivityData(NewTowerClimbingActivityData {
-                CycleId: 1,
-                SeasonId: 1,
-                CycleBeginTime: 1,
-                CycleCloseTime: end_s,
-                SeasonBeginTime: 1,
-                ..Default::default()
-            })
-        }
-        ActivityType::MotorFight => {
-            ActivityDataDataOneof::MotorFightActivityPb(MotorFightActivityPb {
-                TalentTree: Some(MotorFightTalentTreePb::default()),
-                ..Default::default()
-            })
-        }
-        ActivityType::Encircle => {
-            ActivityDataDataOneof::EncircleActivityPb(EncircleActivityPb::default())
-        }
         ActivityType::NewPlayerSupportActivity => {
             ActivityDataDataOneof::NewPlayerSupportActivityData(
                 NewPlayerSupportActivityData::default(),
             )
-        }
-        ActivityType::SpringFestivalActivity => {
-            ActivityDataDataOneof::SpringFestivalActivityInfo(SpringFestivalActivityInfo::default())
-        }
-        ActivityType::MotorParkourActivity => {
-            ActivityDataDataOneof::MotorParkourActivityInfo(MotorParkourActivityInfo::default())
         }
         ActivityType::TotalTopUp => {
             ActivityDataDataOneof::TotalTopUpActivityInfo(TotalTopUpActivityInfo {
                 Score: progress_comp.info.get_key_int("topup:score") as i32,
                 ..Default::default()
             })
-        }
-        ActivityType::MotorDevelop => {
-            ActivityDataDataOneof::MotorDevelopActivityData(MotorDevelopActivityData::default())
-        }
-        ActivityType::FlagChallenge => {
-            ActivityDataDataOneof::FlagChallengeActivityInfo(FlagChallengeActivityInfo::default())
-        }
-        ActivityType::Rhythm => ActivityDataDataOneof::RhythmActivityPb(RhythmActivityPb::default()),
-        ActivityType::FeiXue => {
-            ActivityDataDataOneof::FeiXuePreheatActivityInfo(FeiXuePreheatActivityInfo::default())
-        }
-        ActivityType::DropCatchActivity => {
-            ActivityDataDataOneof::DropCatchActivityInfo(DropCatchActivityInfo::default())
-        }
-        ActivityType::TetrisActivity => {
-            ActivityDataDataOneof::TetrisActivityInfo(TetrisActivityInfo::default())
-        }
-        ActivityType::Kurotato => {
-            ActivityDataDataOneof::KurotatoActivityData(KurotatoActivityData::default())
-        }
-        ActivityType::PinballActivity => {
-            ActivityDataDataOneof::PinballActivityData(PinballActivityData::default())
-        }
-        ActivityType::WuWuWeekSign => {
-            ActivityDataDataOneof::WuWuWeekActivity(WuWuWeekActivity::default())
-        }
-        ActivityType::AnniversaryTheme => {
-            ActivityDataDataOneof::ThemeCelebration(ThemeCelebration::default())
-        }
-        ActivityType::BossPiling => {
-            ActivityDataDataOneof::BossPilingActivityInfo(BossPilingActivityInfo::default())
-        }
-        ActivityType::GolemCrackActivity => {
-            ActivityDataDataOneof::GolemCrackActivityInfo(GolemCrackActivityInfo::default())
-        }
-        ActivityType::EdgeRunnerActivity => {
-            ActivityDataDataOneof::EdgeRunnerActivityInfo(EdgeRunnerActivityInfo::default())
-        }
-        ActivityType::MotorDecalActivity => {
-            ActivityDataDataOneof::MotorDecalActivityData(MotorDecalActivityData::default())
-        }
-        ActivityType::MotorParkour => {
-            ActivityDataDataOneof::OnlineMotorActivityData(OnlineMotorActivityData::default())
-        }
-        ActivityType::LinkageCheckIn => {
-            ActivityDataDataOneof::LinkageCheckInActivityData(LinkageCheckInActivityData::default())
-        }
-        ActivityType::RoleGiftActivity => {
-            ActivityDataDataOneof::RoleGiftActivityData(RoleGiftActivityData::default())
-        }
-        ActivityType::RealmBetween => {
-            ActivityDataDataOneof::RealmBetweenActivityInfo(RealmBetweenActivityInfo::default())
         }
         ActivityType::ThroughTrainSummary => ActivityDataDataOneof::ThroughTrainSummaryActivityData(
             ThroughTrainSummaryActivityData::default(),
@@ -489,36 +339,6 @@ fn default_data_for_type(
         ActivityType::NewbieMain => {
             ActivityDataDataOneof::NewbieMainActivityPb(NewbieMainActivityPb::default())
         }
-        ActivityType::RoverRogue => {
-            ActivityDataDataOneof::RoverRogueActivityData(RoverRogueActivityData {
-                activityId: id,
-                HistoryInsInfo: Some(RoverRogueHistoryInsInfo::default()),
-                ..Default::default()
-            })
-        }
-        ActivityType::DangoBrawl => {
-            ActivityDataDataOneof::DangoBrawlActivityInfo(DangoBrawlActivityInfo::default())
-        }
-        ActivityType::QingXiaoPlayThePiano => {
-            ActivityDataDataOneof::QingXiaoActivityInfo(QingXiaoActivityInfo::default())
-        }
-        ActivityType::MatchThreeActivity => {
-            ActivityDataDataOneof::MatchThreeActivityInfo(MatchThreeActivityInfo::default())
-        }
-        ActivityType::SolarSchool => {
-            ActivityDataDataOneof::SolarSchoolActivityPb(SolarSchoolActivityPb::default())
-        }
-        ActivityType::GiantSystemActivity => {
-            ActivityDataDataOneof::GiantActivityInfo(GiantActivityInfo {
-                TotalStableValue: giant_total_stable_value(progress_comp),
-                ..Default::default()
-            })
-        }
-        ActivityType::RoleTower => ActivityDataDataOneof::RoleTowerActivityData(RoleTowerActivityData {
-            RankRewardSettleTime: end_s,
-            Score: progress_comp.info.get_key_int("role_tower:score") as i32,
-            ..Default::default()
-        }),
         _ => return None,
     })
 }
@@ -756,20 +576,12 @@ pub fn build_activity_list(
                     HadTakeReward: claimed,
                 },
             ))
-        } else if act_type == ActivityType::DoubleInstanceRewardActivity {
-            Some(ActivityDataDataOneof::DoubleInstActivityReward(
-                DoubleInstActivityReward::default(),
-            ))
-        } else if act_type == ActivityType::RoleTrialActivity {
-            Some(ActivityDataDataOneof::RoleTrialInfoActivity(
-                RoleTrialInfoActivity::default(),
-            ))
         } else if act_type == ActivityType::SpringFestivalActivity {
             Some(ActivityDataDataOneof::SpringFestivalActivityInfo(
                 build_spring_festival_activity(assets, progress_comp, cond_ctx, def.Id),
             ))
         } else {
-            default_data_for_type(act_type, def.Id, now_s, progress_comp)
+            default_data_for_type(act_type, def.Id, now_s, assets, progress_comp, cond_ctx)
         };
 
         if act_data.is_none() && !supports_base_only(act_type) {

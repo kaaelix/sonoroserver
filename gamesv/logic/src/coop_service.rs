@@ -10,15 +10,20 @@ use sonoro_common::fs::FileSystem;
 use sonoro_gamesv_fs::basic_info::BasicInfo;
 use sonoro_gamesv_fs::file_util::{load_or_create_zon, parse_zon, serialize_zon};
 use sonoro_gamesv_fs::progress_info::ProgressInfo;
-use sonoro_proto::enums::{EMatchPlayerUiState, ErrorCode, MatchFailReason, MatchTeamState, WorldEnterPermission, WorldTeamLeaveReason};
+use sonoro_proto::enums::{
+    EMatchPlayerUiState, EPlayerTeleportState, ErrorCode, MatchFailReason, MatchTeamState,
+    WorldEnterPermission, WorldTeamLeaveReason, WorldTeamPlayerChangeType,
+};
 use sonoro_proto::pb::{
-    AgreeJoinResultNotify, ApplyJoinWorldNotify, CancelMatchNotify, ChatContentProto, ChatNotify,
-    FriendAddedNotify, FriendApply, FriendApplyDeletedNotify, FriendApplyReceivedNotify,
-    FriendDeletedNotify, FriendInfo, JoinWorldTeamNotify, MatchConfirmNotify, MatchFailNotify,
-    MatchPlayerInfo, MatchTeamInfo, MatchTeamNotify, MatchTeamStateNotify, MovePackageNotify,
-    MovingEntityData, PlayerDetails, PlayerEnterWorldTeamNotify, PlayerLeaveWorldTeamNotify,
-    PrivateChatHistoryContentProto, StartMatchNotify, WorldTeamPlayerFightInfo,
-    WorldTeamPlayerInfo, WorldTeamRoleInfo,
+    AgreeJoinResultNotify, ApplyJoinWorldNotify, ApplyerEnterSceneNotify, CancelMatchNotify,
+    ChatContentProto, ChatNotify, EntitySimplyMoveInfo, FriendAddedNotify, FriendApply,
+    FriendApplyDeletedNotify, FriendApplyReceivedNotify, FriendDeletedNotify, FriendInfo,
+    JoinWorldTeamNotify, MatchConfirmNotify, MatchFailNotify, MatchPlayerInfo, MatchTeamInfo,
+    MatchTeamNotify, MatchTeamStateNotify, MovePackageNotify, MovingEntityData, PlayerDetails,
+    PlayerEnterWorldTeamNotify, PlayerLeaveWorldTeamNotify, PlayerLocation,
+    PlayerTeleportStateNotify, PrivateChatHistoryContentProto, Rotator, StartMatchNotify,
+    SyncPlayerLocationNotify, Vector, WorldTeamPlayerFightInfo, WorldTeamPlayerInfo,
+    WorldTeamPlayerInfoChangeNotify, WorldTeamRoleInfo,
 };
 use sonoro_proto::wire::PbMessage;
 
@@ -293,6 +298,148 @@ impl CoopService {
         }
     }
 
+    pub fn broadcast_room_except<M: PbMessage>(&self, sender_id: i32, msg_id: u16, msg: &M) {
+        let senders: Vec<Arc<dyn CoopSender>> = {
+            let online = self.online.lock().unwrap_or_else(|p| p.into_inner());
+            let host_id = online.get(&sender_id).map_or(0, |s| s.room_host_id);
+            if host_id <= 0 {
+                return;
+            }
+            online
+                .values()
+                .filter(|p| p.room_host_id == host_id && p.player_id != sender_id)
+                .take(8)
+                .map(|p| Arc::clone(&p.sender))
+                .collect()
+        };
+        if senders.is_empty() {
+            return;
+        }
+        let payload = msg.encode_to_vec();
+        for s in senders {
+            let _ = s.send_raw(msg_id, payload.clone());
+        }
+    }
+
+    pub fn notify_player_info_change(
+        &self,
+        player_id: i32,
+        change_type: WorldTeamPlayerChangeType,
+        int_value: i32,
+        str_value: &str,
+    ) {
+        {
+            let mut online = self.online.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(p) = online.get_mut(&player_id) {
+                match change_type {
+                    WorldTeamPlayerChangeType::Name => p.name = str_value.to_string(),
+                    WorldTeamPlayerChangeType::Head => p.head_id = int_value,
+                    WorldTeamPlayerChangeType::Level => p.level = int_value,
+                    WorldTeamPlayerChangeType::Signature => p.signature = str_value.to_string(),
+                    WorldTeamPlayerChangeType::Sex => p.sex = int_value,
+                    WorldTeamPlayerChangeType::PlayerTitle => {}
+                }
+            }
+        }
+        self.broadcast_room_except(
+            player_id,
+            WorldTeamPlayerInfoChangeNotify::MSG_ID,
+            &WorldTeamPlayerInfoChangeNotify {
+                PlayerId: player_id,
+                ChangeType: Some(change_type),
+                IntValue: int_value,
+                StringValue: str_value.as_bytes().to_vec(),
+            },
+        );
+    }
+
+    pub fn update_active_role(&self, player_id: i32, role_id: i32) {
+        if let Some(p) = self
+            .online
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&player_id)
+        {
+            p.cur_role_id = role_id;
+        }
+    }
+
+    pub fn notify_teleport_state(
+        &self,
+        player_id: i32,
+        teleport_state: EPlayerTeleportState,
+        entity_net_id: i64,
+        pos: [f32; 3],
+        rot: [f32; 3],
+    ) {
+        let cur_pos = (entity_net_id != 0).then_some(EntitySimplyMoveInfo {
+            EntityId: entity_net_id,
+            Location: Some(Vector {
+                X: pos[0],
+                Y: pos[1],
+                Z: pos[2],
+            }),
+            Rotation: Some(Rotator {
+                Roll: rot[0],
+                Pitch: rot[1],
+                Yaw: rot[2],
+            }),
+        });
+        self.broadcast_room_except(
+            player_id,
+            PlayerTeleportStateNotify::MSG_ID,
+            &PlayerTeleportStateNotify {
+                PlayerId: player_id,
+                TeleportState: Some(teleport_state),
+                CurRolePosInfo: cur_pos,
+            },
+        );
+    }
+
+    pub fn broadcast_player_location(
+        &self,
+        player_id: i32,
+        map_id: i32,
+        area_id: i32,
+        pos: [f32; 3],
+        gravity: [f32; 3],
+    ) {
+        let host_id = {
+            let mut online = self.online.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(p) = online.get_mut(&player_id) {
+                p.area_id = area_id;
+                p.room_host_id
+            } else {
+                0
+            }
+        };
+        if host_id <= 0 {
+            return;
+        }
+        self.broadcast_room(
+            host_id,
+            player_id,
+            SyncPlayerLocationNotify::MSG_ID,
+            &SyncPlayerLocationNotify {
+                LocationList: vec![PlayerLocation {
+                    MapId: map_id,
+                    PlayerId: player_id,
+                    AreaId: area_id,
+                    Location: Some(Vector {
+                        X: pos[0],
+                        Y: pos[1],
+                        Z: pos[2],
+                    }),
+                    GravityDirection: Some(Vector {
+                        X: gravity[0],
+                        Y: gravity[1],
+                        Z: gravity[2],
+                    }),
+                }],
+            },
+        );
+    }
+
     pub fn broadcast_move_except(&self, sender_id: i32, moving: Vec<MovingEntityData>) {
         let senders: Vec<Arc<dyn CoopSender>> = {
             let online = self.online.lock().unwrap_or_else(|p| p.into_inner());
@@ -452,6 +599,15 @@ impl CoopService {
                 PlayerEnterWorldTeamNotify::MSG_ID,
                 &PlayerEnterWorldTeamNotify {
                     PlayerInfo: Some(gwi),
+                },
+            );
+            self.broadcast_room(
+                host_id,
+                guest_id,
+                ApplyerEnterSceneNotify::MSG_ID,
+                &ApplyerEnterSceneNotify {
+                    PlayerId: guest_id,
+                    ErrorCode: Some(ErrorCode::Success),
                 },
             );
         }

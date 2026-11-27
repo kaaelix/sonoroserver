@@ -211,6 +211,11 @@ fn grant_drop_package_internal<S: PushSink + ?Sized>(
     if drop_id <= 0 {
         return Ok(GrantResult::default());
     }
+    if let Some(pc) = ctx.progress_comp.as_deref_mut()
+        && pc.info.mark_claim(&format!("drop:got:{drop_id}"))
+    {
+        let _ = pc.save(ctx.fs);
+    }
     let grants = preview_drop_items(ctx.assets, drop_id);
     if grants.is_empty() {
         tracing::debug!("DropPackage {drop_id} has no preview/override items, skipping");
