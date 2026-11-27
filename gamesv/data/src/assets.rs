@@ -492,6 +492,18 @@ impl Assets {
             .unwrap_or_default()
     }
 
+    pub fn quest_tree_nodes(&self) -> &[crate::gameplay_tables::QuestTreeNodeEntry] {
+        self.gameplay_cache
+            .quest_tree_nodes
+            .get_or_init(|| self.parse_raw_vec_cached("QuestTreeNode"))
+    }
+
+    pub fn short_messages(&self) -> &[crate::gameplay_tables::ShortMessageEntry] {
+        self.gameplay_cache
+            .short_messages
+            .get_or_init(|| self.parse_raw_vec_cached("ShortMessage"))
+    }
+
     pub fn direct_train_activities(
         &self,
     ) -> &[crate::gameplay_tables::DirectTrainActivityEntry] {

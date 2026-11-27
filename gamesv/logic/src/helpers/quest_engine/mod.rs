@@ -108,6 +108,13 @@ fn discard_save_block_progress_on_login<S: PushSink + ?Sized>(
         };
         let discard = save_block::plan_login_discard(&nodes, &active_nodes, &finished_nodes);
         if discard.is_empty() {
+            if active_nodes.is_empty() && !nodes.is_empty() {
+                ctx.quest_comp.login_restore.reenter_quests.push(quest_id);
+                tracing::info!(
+                    target: "quest_engine",
+                    "login restore: quest {quest_id} has empty active_nodes; queuing tree re-entry"
+                );
+            }
             continue;
         }
 
@@ -1689,6 +1696,17 @@ pub fn reconcile_account_state<S: PushSink + ?Sized>(
 
     if deep_repair {
         let _ = tree::refresh_available_quests(ctx, false)?;
+        let empty_active_qids: Vec<i32> = ctx
+            .quest_comp
+            .info
+            .active_quests
+            .iter()
+            .filter(|aq| aq.active_nodes.is_empty())
+            .map(|aq| aq.quest_id)
+            .collect();
+        for qid in empty_active_qids {
+            let _ = tree::advance_quest_tree(ctx, qid, false)?;
+        }
         triggers::ensure_tracked_focus_valid(ctx);
         quest_actions::push_func_open(ctx);
         triggers::push_quest_state_notifies(ctx)?;

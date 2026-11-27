@@ -3241,6 +3241,7 @@ pub fn on_phone_message_event<S: PushSink + ?Sized>(
     }
     if ctx.quest_comp.info.has_finished_quest(PROLOGUE_QUEST_ID) {
         let eval_ctx = ctx.make_eval_context();
+        let short_msgs = ctx.assets.short_messages();
         let phone_qids: Vec<i32> = ctx
             .assets
             .tables
@@ -3249,13 +3250,35 @@ pub fn on_phone_message_event<S: PushSink + ?Sized>(
             .iter()
             .filter_map(|q| {
                 let d = &q.Data;
-                (is_eligible_quest(ctx, d, false)
-                    && d.DistributeType == "PhoneMessage"
-                    && condition::eval_quest_provide_conditions(
-                        &eval_ctx,
-                        d.ProvideType.as_ref(),
-                    ))
-                .then_some(d.Id)
+                if !is_eligible_quest(ctx, d, false) || d.DistributeType != "PhoneMessage" {
+                    return None;
+                }
+                let linked_sms: Vec<i32> = short_msgs
+                    .iter()
+                    .filter(|sm| sm.Id > 0 && (sm.QuestId == d.Id || sm.ListenQuestId == d.Id))
+                    .map(|sm| sm.Id)
+                    .collect();
+                if !linked_sms.is_empty() {
+                    let triggered = linked_sms.iter().any(|&sm_id| {
+                        sm_id == phone_msg_id
+                            || ctx
+                                .quest_comp
+                                .info
+                                .progress
+                                .read_phone_messages
+                                .contains(&sm_id)
+                            || ctx.progress_comp.as_deref().is_some_and(|pc| {
+                                pc.info.has_claim(&format!("sm:unlock:{sm_id}"))
+                                    || pc.info.has_claim(&format!("sm:read:{sm_id}"))
+                                    || pc.info.has_claim(&format!("sm:fin:{sm_id}"))
+                            })
+                    });
+                    if !triggered {
+                        return None;
+                    }
+                }
+                condition::eval_quest_provide_conditions(&eval_ctx, d.ProvideType.as_ref())
+                    .then_some(d.Id)
             })
             .collect();
         for qid in phone_qids {

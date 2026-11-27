@@ -9641,6 +9641,133 @@ fn audit_161_elevator_after_join_skips_same_floor_move_notify() {
     );
 }
 
+#[test]
+fn audit_quest_tree_order_phone_message_and_empty_save_block_recovery() {
+    let mut h = TestHarness::new("audit_quest_tree_phone_save", Some(8));
+    let mut events = EventQueue::new();
+
+    // 1) Duplicate QuestTreeNode wrapper (110070 vs 112000) still allows 125000120 after 880000013.
+    {
+        let qinfo = &mut h.state.player_components.quest.info;
+        qinfo.finish_quest(quest_engine::PROLOGUE_QUEST_ID);
+        qinfo.finish_quest(880_000_013);
+    }
+    quest_engine::tree::refresh_available_quests(&mut h.state.quest_context(&mut events), false)
+        .expect("refresh after 880000013");
+    assert!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .has_active_quest(125_000_120),
+        "125000120 must still unlock via TN 110070 despite TN 112000 duplicate wrapper"
+    );
+
+    // 2) Finishing 114000026 must NOT early-unlock Ch.2 Epilogue 880000044 (PreNode 212000),
+    // while finishing 114000029 unlocks Ch.2 Act IV 145000005.
+    for q in [114_000_026, 114_000_027, 114_000_028, 114_000_030, 140_000_011] {
+        h.state.player_components.quest.info.finish_quest(q);
+    }
+    quest_engine::tree::refresh_available_quests(&mut h.state.quest_context(&mut events), false)
+        .expect("refresh before 114000029");
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .has_active_quest(880_000_044),
+        "880000044 must not auto-unlock before PreNode 212000 is finished"
+    );
+
+    h.state
+        .player_components
+        .quest
+        .info
+        .finish_quest(114_000_029);
+    quest_engine::tree::refresh_available_quests(&mut h.state.quest_context(&mut events), false)
+        .expect("refresh after 114000029");
+    assert!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .has_active_quest(145_000_005),
+        "145000005 (Ch.2 Act IV) must auto-unlock after 114000029"
+    );
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .has_active_quest(880_000_044),
+        "880000044 must remain locked until Ch.2 Act XII (175000000) finishes"
+    );
+
+    // 3) Reading unrelated phone message 37021 must NOT activate Ch.3 PhoneMessage quests
+    // (196700000..196700002, 146700000); reading 30015 unlocks only 196700000.
+    quest_engine::events::on_phone_message_read(&mut h.state.quest_context(&mut events), 37021)
+        .expect("unrelated phone read");
+    for q in [196_700_000, 196_700_001, 196_700_002, 146_700_000] {
+        assert!(
+            !h.state.player_components.quest.info.has_active_quest(q),
+            "unrelated SMS 37021 must not activate PhoneMessage quest {q}"
+        );
+    }
+    quest_engine::events::on_phone_message_read(&mut h.state.quest_context(&mut events), 30015)
+        .expect("linked phone read 30015");
+    assert!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .has_active_quest(196_700_000),
+        "linked SMS 30015 should activate 196700000"
+    );
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .has_active_quest(196_700_001)
+    );
+
+    // 4) Empty active_nodes on an active SaveConfig quest (145000005 after node 24) recovers on login + SceneLoadingFinish.
+    {
+        let aq = h
+            .state
+            .player_components
+            .quest
+            .info
+            .get_or_add_active_quest(145_000_005);
+        aq.active_nodes.clear();
+        aq.finished_nodes = vec![12, 20, 22, 319, 614, 13, 23, 405, 191, 190, 36, 24];
+    }
+    quest_engine::sync_on_login(&mut h.state.quest_context(&mut events)).expect("sync_on_login");
+    assert!(
+        h.state
+            .player_components
+            .quest
+            .login_restore
+            .reenter_quests
+            .contains(&145_000_005),
+        "empty active_nodes quest 145000005 must queue tree re-entry on login"
+    );
+    quest_engine::on_scene_loading_finish(&mut h.state.quest_context(&mut events))
+        .expect("on_scene_loading_finish");
+    let aq_after = h
+        .state
+        .player_components
+        .quest
+        .info
+        .find_active_quest(145_000_005)
+        .expect("145000005 active after recovery");
+    assert!(
+        !aq_after.active_nodes.is_empty(),
+        "145000005 active_nodes must recover non-empty after SceneLoadingFinish: {aq_after:?}"
+    );
+}
+
+
 
 
 

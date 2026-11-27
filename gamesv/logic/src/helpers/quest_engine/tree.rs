@@ -595,8 +595,46 @@ pub fn is_eligible_quest<S: PushSink + ?Sized>(
                 return false;
             }
         }
+        if d.Type == 1 && !main_story_tree_pre_nodes_satisfied(ctx, d.Id) {
+            return false;
+        }
     }
     true
+}
+
+fn main_story_tree_pre_nodes_satisfied<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    quest_id: i32,
+) -> bool {
+    let tree_nodes = ctx.assets.quest_tree_nodes();
+    let matching: Vec<_> = tree_nodes
+        .iter()
+        .filter(|tn| tn.QuestType == 1 && tn.QuestArray.contains(&quest_id))
+        .collect();
+    if matching.is_empty() {
+        return true;
+    }
+    // Some chapters duplicate the same QuestArray onto a wrapper node (e.g. 110070 -> 112000);
+    // unlock once at least one tree node for this quest has all external prerequisites finished.
+    matching.iter().any(|tn| {
+        tn.PreNode.iter().all(|&pre_id| {
+            let Some(pre_tn) = tree_nodes.iter().find(|n| n.Id == pre_id) else {
+                return true;
+            };
+            let reqs: &[i32] = if !pre_tn.CompleteQuestID.is_empty() {
+                &pre_tn.CompleteQuestID
+            } else if let Some(last_q) = pre_tn.QuestArray.last() {
+                std::slice::from_ref(last_q)
+            } else {
+                &[]
+            };
+            if reqs.is_empty() || pre_tn.QuestArray.contains(&quest_id) {
+                return true;
+            }
+            reqs.iter()
+                .all(|&req_q| ctx.quest_comp.info.has_finished_quest(req_q))
+        })
+    })
 }
 
 pub fn activate_quest<S: PushSink + ?Sized>(

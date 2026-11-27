@@ -375,8 +375,36 @@ pub struct RoverRogueLootEntry {
     pub MaxLevel: i32,
 }
 
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct QuestTreeNodeEntry {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default)]
+    pub QuestArray: Vec<i32>,
+    #[serde(default)]
+    pub CompleteQuestID: Vec<i32>,
+    #[serde(default)]
+    pub QuestType: i32,
+    #[serde(default)]
+    pub PreNode: Vec<i32>,
+}
+
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ShortMessageEntry {
+    #[serde(default)]
+    pub Id: i32,
+    #[serde(default)]
+    pub QuestId: i32,
+    #[serde(default)]
+    pub ListenQuestId: i32,
+}
+
 #[derive(Default)]
 pub struct GameplayTableCache {
+    pub quest_tree_nodes: OnceLock<Vec<QuestTreeNodeEntry>>,
+    pub short_messages: OnceLock<Vec<ShortMessageEntry>>,
     pub direct_train_activities: OnceLock<Vec<DirectTrainActivityEntry>>,
     pub direct_train_main: OnceLock<Vec<DirectTrainMainEntry>>,
     pub level_play_mappings: OnceLock<Vec<LevelPlayInfoMappingEntry>>,
