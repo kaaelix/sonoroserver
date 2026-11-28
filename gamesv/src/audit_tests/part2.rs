@@ -9967,3 +9967,190 @@ fn audit_225_event_slot_dreamlink_self_var_fade_and_cross_map_node() {
     );
 }
 
+#[test]
+fn audit_226_keyword_entself_system_string_copy_and_lp_reach_pre_context() {
+    use serde_json::json;
+
+    let mut h = TestHarness::new("audit_226_var_fixes", Some(8));
+    let mut events = EventQueue::new();
+
+    // 1) "Keyword" + persisted progress_comp Global vars (e.g. Ch.2 Act V 165000003 node 97).
+    let nodes_165 = h
+        .state
+        .assets
+        .quest_nodes
+        .get_owner_nodes(165_000_003)
+        .expect("165000003 nodes");
+    let n97 = nodes_165
+        .iter()
+        .find(|n| n.id == 97)
+        .cloned()
+        .expect("165000003 node 97");
+    assert!(
+        !quest_engine::eval_child_condition_auto(&h.state.quest_context(&mut events), 165_000_003, &n97),
+        "165000003 node 97 must be false before 夏空线海边变量1 is set"
+    );
+    h.state
+        .player_components
+        .progress
+        .info
+        .set_key_int("var:夏空线海边变量1", 1);
+    assert!(
+        quest_engine::eval_child_condition_auto(&h.state.quest_context(&mut events), 165_000_003, &n97),
+        "165000003 node 97 must resolve Keyword + Global progress_comp var:夏空线海边变量1"
+    );
+    h.state
+        .player_components
+        .progress
+        .info
+        .set_key_str("var:kw_str_key", "ok");
+    let kw_str_cond = json!({
+        "Type": "CompareVar",
+        "Var1": { "Type": "String", "Source": "Global", "Keyword": "kw_str_key" },
+        "Compare": "Eq",
+        "Var2": { "Type": "String", "Source": "Constant", "Value": "ok" }
+    });
+    assert!(
+        eval_single_inline_condition(&h.state.quest_context(&mut events).make_eval_context(), &kw_str_cond),
+        "String CompareVar must resolve Keyword + Global progress_comp var"
+    );
+
+    // 2) EntSelf / self_entity_config_id scoped Self variable lookup.
+    let cfg_id = 145_750_138i32;
+    h.state
+        .player_components
+        .quest
+        .info
+        .set_var_int(&format!("Entity:{cfg_id}:ent_flag"), 7);
+    let ent_cond = json!({
+        "Type": "CompareVar",
+        "Var1": { "Type": "Int", "Source": "Self", "Name": "ent_flag" },
+        "Compare": "Eq",
+        "Var2": { "Type": "Int", "Source": "Constant", "Value": 7 }
+    });
+    let qctx = h.state.quest_context(&mut events);
+    let mut ent_eval = qctx.make_eval_context();
+    ent_eval.self_entity_config_id = cfg_id;
+    assert!(
+        eval_single_inline_condition(&ent_eval, &ent_cond),
+        "Entity trigger CompareVar with Source=Self must resolve self_entity_config_id"
+    );
+
+    // 3) apply_set_var copying a Self String variable preserves owner_id scope.
+    let mut cbs = ActionCallbacks::default();
+    execute_action_list(
+        &mut h.state.quest_context(&mut events),
+        &mut cbs,
+        145_750_001,
+        1,
+        &[
+            json!({
+                "Name": "SetVar",
+                "Params": {
+                    "VarLeft": { "Type": "String", "Source": "Self", "Name": "src_text" },
+                    "VarRight": { "Type": "String", "Source": "Constant", "Value": "avinoleum" }
+                }
+            }),
+            json!({
+                "Name": "SetVar",
+                "Params": {
+                    "VarLeft": { "Type": "String", "Source": "Self", "Name": "dst_text" },
+                    "VarRight": { "Type": "String", "Source": "Self", "Name": "src_text" }
+                }
+            }),
+        ],
+    )
+    .expect("execute Self String SetVar copy");
+    assert_eq!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_var_str("Self:145750001:dst_text"),
+        "avinoleum"
+    );
+
+    // 4) System variables: QuestBranchPageId + CommonHostToTargetDistance (SetVar & CompareVar).
+    h.state
+        .player_components
+        .quest
+        .info
+        .select_quest_branch(1000, 2);
+    let nodes_ep = h
+        .state
+        .assets
+        .quest_nodes
+        .get_owner_nodes(880_000_045)
+        .expect("880000045 nodes");
+    let n29 = nodes_ep
+        .iter()
+        .find(|n| n.id == 29)
+        .cloned()
+        .expect("880000045 node 29");
+    assert!(
+        quest_engine::eval_child_condition_auto(&h.state.quest_context(&mut events), 880_000_045, &n29),
+        "880000045 node 29 QuestBranchPageId==2 must evaluate true"
+    );
+    h.state
+        .scene
+        .as_mut()
+        .unwrap()
+        .instance
+        .players
+        .push(ScenePlayer {
+            id: 1,
+            group_type: 1,
+            location: [0.0, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0],
+        });
+    execute_action_list(
+        &mut h.state.quest_context(&mut events),
+        &mut cbs,
+        938_750_003,
+        74,
+        &[json!({
+            "Name": "SetVar",
+            "Params": {
+                "VarLeft": { "Type": "Int", "Source": "Self", "Name": "dist" },
+                "VarRight": {
+                    "Type": "Int",
+                    "Source": "System",
+                    "Var": {
+                        "Type": "CommonHostToTargetDistance",
+                        "Pos": { "X": 300.0, "Y": 400.0, "Z": 9999.0 },
+                        "DistanceMeasureMode": "Horizontal"
+                    }
+                }
+            }
+        })],
+    )
+    .expect("execute System CommonHostToTargetDistance SetVar");
+    assert_eq!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_var_int("Self:938750003:dist"),
+        500,
+        "System CommonHostToTargetDistance Horizontal from (0,0) to (300,400) must equal 500"
+    );
+
+    // 5) LevelPlayContext::make_eval_context_for_lp evaluates Self vars with owner_quest_id = lp_id.
+    h.state
+        .player_components
+        .quest
+        .info
+        .set_var_int("Self:170700000:lp_pre_ok", 1);
+    let lp_pre_cond = json!({
+        "Type": "CompareVar",
+        "Var1": { "Type": "Int", "Source": "Self", "Name": "lp_pre_ok" },
+        "Compare": "Eq",
+        "Var2": { "Type": "Int", "Source": "Constant", "Value": 1 }
+    });
+    let mut qctx = h.state.quest_context(&mut events);
+    let lp_ctx = level_play::LevelPlayContext::from_quest_ctx(&mut qctx).unwrap();
+    assert!(!eval_single_inline_condition(&lp_ctx.make_eval_context(), &lp_pre_cond));
+    assert!(eval_single_inline_condition(&lp_ctx.make_eval_context_for_lp(170_700_000), &lp_pre_cond));
+}
+
+

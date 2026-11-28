@@ -163,6 +163,10 @@ impl<'a, S: PushSink + ?Sized> LevelPlayContext<'a, S> {
     }
 
     pub fn make_eval_context(&self) -> EvalContext<'_> {
+        self.make_eval_context_for_lp(0)
+    }
+
+    pub fn make_eval_context_for_lp(&self, lp_id: i32) -> EvalContext<'_> {
         EvalContext {
             assets: Some(self.assets),
             basic_comp: self.basic_comp,
@@ -175,7 +179,7 @@ impl<'a, S: PushSink + ?Sized> LevelPlayContext<'a, S> {
             guide_comp: self.guide_comp.as_deref(),
             progress_comp: self.progress_comp.as_deref(),
             scene: Some(&*self.scene),
-            owner_quest_id: 0,
+            owner_quest_id: lp_id,
             target_role_id: 0,
             self_entity_config_id: 0,
         }
@@ -533,21 +537,23 @@ fn current_player_pos<S: PushSink + ?Sized>(ctx: &LevelPlayContext<'_, S>) -> Op
 
 fn is_player_within_reach_area<S: PushSink + ?Sized>(
     ctx: &LevelPlayContext<'_, S>,
+    lp_id: i32,
     node_data: &Value,
     cond: &Map<String, Value>,
     pos: [f32; 3],
 ) -> bool {
-    matches_reach_area_inner(ctx, node_data, cond, pos)
+    matches_reach_area_inner(ctx, lp_id, node_data, cond, pos)
 }
 
 fn matches_reach_area_inner<S: PushSink + ?Sized>(
     ctx: &LevelPlayContext<'_, S>,
+    lp_id: i32,
     node_data: &Value,
     cond: &Map<String, Value>,
     pos: [f32; 3],
 ) -> bool {
     if let Some(pre) = cond.get("PreConditions")
-        && !condition::eval_inline_condition_block(&ctx.make_eval_context(), pre)
+        && !condition::eval_inline_condition_block(&ctx.make_eval_context_for_lp(lp_id), pre)
     {
         return false;
     }
@@ -842,6 +848,7 @@ pub fn is_parkour_challenge_lp(lp_id: i32) -> bool {
 
 fn eval_level_play_condition_block<S: PushSink + ?Sized>(
     ctx: &LevelPlayContext<'_, S>,
+    lp_id: i32,
     cond_val_opt: Option<&Value>,
     player_pos_opt: Option<[f32; 3]>,
 ) -> bool {
@@ -859,13 +866,13 @@ fn eval_level_play_condition_block<S: PushSink + ?Sized>(
     }
 
     let is_or = json_int(obj.get("Type")).unwrap_or(0) == 1;
-    let eval_ctx = ctx.make_eval_context();
+    let eval_ctx = ctx.make_eval_context_for_lp(lp_id);
     let player_pos = player_pos_opt.or_else(|| current_player_pos(ctx));
 
     for cond in conds {
         let passed = match cond.as_object().and_then(|c| json_str(c.get("Type"))) {
             Some("ReachArea") => cond.as_object().is_some_and(|cobj| {
-                player_pos.is_some_and(|pos| matches_reach_area_inner(ctx, &Value::Null, cobj, pos))
+                player_pos.is_some_and(|pos| matches_reach_area_inner(ctx, lp_id, &Value::Null, cobj, pos))
             }),
             _ => condition::eval_single_provide_condition(&eval_ctx, cond),
         };
@@ -884,7 +891,12 @@ fn eval_level_play_open_condition<S: PushSink + ?Sized>(
     lp: &LevelPlayData,
     player_pos_opt: Option<[f32; 3]>,
 ) -> bool {
-    eval_level_play_condition_block(ctx, lp.Data.LevelPlayOpenCondition.as_ref(), player_pos_opt)
+    eval_level_play_condition_block(
+        ctx,
+        lp.LevelPlayId,
+        lp.Data.LevelPlayOpenCondition.as_ref(),
+        player_pos_opt,
+    )
 }
 
 fn can_enter_level_play<S: PushSink + ?Sized>(
@@ -946,7 +958,7 @@ fn can_enter_level_play<S: PushSink + ?Sized>(
                     .LevelPlayActive
                     .as_ref()
                     .and_then(|act| act.ActiveCondition.as_ref());
-                if !eval_level_play_condition_block(ctx, active_cond, player_pos_opt) {
+                if !eval_level_play_condition_block(ctx, lp_id, active_cond, player_pos_opt) {
                     return false;
                 }
             }
@@ -976,7 +988,7 @@ fn is_lp_child_quest_satisfied_now<S: PushSink + ?Sized>(
         let Some(pos) = player_pos_opt.or_else(|| current_player_pos(ctx)) else {
             return false;
         };
-        return is_player_within_reach_area(ctx, &node.data, cond, pos);
+        return is_player_within_reach_area(ctx, lp_id, &node.data, cond, pos);
     }
     let qctx = ctx.as_quest_ctx();
     quest_engine::eval_child_condition_auto(&qctx, lp_id, node)
@@ -3731,7 +3743,7 @@ pub fn on_player_move<S: PushSink + ?Sized>(
                 continue;
             };
             if json_str(cond.get("Type")) == Some("ReachArea")
-                && is_player_within_reach_area(ctx, &node.data, cond, player_pos)
+                && is_player_within_reach_area(ctx, lp_id, &node.data, cond, player_pos)
             {
                 complete_lp_child_quest(ctx, lp_id, node, true, &mut dirty_pc, None)?;
                 reach_done = true;

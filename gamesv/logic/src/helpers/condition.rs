@@ -4598,15 +4598,80 @@ fn scoped_var_name(ctx: &EvalContext<'_>, var_obj: &Map<String, Value>, name: &s
                     return k;
                 }
             }
+            if ctx.self_entity_config_id > 0 {
+                if let Some(net_id) =
+                    scene.find_entity_net_id_by_config_id(ctx.self_entity_config_id)
+                {
+                    let k = format!("EntSelf:{net_id}:{name}");
+                    if ctx.quest_comp.info.has_var(&k) {
+                        return k;
+                    }
+                }
+                let k = format!("Entity:{}:{name}", ctx.self_entity_config_id);
+                if ctx.quest_comp.info.has_var(&k) {
+                    return k;
+                }
+            }
             if scene.active_flow_id > 0 {
                 let k = format!("FlowSelf:{}:{name}", scene.active_flow_id);
                 if ctx.quest_comp.info.has_var(&k) {
                     return k;
                 }
             }
+        } else if ctx.self_entity_config_id > 0 {
+            let k = format!("Entity:{}:{name}", ctx.self_entity_config_id);
+            if ctx.quest_comp.info.has_var(&k) {
+                return k;
+            }
         }
     }
     name.to_string()
+}
+
+/// Evaluates built-in `Source == "System"` variables (branch selection and distance checks).
+pub fn eval_system_var(ctx: &EvalContext<'_>, var_obj: &Map<String, Value>) -> Option<f64> {
+    let var = var_obj.get("Var")?.as_object()?;
+    let vtype = get_param_str(var, "Type")?;
+    match vtype {
+        "QuestBranchPageId" => {
+            let page_id = get_param_int(var, "QuestBranchPageId")?;
+            let cur = ctx
+                .quest_comp
+                .info
+                .progress
+                .quest_branches
+                .iter()
+                .find(|rec| rec.page_id == page_id)
+                .map_or(0, |rec| rec.cur_branch);
+            Some(f64::from(cur))
+        }
+        "CommonHostToTargetDistance" => {
+            let pos_obj = var.get("Pos")?.as_object()?;
+            let tx = pos_obj.get("X").and_then(Value::as_f64).unwrap_or(0.0);
+            let ty = pos_obj.get("Y").and_then(Value::as_f64).unwrap_or(0.0);
+            let tz = pos_obj.get("Z").and_then(Value::as_f64).unwrap_or(0.0);
+            let scene = ctx.scene?;
+            let cur_eid = scene.current_role_entity_id();
+            let p = if cur_eid > 0 {
+                scene
+                    .entity(cur_eid)
+                    .and_then(|e| e.position.map(|loc| loc.location))
+            } else {
+                None
+            }
+            .or_else(|| scene.instance.players.first().map(|pl| pl.location))?;
+            let dx = f64::from(p[0]) - tx;
+            let dy = f64::from(p[1]) - ty;
+            let dist = if get_param_str(var, "DistanceMeasureMode") == Some("Horizontal") {
+                (dx * dx + dy * dy).sqrt()
+            } else {
+                let dz = f64::from(p[2]) - tz;
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            };
+            Some(dist)
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn lookup_entity_config_var(
@@ -4614,15 +4679,19 @@ pub(crate) fn lookup_entity_config_var(
     obj: &Map<String, Value>,
     name: &str,
 ) -> Option<Value> {
-    if get_param_str(obj, "Source")? != "Other" {
+    let src = get_param_str(obj, "Source")?;
+    let ref_id = if src == "Other" {
+        if get_param_str(obj, "RefType")? != "Entity" {
+            return None;
+        }
+        match obj.get("RefId")? {
+            Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64))?,
+            _ => return None,
+        }
+    } else if src == "Self" && ctx.self_entity_config_id > 0 {
+        i64::from(ctx.self_entity_config_id)
+    } else {
         return None;
-    }
-    if get_param_str(obj, "RefType")? != "Entity" {
-        return None;
-    }
-    let ref_id = match obj.get("RefId")? {
-        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64))?,
-        _ => return None,
     };
     let assets = ctx.assets?;
     let map_id = ctx
@@ -4648,11 +4717,19 @@ fn resolve_var_str(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> Option<Str
         };
         return val.as_str().map(str::to_string);
     }
-    let name = get_param_str(v, "Name")?;
+    let name = crate::helpers::quest_types::resolve_var_name(v)?;
     let scoped = scoped_var_name(ctx, v, name);
     let val = ctx.quest_comp.info.get_var_str(&scoped);
     if !val.is_empty() {
         return Some(val.to_string());
+    }
+    if src == "Global"
+        && let Some(pc) = ctx.progress_comp
+    {
+        let pval = pc.info.get_key_str(&format!("var:{name}"));
+        if !pval.is_empty() {
+            return Some(pval.to_string());
+        }
     }
     if let Some(init_val) = lookup_entity_config_var(ctx, v, name)
         && let Some(s) = init_val.as_str()
@@ -4678,7 +4755,10 @@ fn resolve_var_float(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> f64 {
             _ => 0.0,
         };
     }
-    let Some(name) = get_param_str(v, "Name") else {
+    if src == "System" {
+        return eval_system_var(ctx, v).unwrap_or(0.0);
+    }
+    let Some(name) = crate::helpers::quest_types::resolve_var_name(v) else {
         return 0.0;
     };
     let scoped = scoped_var_name(ctx, v, name);
@@ -4691,6 +4771,21 @@ fn resolve_var_float(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> f64 {
     let iv = ctx.quest_comp.info.get_var_int(&scoped);
     if iv != 0 {
         return f64::from(iv);
+    }
+    if src == "Global"
+        && let Some(pc) = ctx.progress_comp
+    {
+        let gk = format!("var:{name}");
+        let ps = pc.info.get_key_str(&gk);
+        if !ps.is_empty()
+            && let Ok(f) = ps.parse::<f64>()
+        {
+            return f;
+        }
+        let pi = pc.info.get_key_int(&gk);
+        if pi != 0 {
+            return pi as f64;
+        }
     }
     if let Some(init_val) = lookup_entity_config_var(ctx, v, name) {
         return match init_val {
@@ -4725,7 +4820,10 @@ fn resolve_var_value(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> i32 {
             _ => 0,
         };
     }
-    let Some(name) = v.get("Name").and_then(Value::as_str) else {
+    if src == "System" {
+        return eval_system_var(ctx, v).map_or(0, |f| f.round() as i32);
+    }
+    let Some(name) = crate::helpers::quest_types::resolve_var_name(v) else {
         return 0;
     };
     let scoped = scoped_var_name(ctx, v, name);
@@ -4736,9 +4834,16 @@ fn resolve_var_value(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> i32 {
     {
         return 1;
     }
-    let val = ctx.quest_comp.info.get_var_int(&scoped);
-    if val != 0 {
-        return val;
+    if ctx.quest_comp.info.has_var(&scoped) {
+        return ctx.quest_comp.info.get_var_int(&scoped);
+    }
+    if src == "Global"
+        && let Some(pc) = ctx.progress_comp
+    {
+        let gk = format!("var:{name}");
+        if let Some(entry) = pc.info.dynamic.ints.iter().find(|e| e.key == gk) {
+            return entry.val.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        }
     }
     if let Some(init_val) = lookup_entity_config_var(ctx, v, name) {
         return match init_val {
@@ -4751,7 +4856,7 @@ fn resolve_var_value(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> i32 {
         };
     }
     if scoped == name {
-        val
+        0
     } else {
         ctx.quest_comp.info.get_var_int(name)
     }

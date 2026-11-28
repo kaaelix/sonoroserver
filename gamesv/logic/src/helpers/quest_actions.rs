@@ -55,7 +55,7 @@ use crate::helpers::condition::{
 use crate::helpers::quest_types::{
     ActionCallbacks, DeferredBtVar, QuestContext, json_bool, json_float, json_i64, json_int,
     json_str, parse_int_list, parse_str_list, resolve_var_int_for_owner, resolve_var_name,
-    scoped_var_key, scoped_var_key_with_owner,
+    scoped_var_key_with_owner,
 };
 use crate::helpers::reward::{self, RewardItem};
 use crate::helpers::{gameplay_tags, gravity, map as map_helper, morale, prologue_quest, spline_state, trial_roles};
@@ -4021,6 +4021,33 @@ fn persist_global_var_str<S: PushSink + ?Sized>(
     }
 }
 
+fn write_set_var_int_and_emit<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    callbacks: &mut ActionCallbacks<'_, S>,
+    owner_id: i32,
+    base_name: &str,
+    store_key: &str,
+    iv: i32,
+    raw_i64: i64,
+    is_global: bool,
+) -> io::Result<()> {
+    ctx.quest_comp.info.set_var_int(store_key, iv);
+    if is_global {
+        persist_global_var_int(ctx, base_name, raw_i64);
+    }
+    emit_var_changed(
+        ctx,
+        callbacks,
+        owner_id,
+        base_name,
+        VarDefinePb {
+            VarType: 1,
+            Value: Some(VarDefinePbValueOneof::Int(raw_i64)),
+        },
+        is_global,
+    )
+}
+
 fn apply_set_var<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     callbacks: &mut ActionCallbacks<'_, S>,
@@ -4072,20 +4099,8 @@ fn apply_set_var<S: PushSink + ?Sized>(
             Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     let iv = i.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
-                    ctx.quest_comp.info.set_var_int(&store_key, iv);
-                    if is_global {
-                        persist_global_var_int(ctx, base_name, i);
-                    }
-                    emit_var_changed(
-                        ctx,
-                        callbacks,
-                        owner_id,
-                        base_name,
-                        VarDefinePb {
-                            VarType: 1,
-                            Value: Some(VarDefinePbValueOneof::Int(i)),
-                        },
-                        is_global,
+                    write_set_var_int_and_emit(
+                        ctx, callbacks, owner_id, base_name, &store_key, iv, i, is_global,
                     )?;
                 } else if let Some(f) = n.as_f64() {
                     let iv = f.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
@@ -4125,13 +4140,39 @@ fn apply_set_var<S: PushSink + ?Sized>(
             }
             _ => {}
         }
+    } else if json_str(right.get("Source")) == Some("System") {
+        let iv = crate::helpers::condition::eval_system_var(
+            &ctx.make_eval_context_for_quest(owner_id),
+            right,
+        )
+        .map_or(0, |f| f.round() as i32);
+        write_set_var_int_and_emit(
+            ctx,
+            callbacks,
+            owner_id,
+            base_name,
+            &store_key,
+            iv,
+            i64::from(iv),
+            is_global,
+        )?;
     } else if let Some(src_name) = resolve_var_name(right) {
         let src_type = json_str(right.get("Type")).unwrap_or("");
+        let src_is_global = json_str(right.get("Source")) == Some("Global");
         if src_type == "String" {
-            let sk = scoped_var_key(right, src_name).unwrap_or_else(|| src_name.to_string());
+            let sk = scoped_var_key_with_owner(ctx.scene.as_deref(), owner_id, right, src_name)
+                .unwrap_or_else(|| src_name.to_string());
             let s1 = ctx.quest_comp.info.get_var_str(&sk);
             let sv = if !s1.is_empty() {
                 s1.to_string()
+            } else if src_is_global
+                && let Some(ps) = ctx
+                    .progress_comp
+                    .as_deref()
+                    .map(|pc| pc.info.get_key_str(&format!("var:{src_name}")))
+                    .filter(|s| !s.is_empty())
+            {
+                ps.to_string()
             } else {
                 ctx.quest_comp.info.get_var_str(src_name).to_string()
             };
@@ -4152,19 +4193,14 @@ fn apply_set_var<S: PushSink + ?Sized>(
             )?;
         } else {
             let iv = resolve_var_int_for_owner(ctx, owner_id, Some(right_val));
-            ctx.quest_comp.info.set_var_int(&store_key, iv);
-            if is_global {
-                persist_global_var_int(ctx, base_name, i64::from(iv));
-            }
-            emit_var_changed(
+            write_set_var_int_and_emit(
                 ctx,
                 callbacks,
                 owner_id,
                 base_name,
-                VarDefinePb {
-                    VarType: 1,
-                    Value: Some(VarDefinePbValueOneof::Int(i64::from(iv))),
-                },
+                &store_key,
+                iv,
+                i64::from(iv),
                 is_global,
             )?;
         }

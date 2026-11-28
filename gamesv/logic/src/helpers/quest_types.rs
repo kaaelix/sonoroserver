@@ -296,6 +296,10 @@ pub fn resolve_var_int_for_owner<S: PushSink + ?Sized>(
     if src == "Constant" {
         return json_int(obj.get("Value")).unwrap_or(0);
     }
+    if src == "System" {
+        return condition::eval_system_var(&ctx.make_eval_context_for_quest(owner_id), obj)
+            .map_or(0, |f| f.round() as i32);
+    }
     let Some(name) = resolve_var_name(obj) else {
         return 0;
     };
