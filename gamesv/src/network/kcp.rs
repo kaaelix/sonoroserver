@@ -285,16 +285,25 @@ impl Kcp {
     }
 
     fn update_ack(&mut self, rtt: i32) {
+        let rtt = rtt.clamp(0, IKCP_RTO_MAX);
         if self.rx_srtt == 0 {
             self.rx_srtt = rtt;
             self.rx_rttval = rtt / 2;
         } else {
-            let delta = (rtt - self.rx_srtt).abs();
-            self.rx_rttval = (3 * self.rx_rttval + delta) / 4;
-            self.rx_srtt = ((7 * self.rx_srtt + rtt) / 8).max(1);
+            let delta = i64::from(rtt).abs_diff(i64::from(self.rx_srtt)) as i64;
+            let rttval = (3_i64 * i64::from(self.rx_rttval).max(0) + delta) / 4;
+            let srtt = ((7_i64 * i64::from(self.rx_srtt).clamp(0, i64::from(IKCP_RTO_MAX))
+                + i64::from(rtt))
+                / 8)
+                .max(1);
+            self.rx_rttval = rttval.min(i64::from(IKCP_RTO_MAX)) as i32;
+            self.rx_srtt = srtt.min(i64::from(IKCP_RTO_MAX)) as i32;
         }
-        let rto = self.rx_srtt + (self.interval.max(4 * (self.rx_rttval.max(0) as u32)) as i32);
-        self.rx_rto = rto.clamp(self.rx_minrto, IKCP_RTO_MAX);
+        let rttval_term = 4_i64.saturating_mul(i64::from(self.rx_rttval.max(0)));
+        let interval_term = i64::from(self.interval).max(rttval_term);
+        let rto = i64::from(self.rx_srtt).saturating_add(interval_term);
+        let min_rto = i64::from(self.rx_minrto.min(IKCP_RTO_MAX));
+        self.rx_rto = rto.clamp(min_rto, i64::from(IKCP_RTO_MAX)) as i32;
     }
 
     fn shrink_buf(&mut self) {
@@ -415,7 +424,7 @@ impl Kcp {
                 IKCP_CMD_ACK => {
                     let rtt = timediff(self.current, ts);
                     if rtt >= 0 {
-                        self.update_ack(rtt);
+                        self.update_ack(rtt.min(IKCP_RTO_MAX));
                     }
                     self.parse_ack(sn);
                     self.shrink_buf();
@@ -788,5 +797,30 @@ mod tests {
             b.input(&pkt).unwrap();
         }
         assert_eq!(b.recv_vec().unwrap(), payload);
+    }
+
+    #[test]
+    fn kcp_ack_extreme_timestamps_do_not_overflow_or_wrap_rto() {
+        let mut kcp = Kcp::new(1);
+        kcp.current = 0x7FFF_FFFF;
+
+        let mut pkt = Vec::with_capacity(IKCP_OVERHEAD);
+        pkt.extend_from_slice(&1u32.to_le_bytes());
+        pkt.push(IKCP_CMD_ACK);
+        pkt.push(0);
+        pkt.extend_from_slice(&512u16.to_le_bytes());
+        // ts = 0 gives timediff(0x7FFF_FFFF, 0) = i32::MAX
+        pkt.extend_from_slice(&0u32.to_le_bytes());
+        pkt.extend_from_slice(&0u32.to_le_bytes());
+        pkt.extend_from_slice(&0u32.to_le_bytes());
+        pkt.extend_from_slice(&0u32.to_le_bytes());
+
+        kcp.input(&pkt).unwrap();
+        kcp.input(&pkt).unwrap();
+        assert!(kcp.rx_rto >= kcp.rx_minrto && kcp.rx_rto <= IKCP_RTO_MAX);
+
+        kcp.update_ack(i32::MAX);
+        kcp.update_ack(i32::MIN);
+        assert!(kcp.rx_rto >= kcp.rx_minrto && kcp.rx_rto <= IKCP_RTO_MAX);
     }
 }

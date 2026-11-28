@@ -1,5 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
+use serde_json::Value;
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_data::tables::gift_package::GiftPackage;
 use sonoro_gamesv_data::tables::item_info::ItemInfo as ItemConfig;
@@ -154,7 +156,7 @@ pub fn handle_item_disuse_request(
 }
 
 fn find_gift_package(assets: &Assets, item_cfg: &ItemConfig) -> Option<GiftPackage> {
-    for key in [2, 4, 8] {
+    for key in [1, 2, 4, 8] {
         if let Some(&pkg_id) = item_cfg.Parameters.get(&key)
             && let Some(pkg) = assets.tables.gift_package.get_data_by_id(&pkg_id)
         {
@@ -269,29 +271,75 @@ fn role_waveband_id(assets: &Assets, role_id: i32) -> Option<i32> {
     None
 }
 
+fn max_resonant_chain_index(assets: &Assets, role_id: i32) -> i32 {
+    let Some(role) = assets.tables.role_info.get_data_by_id(&role_id) else {
+        return 6;
+    };
+    if role.ResonantChainGroupId == 0 {
+        return 6;
+    }
+    let max_idx = assets
+        .tables
+        .resonant_chain
+        .items
+        .iter()
+        .filter(|c| c.GroupId == role.ResonantChainGroupId)
+        .map(|c| c.GroupIndex)
+        .max()
+        .unwrap_or(0);
+    if max_idx > 0 { max_idx } else { 6 }
+}
+
 fn grant_gift_rewards(state: &mut State, raw_items: &[reward::RewardItem]) -> Result<(), String> {
     let mut normal_items = Vec::new();
     let mut starter_weapons = Vec::new();
     let mut has_new_roles = false;
+    let mut pending_wavebands: HashMap<i32, i32> = HashMap::new();
 
     for &entry in raw_items {
         if entry.item_id <= 0 || entry.count <= 0 {
             continue;
         }
-        if state
+        if let Some(role_cfg) = state
             .assets
             .tables
             .role_info
             .get_data_by_id(&entry.item_id)
-            .is_some()
+            .map(|r| r.into_owned())
         {
+            let is_five_star = role_cfg.QualityId >= 5;
+            let max_chain = max_resonant_chain_index(&state.assets, entry.item_id);
+            let wb_opt = role_waveband_id(&state.assets, entry.item_id);
             for _ in 0..entry.count {
-                if state.player_components.role.role_map.contains_key(&entry.item_id) {
-                    let wb = role_waveband_id(&state.assets, entry.item_id).unwrap_or(50003);
-                    normal_items.push(reward::RewardItem {
-                        item_id: wb,
-                        count: if wb == 50003 { 3 } else { 1 },
+                if let Some(existing) = state
+                    .player_components
+                    .role
+                    .role_map
+                    .get(&entry.item_id)
+                    .cloned()
+                {
+                    let owned_wb = wb_opt.map_or(0, |wb| {
+                        state.player_components.inventory.info.normal_item_count(wb)
                     });
+                    let pending_wb = pending_wavebands.get(&entry.item_id).copied().unwrap_or(0);
+                    if existing.resonant_chain_group_index + owned_wb + pending_wb < max_chain {
+                        if let Some(wb) = wb_opt {
+                            *pending_wavebands.entry(entry.item_id).or_insert(0) += 1;
+                            normal_items.push(reward::RewardItem {
+                                item_id: wb,
+                                count: 1,
+                            });
+                        }
+                        normal_items.push(reward::RewardItem {
+                            item_id: 50003,
+                            count: if is_five_star { 15 } else { 3 },
+                        });
+                    } else {
+                        normal_items.push(reward::RewardItem {
+                            item_id: 50003,
+                            count: if is_five_star { 45 } else { 8 },
+                        });
+                    }
                 } else {
                     let new_role = RoleInfo::create_default(&state.assets, entry.item_id)
                         .map_err(|e| e.to_string())?;
@@ -422,7 +470,10 @@ pub fn handle_item_use_request(
             });
         }
 
-        if cfg.Parameters.get(&10).copied() == Some(1) {
+        if item_id == 10800
+            || cfg.Parameters.get(&10).copied() == Some(1)
+            || cfg.Parameters.get(&20).copied() == Some(1)
+        {
             let costs = [consume::CostItem { id: item_id, count }];
             if !consume::has_costs(
                 &state.player_components.basic,
@@ -566,7 +617,51 @@ pub fn handle_item_use_request(
         }
 
         if !matches!(cfg.ItemType, 7 | 8 | 13) && cfg.ShowUseButton {
-            let costs = [consume::CostItem { id: item_id, count }];
+            let mut unlocked_formula = false;
+            let mut formula_cook = None;
+            let mut formula_forge = None;
+            let mut formula_synth = None;
+            if let Some(cf) = state
+                .assets
+                .tables
+                .cook_formula
+                .items
+                .iter()
+                .find(|r| r.FormulaItemId == item_id)
+            {
+                formula_cook = Some(cf.Id);
+            } else if let Some(ff) = state
+                .assets
+                .tables
+                .forge_formula
+                .items
+                .iter()
+                .find(|r| r.FormulaItemId == item_id)
+            {
+                formula_forge = Some(ff.Id);
+            } else if let Some(sf) = state
+                .assets
+                .tables
+                .synthesis_formula
+                .items
+                .iter()
+                .find(|r| r.FormulaItemId == item_id)
+            {
+                formula_synth = Some(sf.Id);
+            }
+
+            let consume_cnt = if formula_cook.is_some()
+                || formula_forge.is_some()
+                || formula_synth.is_some()
+            {
+                1
+            } else {
+                count
+            };
+            let costs = [consume::CostItem {
+                id: item_id,
+                count: consume_cnt,
+            }];
             let consumed = {
                 let State {
                     conn,
@@ -587,6 +682,56 @@ pub fn handle_item_use_request(
                 return Ok(ItemUseResponse {
                     ErrCode: Some(ErrorCode::ErrItemNotEnough),
                 });
+            }
+
+            if let Some(cid) = formula_cook {
+                unlocked_formula = sonoro_gamesv_fs::progress_info::ProgressInfo::append_unique_id(
+                    &mut state.player_components.progress.info.craft.unlocked_cook,
+                    cid,
+                );
+            } else if let Some(fid) = formula_forge {
+                unlocked_formula = sonoro_gamesv_fs::progress_info::ProgressInfo::append_unique_id(
+                    &mut state.player_components.progress.info.craft.unlocked_forge,
+                    fid,
+                );
+            } else if let Some(sid) = formula_synth {
+                unlocked_formula = sonoro_gamesv_fs::progress_info::ProgressInfo::append_unique_id(
+                    &mut state.player_components.progress.info.craft.unlocked_synth,
+                    sid,
+                );
+            } else if let Some(&days_mul) = cfg.Parameters.get(&14)
+                && days_mul > 0
+            {
+                let add_days = i64::from(days_mul) * i64::from(count) * 30;
+                state
+                    .player_components
+                    .progress
+                    .info
+                    .set_key_int("month_card:bought", 1);
+                state
+                    .player_components
+                    .progress
+                    .info
+                    .add_key_int("month_card:days", add_days);
+                unlocked_formula = true;
+            } else if let Some(row) = state
+                .assets
+                .reward_index
+                .get_row("ItemInfo", i64::from(item_id))
+                && (!row.items.is_empty() || row.drop_id > 0)
+            {
+                let mut rctx = state.reward_context();
+                for _ in 0..count {
+                    reward::grant_table_reward(&mut rctx, "ItemInfo", i64::from(item_id), false, true, 1, &[], None)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            if unlocked_formula {
+                state
+                    .player_components
+                    .progress
+                    .save(&state.fs)
+                    .map_err(|e| e.to_string())?;
             }
         }
     }
@@ -946,35 +1091,116 @@ pub fn handle_gift_pack_preview_request(
     })
 }
 
+#[derive(Clone)]
+struct InstExchangeCfg {
+    waveplate_cost: i32,
+    drops_by_world_level: std::collections::BTreeMap<i32, i32>,
+}
+
+fn inst_exchange_cfg(assets: &Assets, exchange_id: i32) -> Option<InstExchangeCfg> {
+    if exchange_id <= 0 {
+        return None;
+    }
+    static CACHE: OnceLock<HashMap<i32, InstExchangeCfg>> = OnceLock::new();
+    let map = CACHE.get_or_init(|| {
+        let mut out = HashMap::new();
+        for entry in assets.read_raw_json_array("ExchangeReward") {
+            let Some(obj) = entry.as_object() else {
+                continue;
+            };
+            let Some(id) = obj.get("Id").and_then(Value::as_i64).and_then(|v| i32::try_from(v).ok()) else {
+                continue;
+            };
+            let wp = obj
+                .get("Cost")
+                .and_then(Value::as_object)
+                .and_then(|m| m.get("5"))
+                .and_then(Value::as_i64)
+                .map_or(0, |v| v.clamp(0, i64::from(i32::MAX)) as i32);
+            let mut drops = std::collections::BTreeMap::new();
+            if let Some(rew_obj) = obj.get("RewardId").and_then(Value::as_object) {
+                for (k, v) in rew_obj {
+                    if let (Ok(wl), Some(did)) = (k.parse::<i32>(), v.as_i64())
+                        && did > 0
+                    {
+                        drops.insert(wl, did.clamp(0, i64::from(i32::MAX)) as i32);
+                    }
+                }
+            }
+            out.insert(
+                id,
+                InstExchangeCfg {
+                    waveplate_cost: wp,
+                    drops_by_world_level: drops,
+                },
+            );
+        }
+        out
+    });
+    map.get(&exchange_id).cloned()
+}
+
 pub fn handle_get_inst_exchange_reward_request(
     state: &mut State,
     req: GetInstExchangeRewardRequest,
 ) -> Result<GetInstExchangeRewardResponse, String> {
     let cnt = req.ExchangeCount;
-    let Some(waveplate_cost) = cnt.checked_mul(60) else {
-        return Ok(GetInstExchangeRewardResponse {
-            ErrorCode: Some(ErrorCode::RequestParamError),
-        });
-    };
     if cnt <= 0 {
         return Ok(GetInstExchangeRewardResponse {
             ErrorCode: Some(ErrorCode::RequestParamError),
         });
     }
-    let ok = {
-        let State {
-            conn,
-            fs,
-            player_components,
-            ..
-        } = state;
-        energy::consume_waveplate(conn, fs, &mut player_components.basic, waveplate_cost)
-            .map_err(|e| e.to_string())?
+    let inst_id = state.scene.as_ref().map_or(0, |s| s.instance_id);
+    let inst_cfg = if inst_id > 0 {
+        state
+            .assets
+            .tables
+            .instance_dungeon
+            .get_data_by_id(&inst_id)
+            .map(|r| r.into_owned())
+    } else {
+        None
     };
-    if !ok {
+    let candidate_ids = inst_cfg.as_ref().map_or([0, 0, 0], |ic| {
+        [ic.ExchangeRewardId, ic.RepeatRewardId, ic.RewardId]
+    });
+    let mut matched_ex: Option<InstExchangeCfg> = None;
+    let mut fallback_drop_id = 0i32;
+    for cid in candidate_ids {
+        if cid <= 0 {
+            continue;
+        }
+        if let Some(ex) = inst_exchange_cfg(&state.assets, cid) {
+            matched_ex = Some(ex);
+            break;
+        }
+        if fallback_drop_id == 0 {
+            fallback_drop_id = cid;
+        }
+    }
+
+    let unit_wp_cost = matched_ex.as_ref().map_or(60, |ex| ex.waveplate_cost);
+    let Some(waveplate_cost) = cnt.checked_mul(unit_wp_cost) else {
         return Ok(GetInstExchangeRewardResponse {
-            ErrorCode: Some(ErrorCode::ErrItemNotEnough),
+            ErrorCode: Some(ErrorCode::RequestParamError),
         });
+    };
+    if waveplate_cost > 0 {
+        let ok = {
+            let State {
+                conn,
+                fs,
+                player_components,
+                ..
+            } = state;
+            energy::consume_waveplate(conn, fs, &mut player_components.basic, waveplate_cost)
+                .map_err(|e| e.to_string())?
+        };
+        if !ok {
+            return Ok(GetInstExchangeRewardResponse {
+                ErrorCode: Some(ErrorCode::ErrItemNotEnough),
+            });
+        }
     }
     let _ = state
         .player_components
@@ -986,24 +1212,50 @@ pub fn handle_get_inst_exchange_reward_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
-    let mut rctx = state.reward_context();
-    reward::grant_items(
-        &mut rctx,
-        0,
-        true,
-        &[
-            reward::RewardItem {
-                item_id: 3,
-                count: cnt * 20,
-            },
-            reward::RewardItem {
-                item_id: 2,
-                count: cnt * 5000,
-            },
-        ],
-        1,
-    )
-    .map_err(|e| e.to_string())?;
+
+    let world_level = state.player_components.basic.info.attributes.cur_world_level;
+    let resolved_drop_id = matched_ex
+        .as_ref()
+        .and_then(|ex| {
+            ex.drops_by_world_level
+                .get(&world_level)
+                .or_else(|| ex.drops_by_world_level.range(..=world_level).next_back().map(|(_, v)| v))
+                .or_else(|| ex.drops_by_world_level.values().next())
+                .copied()
+        })
+        .unwrap_or(fallback_drop_id);
+
+    let mut granted_any = false;
+    if resolved_drop_id > 0 {
+        for _ in 0..cnt {
+            let mut rctx = state.reward_context();
+            let res = reward::grant_drop_package_popup(&mut rctx, resolved_drop_id, 1)
+                .map_err(|e| e.to_string())?;
+            if res.granted_count > 0 {
+                granted_any = true;
+            }
+        }
+    }
+    if !granted_any {
+        let mut rctx = state.reward_context();
+        reward::grant_items(
+            &mut rctx,
+            0,
+            true,
+            &[
+                reward::RewardItem {
+                    item_id: 3,
+                    count: cnt * 20,
+                },
+                reward::RewardItem {
+                    item_id: 2,
+                    count: cnt * 5000,
+                },
+            ],
+            1,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(GetInstExchangeRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

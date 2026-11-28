@@ -321,7 +321,21 @@ fn apply_tune_break_buffs(
     }
 }
 
-pub fn handle_hit_end_push(_state: &mut State, _events: &mut EventQueue, _push: HitEndPush) {}
+pub fn handle_hit_end_push(state: &mut State, _events: &mut EventQueue, push: HitEndPush) {
+    let eid = if push.TargetId != 0 {
+        push.TargetId
+    } else {
+        push.CombatCommon.as_ref().map_or(0, |c| c.EntityId)
+    };
+    if eid == 0 {
+        return;
+    }
+    if let Some(scene) = state.scene.as_mut()
+        && scene.net_id_map.contains_key(&eid)
+    {
+        scene.mark_fsm_dirty(eid, wake_reason::SKILL_END | wake_reason::STATE);
+    }
+}
 
 pub fn handle_fragile_change_request(
     state: &mut State,

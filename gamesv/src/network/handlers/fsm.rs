@@ -3,8 +3,8 @@ use sonoro_gamesv_logic::component::entity::fsm::FsmComponent;
 use sonoro_gamesv_logic::component::entity::small::EntityState as LogicEntityState;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::fsm::types::{
-    BehaviorValidation, ClientPassResult, ConditionKey, ConfirmResult, EvalContext, PartState,
-    wake_reason,
+    BehaviorValidation, ClientPassResult, ConditionKey, ConfirmResult, EVAL_FLAG_WAIT_CLIENT,
+    EvalContext, PartState, wake_reason,
 };
 use sonoro_gamesv_logic::fsm_lifecycle;
 use sonoro_gamesv_logic::helpers::quest_engine;
@@ -19,11 +19,11 @@ use sonoro_proto::pb::{
     BattleStateChangeResponse, BlackboardParamValueOneof, ChangeStateConfirmPush,
     ChangeStateConfirmRequest, ChangeStateConfirmResponse, ChangeStateNotify, ChangeStateRequest,
     ChangeStateResponse, CombatCommon, CombatNotifyDataMessageOneof, CombatReceiveData,
-    CombatReceiveDataMessageOneof, DErrorResult, EntityIsVisibleNotify, EntityIsVisiblePush,
-    EntityIsVisibleRequest, EntityIsVisibleResponse, FsmConditionPassPush, FsmConditionPassRequest,
-    FsmConditionPassResponse, FsmPlayMontagePush, FsmPlayMontageRequest, FsmPlayMontageResponse,
-    FsmStateBehaviorRequest, FsmStateBehaviorResponse, HitEndRequest, HitEndResponse, HitRequest,
-    HitResponse, LogicStateComponentPb, LogicStateInitPush, LogicStateInitRequest,
+    CombatReceiveDataMessageOneof, CombatReceivePackNotify, DErrorResult, EntityIsVisibleNotify,
+    EntityIsVisiblePush, EntityIsVisibleRequest, EntityIsVisibleResponse, FsmConditionPassPush,
+    FsmConditionPassRequest, FsmConditionPassResponse, FsmPlayMontagePush, FsmPlayMontageRequest,
+    FsmPlayMontageResponse, FsmStateBehaviorRequest, FsmStateBehaviorResponse, HitEndRequest,
+    HitEndResponse, HitInformation, HitNotify, HitRequest, HitResponse, LogicStateComponentPb, LogicStateInitPush, LogicStateInitRequest,
     LogicStateInitResponse, MontagePlayPush, PartInformation, PartUpdateInfo, PartUpdateNotify,
     PartUpdatePush, PartUpdateRequest, PartUpdateResponse, RoleTagChangePush,
     SwitchCharacterStateNotify, SwitchCharacterStatePush, SwitchCharacterStateRequest,
@@ -128,11 +128,140 @@ fn extract_change_state_notify(notify: &CombatReceiveData) -> Option<&ChangeStat
     }
 }
 
+pub fn apply_hit_to_entity_fsm(
+    state: &mut State,
+    events: &mut EventQueue,
+    entity_id: i64,
+    pack: &mut Vec<CombatReceiveData>,
+    hit: Option<&HitInformation>,
+) {
+    if entity_id == 0 {
+        return;
+    }
+    let now_ms = now_millis();
+    let Some(buffers) = collect_eval_buffers(state, entity_id) else {
+        return;
+    };
+    let parent_tags = &state.assets.tables.gameplay_tag_parent;
+    let Some(scene) = state.scene.as_mut() else {
+        return;
+    };
+    let Some(handle) = scene.entity_handle(entity_id) else {
+        return;
+    };
+    let need_sync = {
+        let Some(fsm) = scene.entities[handle.index].fsm.as_mut() else {
+            return;
+        };
+        let _ = fsm.init_runtime(now_ms);
+        fsm.set_custom_blackboard_int("be_hit:active", 1);
+        if let Some(h) = hit {
+            fsm.set_custom_blackboard_int("be_hit:anim", h.BeHitAnim);
+            fsm.set_custom_blackboard_int("be_hit:parry", i32::from(h.IsTriggerCounterattack));
+            fsm.set_custom_blackboard_int("be_hit:break_weakness", i32::from(h.IsHitWeakness));
+            fsm.set_custom_blackboard_int(
+                "be_hit:vision_counter",
+                if h.IsTriggerVisionCounterAttack { 1 } else { 0 },
+            );
+        }
+        fsm.event = Some("BeHit".to_string());
+        fsm.mark_root_dirty_all(wake_reason::EVENT | wake_reason::BLACKBOARD);
+        let ctx = EvalContext {
+            now_ms,
+            flags: 0,
+            position_state: buffers.position_state,
+            attributes: &buffers.attributes,
+            tags: &buffers.tags,
+            parent_tags: Some(parent_tags),
+            buff_stacks: &buffers.buff_stacks,
+            parts: &buffers.parts,
+            instance_state: buffers.instance_state,
+        };
+        let sync = if !fsm_lifecycle::enqueue_effects(handle, fsm, events, now_ms) {
+            let _ = fsm.append_dirty_state_transitions(entity_id, pack, &ctx);
+            false
+        } else {
+            true
+        };
+        fsm.finish_tick(now_ms);
+        sync
+    };
+    if need_sync {
+        scene.queue_fsm_sync(entity_id);
+    }
+    scene.sync_fsm_deadlines_for_entity(entity_id);
+}
+
+pub fn apply_montage_to_entity_fsm(
+    state: &mut State,
+    events: &mut EventQueue,
+    entity_id: i64,
+    montage_name: &str,
+    pack: &mut Vec<CombatReceiveData>,
+) {
+    if entity_id == 0 || montage_name.is_empty() {
+        return;
+    }
+    let now_ms = now_millis();
+    let Some(buffers) = collect_eval_buffers(state, entity_id) else {
+        return;
+    };
+    let parent_tags = &state.assets.tables.gameplay_tag_parent;
+    let Some(scene) = state.scene.as_mut() else {
+        return;
+    };
+    let Some(handle) = scene.entity_handle(entity_id) else {
+        return;
+    };
+    let need_sync = {
+        let Some(fsm) = scene.entities[handle.index].fsm.as_mut() else {
+            return;
+        };
+        let _ = fsm.init_runtime(now_ms);
+        fsm.set_custom_blackboard_int("montage:playing", 1);
+        fsm.event = Some(montage_name.to_string());
+        fsm.mark_root_dirty_all(wake_reason::EVENT | wake_reason::BLACKBOARD);
+        let ctx = EvalContext {
+            now_ms,
+            flags: 0,
+            position_state: buffers.position_state,
+            attributes: &buffers.attributes,
+            tags: &buffers.tags,
+            parent_tags: Some(parent_tags),
+            buff_stacks: &buffers.buff_stacks,
+            parts: &buffers.parts,
+            instance_state: buffers.instance_state,
+        };
+        let sync = if !fsm_lifecycle::enqueue_effects(handle, fsm, events, now_ms) {
+            let _ = fsm.append_dirty_state_transitions(entity_id, pack, &ctx);
+            false
+        } else {
+            true
+        };
+        fsm.finish_tick(now_ms);
+        sync
+    };
+    if need_sync {
+        scene.queue_fsm_sync(entity_id);
+    }
+    scene.sync_fsm_deadlines_for_entity(entity_id);
+}
+
 pub fn handle_hit_request(
-    _common: Option<&CombatCommon>,
-    _pack: &mut Vec<CombatReceiveData>,
+    common: Option<&CombatCommon>,
+    pack: &mut Vec<CombatReceiveData>,
     req: HitRequest,
 ) -> HitResponse {
+    if common.is_some() || req.HitInfo.is_some() {
+        push_combat_notify(
+            pack,
+            common.cloned(),
+            CombatNotifyDataMessageOneof::HitNotify(HitNotify {
+                CombatCommon: common.cloned(),
+                HitInfo: req.HitInfo.clone(),
+            }),
+        );
+    }
     HitResponse {
         HitInfo: req.HitInfo,
         ErrorCode: Some(ErrorCode::Success),
@@ -144,7 +273,55 @@ pub fn handle_hit_end_request(
     events: &mut EventQueue,
     req: HitEndRequest,
 ) -> HitEndResponse {
-    let _ = (state, events, req);
+    let target_id = resolve_explicit_or_common(req.TargetId, req.CombatCommon.as_ref());
+    if target_id != 0 {
+        let now_ms = now_millis();
+        if let Some(buffers) = collect_eval_buffers(state, target_id) {
+            let parent_tags = &state.assets.tables.gameplay_tag_parent;
+            let mut pack = Vec::new();
+            if let Some(scene) = state.scene.as_mut()
+                && let Some(handle) = scene.entity_handle(target_id)
+            {
+                let mut need_sync = false;
+                if let Some(fsm) = scene.entities[handle.index].fsm.as_mut() {
+                    let _ = fsm.init_runtime(now_ms);
+                    fsm.set_custom_blackboard_int("be_hit:active", 0);
+                    fsm.set_custom_blackboard_int("be_hit:parry", 0);
+                    fsm.set_custom_blackboard_int("be_hit:break_weakness", 0);
+                    fsm.set_custom_blackboard_int("be_hit:vision_counter", 0);
+                    fsm.set_custom_blackboard_int("be_hit:ended", 1);
+                    fsm.event = Some("HitEnd".to_string());
+                    fsm.mark_root_dirty_all(wake_reason::EVENT | wake_reason::BLACKBOARD);
+                    let ctx = EvalContext {
+                        now_ms,
+                        flags: 0,
+                        position_state: buffers.position_state,
+                        attributes: &buffers.attributes,
+                        tags: &buffers.tags,
+                        parent_tags: Some(parent_tags),
+                        buff_stacks: &buffers.buff_stacks,
+                        parts: &buffers.parts,
+                        instance_state: buffers.instance_state,
+                    };
+                    if !fsm_lifecycle::enqueue_effects(handle, fsm, events, now_ms) {
+                        let _ = fsm.append_dirty_state_transitions(target_id, &mut pack, &ctx);
+                    } else {
+                        need_sync = true;
+                    }
+                    fsm.finish_tick(now_ms);
+                }
+                if need_sync {
+                    scene.queue_fsm_sync(target_id);
+                }
+                scene.sync_fsm_deadlines_for_entity(target_id);
+            }
+            if !pack.is_empty() {
+                let _ = state
+                    .conn
+                    .push_msg(CombatReceivePackNotify::MSG_ID, &CombatReceivePackNotify { Data: pack });
+            }
+        }
+    }
     HitEndResponse {
         ErrorCode: Some(ErrorCode::Success),
     }
@@ -629,16 +806,44 @@ pub fn handle_role_tag_change_push(
     notify_fsm_after_tag_change(state, events, entity_id, pack, now_millis());
 }
 
-pub fn handle_an_start_push(_common: Option<&CombatCommon>, _push: ANStartPush) {}
+pub fn handle_an_start_push(common: Option<&CombatCommon>, push: ANStartPush) {
+    tracing::debug!(
+        target: "fsm",
+        "ANStartPush entity={:?} (combat caller does not forward State)",
+        common_entity_id(common),
+    );
+    let _ = push;
+}
 
-pub fn handle_montage_play_push(_common: Option<&CombatCommon>, _push: MontagePlayPush) {}
+pub fn handle_montage_play_push(common: Option<&CombatCommon>, push: MontagePlayPush) {
+    tracing::debug!(
+        target: "fsm",
+        "MontagePlayPush entity={:?} (combat caller does not forward State)",
+        common_entity_id(common),
+    );
+    let _ = push;
+}
 
-pub fn handle_fsm_play_montage_push(_common: Option<&CombatCommon>, _push: FsmPlayMontagePush) {}
+pub fn handle_fsm_play_montage_push(common: Option<&CombatCommon>, push: FsmPlayMontagePush) {
+    tracing::debug!(
+        target: "fsm",
+        "FsmPlayMontagePush entity={:?} path_hash={}",
+        common_entity_id(common),
+        push.MontagePathHash,
+    );
+}
 
 pub fn handle_fsm_play_montage_request(
-    _common: Option<&CombatCommon>,
-    _req: FsmPlayMontageRequest,
+    common: Option<&CombatCommon>,
+    req: FsmPlayMontageRequest,
 ) -> FsmPlayMontageResponse {
+    if common_entity_id(common).is_none()
+        || (req.MontageName.is_empty() && req.MontagePathHash == 0)
+    {
+        return FsmPlayMontageResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        };
+    }
     FsmPlayMontageResponse {
         ErrorCode: Some(ErrorCode::Success),
     }
@@ -688,7 +893,7 @@ pub fn handle_change_state_request(
         let config_id = scene.entities[handle.index].config.config_id;
         let ctx = EvalContext {
             now_ms,
-            flags: 0,
+            flags: EVAL_FLAG_WAIT_CLIENT,
             position_state: buffers.position_state,
             attributes: &buffers.attributes,
             tags: &buffers.tags,
@@ -1045,7 +1250,7 @@ fn apply_fsm_condition_pass(
         if matches!(pass_res, ClientPassResult::Updated) && !deferred {
             let ctx = EvalContext {
                 now_ms,
-                flags: 0,
+                flags: EVAL_FLAG_WAIT_CLIENT,
                 position_state: buffers.position_state,
                 attributes: &buffers.attributes,
                 tags: &buffers.tags,

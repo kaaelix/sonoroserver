@@ -93,32 +93,41 @@ impl Account {
         }
 
         let path = format!("account/{user_id}");
-        if let Some(raw) = fs.read_file(&path)? {
-            let text =
-                std::str::from_utf8(&raw).map_err(|e| AccountError::ParseFailed(e.to_string()))?;
-            let parsed = zon::parse(text).map_err(|e| AccountError::ParseFailed(e.to_string()))?;
-            let mut account = Self::from_zon(&parsed)?;
+        fs.modify_file(&path, |existing| {
+            if let Some(raw) = existing {
+                let text = match std::str::from_utf8(raw) {
+                    Ok(t) => t,
+                    Err(e) => return Ok((None, Err(AccountError::ParseFailed(e.to_string())))),
+                };
+                let parsed = match zon::parse(text) {
+                    Ok(v) => v,
+                    Err(e) => return Ok((None, Err(AccountError::ParseFailed(e.to_string())))),
+                };
+                let mut account = match Self::from_zon(&parsed) {
+                    Ok(acc) => acc,
+                    Err(e) => return Ok((None, Err(e))),
+                };
 
-            if account.token != token && !token.is_empty() {
-                account.token = token.to_string();
-                if !user_name.is_empty() {
-                    account.user_name = user_name.to_string();
+                if account.token != token && !token.is_empty() {
+                    account.token = token.to_string();
+                    if !user_name.is_empty() {
+                        account.user_name = user_name.to_string();
+                    }
+                    let serialized = zon::stringify(&account.to_zon());
+                    return Ok((Some(serialized.into_bytes()), Ok(account)));
                 }
+                Ok((None, Ok(account)))
+            } else {
+                let account = Self {
+                    user_id: user_id.to_string(),
+                    user_name: user_name.to_string(),
+                    token: token.to_string(),
+                    sex: -1,
+                };
                 let serialized = zon::stringify(&account.to_zon());
-                fs.write_file(&path, serialized.as_bytes())?;
+                Ok((Some(serialized.into_bytes()), Ok(account)))
             }
-            Ok(account)
-        } else {
-            let account = Self {
-                user_id: user_id.to_string(),
-                user_name: user_name.to_string(),
-                token: token.to_string(),
-                sex: -1,
-            };
-            let serialized = zon::stringify(&account.to_zon());
-            fs.write_file(&path, serialized.as_bytes())?;
-            Ok(account)
-        }
+        })?
     }
 }
 

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Instant;
@@ -13,10 +13,19 @@ use super::kcp::{IKCP_OVERHEAD, Kcp, KcpError};
 pub const PRE_AUTH_IDLE_TIMEOUT_MS: i64 = 30_000;
 pub const AUTHENTICATED_IDLE_TIMEOUT_MS: i64 = 5 * 60_000;
 pub const KCP_OVERHEAD: usize = IKCP_OVERHEAD;
+pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
+pub const MAX_PRE_AUTH_PER_IP: usize = 16;
+pub const MAX_PRE_AUTH_GLOBAL: usize = 256;
+const INITIAL_FRAME_CAP: usize = 64 * 1024;
 const SEND_FAILURE_LIMIT: u8 = 3;
 const ACTION_LIMIT: usize = 4096;
 const TIME_LIMIT_NS: u128 = 16_000_000;
 const OUTBOUND_BATCH_LIMIT: usize = 512;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamError {
+    FrameTooLarge(usize),
+}
 
 #[derive(Default)]
 pub struct StreamAssembler {
@@ -24,11 +33,13 @@ pub struct StreamAssembler {
     length_prefix_len: usize,
     body: Option<Vec<u8>>,
     body_len: usize,
+    expected_len: usize,
 }
 
 pub struct ConsumeResult {
     pub consumed: usize,
     pub message: Option<Vec<u8>>,
+    pub error: Option<StreamError>,
 }
 
 impl StreamAssembler {
@@ -40,6 +51,7 @@ impl StreamAssembler {
     pub fn reset(&mut self) {
         self.body = None;
         self.body_len = 0;
+        self.expected_len = 0;
         self.length_prefix_len = 0;
     }
 
@@ -67,30 +79,42 @@ impl StreamAssembler {
                 ]) as usize;
                 self.length_prefix_len = 0;
                 self.body_len = 0;
+                self.expected_len = 0;
+
+                if body_len > MAX_FRAME_LEN {
+                    return ConsumeResult {
+                        consumed,
+                        message: None,
+                        error: Some(StreamError::FrameTooLarge(body_len)),
+                    };
+                }
 
                 if body_len == 0 {
                     return ConsumeResult {
                         consumed,
                         message: Some(Vec::new()),
+                        error: None,
                     };
                 }
-                self.body = Some(vec![0u8; body_len]);
+                self.expected_len = body_len;
+                self.body = Some(Vec::with_capacity(body_len.min(INITIAL_FRAME_CAP)));
             }
 
             let body = self.body.as_mut().expect("allocated above");
-            let body_needed = body.len() - self.body_len;
+            let body_needed = self.expected_len - self.body_len;
             let body_count = body_needed.min(input.len() - consumed);
-            body[self.body_len..self.body_len + body_count]
-                .copy_from_slice(&input[consumed..consumed + body_count]);
+            body.extend_from_slice(&input[consumed..consumed + body_count]);
             self.body_len += body_count;
             consumed += body_count;
 
-            if self.body_len == body.len() {
+            if self.body_len == self.expected_len {
                 let finished = self.body.take().unwrap();
                 self.body_len = 0;
+                self.expected_len = 0;
                 return ConsumeResult {
                     consumed,
                     message: Some(finished),
+                    error: None,
                 };
             }
         }
@@ -98,6 +122,7 @@ impl StreamAssembler {
         ConsumeResult {
             consumed,
             message: None,
+            error: None,
         }
     }
 }
@@ -122,15 +147,23 @@ impl ApplicationInput {
         }
     }
 
-    fn consume(&mut self, assembler: &mut StreamAssembler) -> Option<Vec<u8>> {
-        let bytes = self.bytes.as_ref()?;
+    fn consume(&mut self, assembler: &mut StreamAssembler) -> Result<Option<Vec<u8>>, StreamError> {
+        let Some(bytes) = self.bytes.as_ref() else {
+            return Ok(None);
+        };
         let res = assembler.consume(&bytes[self.offset..]);
         self.offset += res.consumed;
+        if let Some(err) = res.error {
+            self.bytes = None;
+            self.offset = 0;
+            assembler.reset();
+            return Err(err);
+        }
         if self.offset == bytes.len() {
             self.bytes = None;
             self.offset = 0;
         }
-        res.message
+        Ok(res.message)
     }
 }
 
@@ -302,9 +335,9 @@ impl Session {
         kcp.stream = true;
         let _ = kcp.set_mtu(1000);
         kcp.dead_link = 60;
-        kcp.set_nodelay(1, 5, 2, true);
-        kcp.rx_minrto = 40;
-        kcp.set_wnd_size(512, 256);
+        kcp.set_nodelay(1, 5, 1, true);
+        kcp.rx_minrto = 25;
+        kcp.set_wnd_size(512, 512);
         Self {
             handle,
             outbound_rx,
@@ -440,6 +473,26 @@ impl Registry {
 
     pub fn session_count(&self) -> usize {
         self.active.len() + self.closing.len()
+    }
+
+    pub fn can_accept_pre_auth(&self, ip: IpAddr) -> bool {
+        let mut global_pre_auth = 0usize;
+        let mut ip_pre_auth = 0usize;
+        for session in self.active.values() {
+            if session.phase == Phase::PreAuth
+                && !session.handle.is_authenticated()
+                && session.handle.close_reason() == CloseReason::Active
+            {
+                global_pre_auth += 1;
+                if session.handle.address().ip() == ip {
+                    ip_pre_auth += 1;
+                }
+                if global_pre_auth >= MAX_PRE_AUTH_GLOBAL || ip_pre_auth >= MAX_PRE_AUTH_PER_IP {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     pub fn close_all(&mut self, reason: CloseReason) {
@@ -636,11 +689,24 @@ impl Registry {
             return false;
         };
         if session.pending_inbound.is_none() {
-            session.pending_inbound = pump_application_data(
+            match pump_application_data(
                 &mut session.kcp,
                 &mut session.assembler,
                 &mut session.application,
-            );
+            ) {
+                Ok(msg) => session.pending_inbound = msg,
+                Err(StreamError::FrameTooLarge(len)) => {
+                    tracing::warn!(
+                        target: "kcp_transport",
+                        "closing session conv={} due to oversized frame ({} > {} bytes)",
+                        conv_id,
+                        len,
+                        MAX_FRAME_LEN
+                    );
+                    self.mark_closing(conv_id, CloseReason::TransportError);
+                    return false;
+                }
+            }
         }
         let Some(msg) = session.pending_inbound.take() else {
             return false;
@@ -668,7 +734,9 @@ impl Registry {
         if wait_snd >= eff_wnd {
             return false;
         }
-        let max_batch = OUTBOUND_BATCH_LIMIT.min(eff_wnd - wait_snd);
+        // In stream mode multiple small notifies coalesce into a single MSS segment, so allow
+        // draining up to 4x remaining segment slots (bounded by OUTBOUND_BATCH_LIMIT).
+        let max_batch = OUTBOUND_BATCH_LIMIT.min((eff_wnd - wait_snd).saturating_mul(4));
 
         let mut sent_any = false;
         let mut send_err = false;
@@ -803,13 +871,13 @@ fn pump_application_data(
     kcp: &mut Kcp,
     assembler: &mut StreamAssembler,
     application: &mut ApplicationInput,
-) -> Option<Vec<u8>> {
+) -> Result<Option<Vec<u8>>, StreamError> {
     loop {
         if application.bytes.is_none() && !application.receive(kcp) {
-            return None;
+            return Ok(None);
         }
-        if let Some(msg) = application.consume(assembler) {
-            return Some(msg);
+        if let Some(msg) = application.consume(assembler)? {
+            return Ok(Some(msg));
         }
     }
 }
@@ -918,5 +986,47 @@ mod tests {
         assert!(registered_endpoint_matches(&expected, &same));
         assert!(!registered_endpoint_matches(&expected, &other_port));
         assert!(!registered_endpoint_matches(&expected, &other_address));
+    }
+
+    #[test]
+    fn stream_assembler_rejects_oversized_frames_without_allocating() {
+        let mut assembler = StreamAssembler::new();
+        let too_large = ((MAX_FRAME_LEN + 1) as u32).to_le_bytes();
+        let res = assembler.consume(&too_large[..3]);
+        assert_eq!(
+            res.error,
+            Some(StreamError::FrameTooLarge(MAX_FRAME_LEN + 1))
+        );
+        assert!(res.message.is_none());
+        assert!(assembler.body.is_none());
+
+        let max_u24 = [0xFFu8, 0xFF, 0xFF, 0x01, 0x02];
+        let res2 = assembler.consume(&max_u24);
+        assert_eq!(res2.error, Some(StreamError::FrameTooLarge(0x00FF_FFFF)));
+        assert!(assembler.body.is_none());
+    }
+
+    #[test]
+    fn pre_auth_caps_enforce_per_ip_and_release_on_auth() {
+        let mut registry = Registry::new();
+        let notify = Arc::new(Notify::new());
+        let ip1: IpAddr = "198.51.100.10".parse().unwrap();
+        let ip2: IpAddr = "198.51.100.11".parse().unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..MAX_PRE_AUTH_PER_IP {
+            assert!(registry.can_accept_pre_auth(ip1));
+            let conv_id = registry.allocate_conv_id().unwrap();
+            let addr = SocketAddr::new(ip1, 10000 + i as u16);
+            let ch = ConnectionHandle::open(conv_id, addr, Arc::clone(&notify));
+            let h = Arc::new(ch.handle);
+            registry.create(Arc::clone(&h), ch.outbound_rx, 100);
+            handles.push(h);
+        }
+        assert!(!registry.can_accept_pre_auth(ip1));
+        assert!(registry.can_accept_pre_auth(ip2));
+
+        handles[0].mark_authenticated();
+        assert!(registry.can_accept_pre_auth(ip1));
     }
 }

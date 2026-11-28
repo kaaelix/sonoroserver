@@ -1,10 +1,9 @@
 use sonoro_common::fs::FileSystem;
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_data::asset_indexes;
-use sonoro_proto::enums::{ChildQuestNodeStatus, NodeStatus, QuestFocusReason, QuestState};
+use sonoro_proto::enums::{ChildQuestNodeStatus, NodeStatus};
 use sonoro_proto::pb::{
-    FlowStartNotify, FocusQuestSetNotify, FuncOpenNotify, Function, QuestFinishListNotify,
-    QuestInfo, QuestListNotify, QuestShowListNotify, TeleportNotify, TraceQuestNotify,
+    FlowStartNotify, FuncOpenNotify, Function, QuestFinishListNotify, TeleportNotify,
     UpdateChildQuestNodeStatusNotify, UpdateNodeStatusNotify, Vector,
 };
 
@@ -29,7 +28,7 @@ pub fn transition_node<S: PushSink + ?Sized>(
         UpdateNodeStatusNotify::MSG_ID,
         &UpdateNodeStatusNotify {
             TreeOwnerId: PROLOGUE_QUEST_ID,
-            TreeIncId: 1,
+            TreeIncId: i64::from(PROLOGUE_QUEST_ID),
             NodeId: from_node,
             Status: Some(NodeStatus::CompletedSuccess),
         },
@@ -38,7 +37,7 @@ pub fn transition_node<S: PushSink + ?Sized>(
         UpdateChildQuestNodeStatusNotify::MSG_ID,
         &UpdateChildQuestNodeStatusNotify {
             TreeOwnerId: PROLOGUE_QUEST_ID,
-            TreeIncId: 1,
+            TreeIncId: i64::from(PROLOGUE_QUEST_ID),
             NodeId: from_node,
             Status: Some(ChildQuestNodeStatus::Finished),
         },
@@ -49,7 +48,7 @@ pub fn transition_node<S: PushSink + ?Sized>(
             UpdateNodeStatusNotify::MSG_ID,
             &UpdateNodeStatusNotify {
                 TreeOwnerId: PROLOGUE_QUEST_ID,
-                TreeIncId: 1,
+                TreeIncId: i64::from(PROLOGUE_QUEST_ID),
                 NodeId: to_node,
                 Status: Some(NodeStatus::Activate),
             },
@@ -58,7 +57,7 @@ pub fn transition_node<S: PushSink + ?Sized>(
             UpdateChildQuestNodeStatusNotify::MSG_ID,
             &UpdateChildQuestNodeStatusNotify {
                 TreeOwnerId: PROLOGUE_QUEST_ID,
-                TreeIncId: 1,
+                TreeIncId: i64::from(PROLOGUE_QUEST_ID),
                 NodeId: to_node,
                 Status: Some(ChildQuestNodeStatus::Progress),
             },
@@ -117,41 +116,10 @@ pub fn spawn_quest_entity<S: PushSink + ?Sized>(
 }
 
 pub fn finish_prologue_quest<S: PushSink + ?Sized>(sink: &mut S, scene: &mut Scene) {
-    transition_node(sink, scene, 159, 0);
-
     sink.push(
         QuestFinishListNotify::MSG_ID,
         &QuestFinishListNotify {
             QuestId: vec![PROLOGUE_QUEST_ID],
-        },
-    );
-
-    sink.push(
-        QuestListNotify::MSG_ID,
-        &QuestListNotify {
-            Quests: vec![QuestInfo {
-                QuestId: ACT2_QUEST_ID,
-                Status: Some(QuestState::InProgress),
-            }],
-        },
-    );
-
-    sink.push(
-        QuestShowListNotify::MSG_ID,
-        &QuestShowListNotify::default(),
-    );
-
-    sink.push(
-        TraceQuestNotify::MSG_ID,
-        &TraceQuestNotify {
-            QuestId: ACT2_QUEST_ID,
-        },
-    );
-    sink.push(
-        FocusQuestSetNotify::MSG_ID,
-        &FocusQuestSetNotify {
-            FocusQuestId: ACT2_QUEST_ID,
-            Reason: Some(QuestFocusReason::Inherit),
         },
     );
 

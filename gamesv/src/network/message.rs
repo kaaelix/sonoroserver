@@ -127,11 +127,14 @@ impl Header {
     }
 }
 
+pub const MAX_BODY_LEN: usize = 0x00FF_FFFF;
+
 #[derive(Debug)]
 pub enum MessageError {
     Truncated,
     InvalidMessageType(u8),
     ChecksumMismatch,
+    FrameTooLarge(usize),
     Crypto(CryptoError),
 }
 
@@ -141,6 +144,9 @@ impl fmt::Display for MessageError {
             Self::Truncated => write!(f, "truncated message frame"),
             Self::InvalidMessageType(t) => write!(f, "invalid message type: {t}"),
             Self::ChecksumMismatch => write!(f, "CRC32 checksum mismatch"),
+            Self::FrameTooLarge(len) => {
+                write!(f, "encoded frame body length {len} exceeds 24-bit max ({MAX_BODY_LEN})")
+            }
             Self::Crypto(e) => write!(f, "crypto error: {e}"),
         }
     }
@@ -192,7 +198,22 @@ pub fn encode_alloc<M: PbMessage>(header: Header, message: &M, key: Option<&[u8;
     encode_raw_alloc(header, &raw_payload, key)
 }
 
-pub fn encode_raw_alloc(header: Header, raw_payload: &[u8], key: Option<&[u8; 32]>) -> Vec<u8> {
+pub fn try_encode_raw_alloc(
+    header: Header,
+    raw_payload: &[u8],
+    key: Option<&[u8; 32]>,
+) -> Result<Vec<u8>, MessageError> {
+    let hdr_len = match header {
+        Header::Push(_) => 7usize,
+        Header::Request(_) | Header::Response(_) => 9usize,
+    };
+    let min_body_len = hdr_len
+        .saturating_add(4)
+        .saturating_add(raw_payload.len());
+    if min_body_len > MAX_BODY_LEN {
+        return Err(MessageError::FrameTooLarge(min_body_len));
+    }
+
     let encrypted;
     let wire_payload: &[u8] = if let Some(k) = key {
         encrypted = encryption::aes_encrypt_with_seq(raw_payload, k, header.seq_no());
@@ -201,20 +222,35 @@ pub fn encode_raw_alloc(header: Header, raw_payload: &[u8], key: Option<&[u8; 32
         raw_payload
     };
 
+    let body_len = hdr_len
+        .saturating_add(4)
+        .saturating_add(wire_payload.len());
+    if body_len > MAX_BODY_LEN {
+        return Err(MessageError::FrameTooLarge(body_len));
+    }
+
     let mut hasher = Crc32Hasher::new();
     hasher.update(wire_payload);
     let checksum = hasher.finalize();
 
-    let mut out = Vec::with_capacity(3 + 9 + 4 + wire_payload.len());
+    let mut out = Vec::with_capacity(3 + body_len);
     out.extend_from_slice(&[0u8; 3]);
     header.encode(&mut out);
     out.extend_from_slice(&checksum.to_le_bytes());
     out.extend_from_slice(wire_payload);
 
-    let body_len = (out.len() - 3) as u32;
-    let len_bytes = body_len.to_le_bytes();
+    let actual_body_len = out.len() - 3;
+    if actual_body_len > MAX_BODY_LEN {
+        return Err(MessageError::FrameTooLarge(actual_body_len));
+    }
+    let len_bytes = (actual_body_len as u32).to_le_bytes();
     out[0..3].copy_from_slice(&len_bytes[0..3]);
-    out
+    Ok(out)
+}
+
+pub fn encode_raw_alloc(header: Header, raw_payload: &[u8], key: Option<&[u8; 32]>) -> Vec<u8> {
+    try_encode_raw_alloc(header, raw_payload, key)
+        .unwrap_or_else(|err| panic!("encode_raw_alloc failed: {err}"))
 }
 
 #[cfg(test)]
@@ -240,5 +276,28 @@ mod tests {
         msg.decrypt(&key).expect("decrypt frame");
         let decoded = JSPatchNotify::decode(&msg.payload).expect("decode pb");
         assert_eq!(decoded.Content, b"encrypted");
+    }
+
+    #[test]
+    fn rejects_frames_exceeding_u24_body_length() {
+        let header = Header::Push(PushHeader {
+            seq_no: 1,
+            msg_id: 100,
+        });
+        // Push header (7) + checksum (4) = 11 bytes overhead; MAX_BODY_LEN - 10 overflows 24-bit prefix.
+        let oversized = vec![0u8; MAX_BODY_LEN - 10];
+        assert!(matches!(
+            try_encode_raw_alloc(header, &oversized, None),
+            Err(MessageError::FrameTooLarge(_))
+        ));
+
+        // Encryption padding can also push a near-limit payload over MAX_BODY_LEN.
+        let key = [0x11u8; 32];
+        let near_limit = vec![0u8; MAX_BODY_LEN - 11];
+        assert!(try_encode_raw_alloc(header, &near_limit, None).is_ok());
+        assert!(matches!(
+            try_encode_raw_alloc(header, &near_limit, Some(&key)),
+            Err(MessageError::FrameTooLarge(_))
+        ));
     }
 }

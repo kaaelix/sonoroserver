@@ -1,6 +1,5 @@
 use sonoro_common::fs::FileSystem;
 use sonoro_gamesv_data::Assets;
-use sonoro_gamesv_data::data_tables::create_buff_information;
 use sonoro_gamesv_data::tables::instance_dungeon::InstanceDungeon;
 use sonoro_gamesv_fs::echo_info::{EchoInfo, RoleEquip};
 use sonoro_gamesv_fs::role_info::RoleInfo;
@@ -9,7 +8,10 @@ use sonoro_gamesv_logic::component::entity::{ConcomitantComponent, VisionSkillCo
 use sonoro_gamesv_logic::component::player::{
     PlayerBasicComponent, PlayerEchoComponent, PlayerRoleComponent, PlayerWeaponComponent,
 };
+use sonoro_gamesv_logic::event_queue::EventQueue;
+use sonoro_gamesv_logic::events::{BuffAdditionEntry, Event};
 use sonoro_gamesv_logic::fsm::types::wake_reason;
+use sonoro_gamesv_logic::handlers::{buff as buff_handlers, fsm as fsm_handlers};
 use sonoro_gamesv_logic::helpers::{
     attributes, buff as buff_helper, calabash, entity_proto, quest_engine, role as role_helper,
     role_attribute_sync, role_stats,
@@ -19,15 +21,14 @@ use sonoro_gamesv_logic::schedulers::BuffTimerScheduler;
 use sonoro_gamesv_logic::sink::PushSink;
 use sonoro_gamesv_logic::templates::role_entity_templates;
 use sonoro_proto::PbEnum;
-use sonoro_proto::enums::{ApplyGEType, EAttributeType, ErrorCode};
+use sonoro_proto::enums::{EAttributeType, ErrorCode};
 use sonoro_proto::pb::{
     ArrayIntInt, AttributeChangedNotify, CombatCommon, CombatNotifyData,
     CombatNotifyDataMessageOneof, CombatReceiveData, CombatReceiveDataMessageOneof,
     CombatReceivePackNotify, EntityAddNotify, EntityRemoveInfo, EntityRemoveNotify, PhantomItem,
     PhantomStackSplitInfo, RecoverPropChangedNotify, RecoverPropFromServer,
-    RefreshVisionEquipGroupData, RemoveBuffS2cRequestNotify, RolePhantomEquipInfo,
-    RolePhantomPropInfo, RolePhantomPropUpdateNotify, VisionSkillChangeNotify,
-    VisionSkillInformation, ApplyBuffS2cRequestNotify,
+    RefreshVisionEquipGroupData, RolePhantomEquipInfo, RolePhantomPropInfo,
+    RolePhantomPropUpdateNotify, VisionSkillChangeNotify, VisionSkillInformation,
 };
 
 use super::super::State;
@@ -409,11 +410,14 @@ pub fn refresh_role_entities(state: &mut State, changed_roles: &[i32]) -> Result
             weapon_comp,
             echo_comp,
             net_id,
-            scene.entities[idx].attribute.as_mut().unwrap(),
+            scene,
+            idx,
         )?;
+        let mut events = EventQueue::new();
         let buff_changed = sync_echo_buff_effects(
             conn,
             fs,
+            &mut events,
             scene,
             assets,
             net_id,
@@ -423,6 +427,32 @@ pub fn refresh_role_entities(state: &mut State, changed_roles: &[i32]) -> Result
             buff_timers,
             now_ms,
         )?;
+        let mut follow_up_steps = 0usize;
+        while let Some(ev) = events.dequeue() {
+            match ev {
+                Event::BuffAddition {
+                    target,
+                    instigator,
+                    buffs,
+                } if follow_up_steps < 8 => {
+                    follow_up_steps += 1;
+                    buff_handlers::add_buff_to_entity(
+                        conn,
+                        &mut events,
+                        scene,
+                        buff_timers,
+                        assets,
+                        target,
+                        instigator,
+                        &buffs,
+                    );
+                }
+                Event::BuffChange { entity, .. } => {
+                    fsm_handlers::handle_fsm_buff_change(scene, entity);
+                }
+                _ => {}
+            }
+        }
 
         if !vision_state.changed && !vision_skill_changed && !attribute_changed && !buff_changed {
             continue;
@@ -694,19 +724,46 @@ fn sync_echo_attributes(
     weapon_comp: &PlayerWeaponComponent,
     echo_comp: &PlayerEchoComponent,
     entity_id: i64,
-    attr_comp: &mut sonoro_gamesv_logic::component::entity::AttributeComponent,
+    scene: &mut Scene,
+    role_idx: usize,
 ) -> Result<bool, String> {
-    let before = attr_comp.attributes.clone();
+    let before = scene.entities[role_idx]
+        .attribute
+        .as_ref()
+        .expect("attribute checked")
+        .attributes
+        .clone();
     role_stats::refresh_attribute_component(
         assets,
         role_comp,
         role_id,
         weapon_comp,
         echo_comp,
-        attr_comp,
+        scene.entities[role_idx]
+            .attribute
+            .as_mut()
+            .expect("attribute checked"),
     )
     .map_err(|e| e.to_string())?;
 
+    // Clear stale buff mod tracking wiped by refresh_attribute_component, then re-sync.
+    if let Some(buffs) = scene.entities[role_idx].buffs.as_mut() {
+        buffs.set_applied_buff_mods(Vec::new());
+    }
+    let mut sync_pack = Vec::new();
+    buff_helper::sync_continuous_buff_modifiers(&mut sync_pack, scene, entity_id, assets);
+    {
+        let storage = &mut scene.entities[role_idx];
+        if let (Some(buffs), Some(attr_comp)) = (storage.buffs.as_ref(), storage.attribute.as_mut())
+        {
+            buff_helper::sync_shield_attribute(&mut sync_pack, entity_id, buffs, attr_comp);
+        }
+    }
+
+    let attr_comp = scene.entities[role_idx]
+        .attribute
+        .as_ref()
+        .expect("attribute checked");
     let mut changed = Vec::new();
     for (index, &new_attr) in attr_comp.attributes.iter().enumerate() {
         let attr_type = attributes::attr_from_id(index as i32);
@@ -810,6 +867,7 @@ fn push_changed_attributes(
 fn sync_echo_buff_effects(
     conn: &mut Connection,
     fs: &FileSystem,
+    events: &mut EventQueue,
     scene: &mut Scene,
     assets: &Assets,
     entity_id: i64,
@@ -819,139 +877,74 @@ fn sync_echo_buff_effects(
     buff_timers: &mut BuffTimerScheduler,
     now_ms: i64,
 ) -> Result<bool, String> {
+    let Some(handle) = scene.entity_handle(entity_id) else {
+        return Ok(false);
+    };
     buff_timers.ensure_entity_registered(scene, assets, entity_id, now_ms);
-    let mut notify_data: Vec<CombatReceiveData> = Vec::new();
     let expected = echo_comp.active_echo_buff_effects(assets, role_id);
 
-    let to_remove: Vec<(i32, i64, i32)> = scene.entities[role_idx]
+    let to_remove_handles: Vec<i32> = scene.entities[role_idx]
         .buffs
         .as_ref()
         .unwrap()
         .buffs
         .iter()
         .filter(|b| is_echo_buff_effect(assets, b.BuffId) && !expected.contains(&b.BuffId))
-        .map(|b| (b.HandleId, b.BuffId, b.StackCount))
+        .map(|b| b.HandleId)
         .collect();
 
-    for (handle_id, buff_id, stack_count) in to_remove {
-        buff_timers.cancel_handle(entity_id, handle_id);
-        scene.entities[role_idx]
-            .buffs
-            .as_mut()
-            .unwrap()
-            .remove_by_handle(handle_id);
-        notify_data.push(CombatReceiveData {
-            Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
-                CombatNotifyData {
-                    CombatCommon: Some(CombatCommon {
-                        EntityId: entity_id,
-                        ..Default::default()
-                    }),
-                    Message: Some(CombatNotifyDataMessageOneof::RemoveBuffS2cRequestNotify(
-                        RemoveBuffS2cRequestNotify {
-                            Handle: handle_id,
-                            StackCount: stack_count,
-                            Reason: remove_echo_buff_reason(assets, buff_id),
-                            InstigatorId: entity_id,
-                        },
-                    )),
-                },
-            )),
-        });
+    let mut changed = false;
+    if !to_remove_handles.is_empty() {
+        buff_handlers::remove_buff_handles_with_sync(
+            handle,
+            &to_remove_handles,
+            Some(scene),
+            Some(assets),
+            conn,
+            events,
+            buff_timers,
+        );
+        changed = true;
     }
 
+    let mut to_add_entries: Vec<BuffAdditionEntry> = Vec::new();
     for buff_id in expected {
-        if scene.entities[role_idx]
+        let already_present = scene.entities[role_idx]
             .buffs
             .as_ref()
             .unwrap()
             .get_by_buff_id(buff_id)
-            .is_some()
+            .is_some();
+        if already_present
+            || to_add_entries.iter().any(|e| e.id == buff_id)
+            || assets.tables.buff.get_data_by_id(&buff_id).is_none()
         {
             continue;
         }
-        let Some(buff_data) = assets
-            .tables
-            .buff
-            .get_data_by_id(&buff_id)
-            .map(|r| r.into_owned())
-        else {
-            continue;
-        };
-        scene.instance.buff_handle += 1;
-        let buff_info = create_buff_information(
-            scene.instance.buff_handle,
-            buff_id,
-            entity_id,
-            entity_id,
-            true,
-        );
-        scene.entities[role_idx]
-            .buffs
-            .as_mut()
-            .unwrap()
-            .buffs
-            .push(buff_info.clone());
-        buff_timers.schedule_new_buff(&buff_info, &buff_data, entity_id, now_ms);
-        notify_data.push(CombatReceiveData {
-            Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
-                CombatNotifyData {
-                    CombatCommon: Some(CombatCommon {
-                        EntityId: entity_id,
-                        MessageId: -1,
-                        PreMessageId: -1,
-                        ..Default::default()
-                    }),
-                    Message: Some(CombatNotifyDataMessageOneof::ApplyBuffS2cRequestNotify(
-                        ApplyBuffS2cRequestNotify {
-                            Id: buff_id,
-                            Level: buff_info.Level,
-                            InstigatorId: entity_id,
-                            ApplyType: Some(buff_info.ApplyType.unwrap_or(ApplyGEType::Common)),
-                            ServerId: buff_info.ServerId,
-                            StackCount: buff_info.StackCount,
-                            IsIterable: true,
-                            Reason: 7,
-                            Time: None,
-                        },
-                    )),
-                },
-            )),
+        to_add_entries.push(BuffAdditionEntry {
+            id: buff_id,
+            is_active: true,
+            notify_client: true,
+            ..Default::default()
         });
-
-        let disposition =
-            BuffTimerScheduler::application_disposition(&buff_data, true, false, true);
-        if disposition.execute_periodic_now {
-            scene
-                .save_entity_by_net_id(fs, entity_id)
-                .map_err(|e| e.to_string())?;
-            buff_helper::execute_periodic_buff_effects(
-                &mut notify_data,
-                entity_id,
-                entity_id,
-                &buff_data,
-                scene,
-            );
-        }
     }
 
-    if !notify_data.is_empty() {
-        conn.push(
-            CombatReceivePackNotify::MSG_ID,
-            &CombatReceivePackNotify { Data: notify_data },
+    if !to_add_entries.is_empty() {
+        let _ = scene.save_entity_by_net_id(fs, entity_id);
+        buff_handlers::add_buff_to_entity(
+            conn,
+            events,
+            scene,
+            buff_timers,
+            assets,
+            handle,
+            handle,
+            &to_add_entries,
         );
-        return Ok(true);
+        changed = true;
     }
-    Ok(false)
-}
 
-fn remove_echo_buff_reason(assets: &Assets, buff_id: i64) -> i32 {
-    for fetter in &assets.tables.phantom_fetter.items {
-        if fetter.BuffIds.contains(&buff_id) {
-            return 36;
-        }
-    }
-    35
+    Ok(changed)
 }
 
 fn is_echo_buff_effect(assets: &Assets, buff_id: i64) -> bool {

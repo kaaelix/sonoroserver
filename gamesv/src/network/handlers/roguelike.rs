@@ -71,7 +71,7 @@ fn reward_to_map(
     state: &mut State,
     table_name: &str,
     key: i64,
-    _fallback: &[RewardItem],
+    fallback: &[RewardItem],
 ) -> Result<BTreeMap<i32, i32>, String> {
     let mut granted = Vec::new();
     let mut rctx = state.reward_context();
@@ -82,7 +82,7 @@ fn reward_to_map(
         false,
         true,
         19500,
-        &[],
+        fallback,
         Some(&mut granted),
     )
     .map_err(|e| e.to_string())?;
@@ -789,24 +789,42 @@ pub fn handle_rogue_res_inst_result_request(
     state: &mut State,
     _req: RogueResInstResultRequest,
 ) -> Result<RogueResInstResultResponse, String> {
-    let inst_id = state
+    let info = &mut state.player_components.progress.info;
+    let inst_id = info.get_key_int("rogue_res:inst") as i32;
+    let rooms = info.get_key_int("rogue_res:room").max(0) as i32;
+    let evt_cnt = info.get_key_int("rogue_res:evt").max(0) as i32;
+    let mood_consume = info.get_key_int("rogue_res:mood_cost").max(0) as i32;
+    let recorded_score = info.get_key_int("rogue_res:score").max(0) as i32;
+    let score = if recorded_score > 0 {
+        recorded_score
+    } else if inst_id > 0 {
+        rooms * 200 + evt_cnt * 100
+    } else {
+        0
+    };
+    let is_succ = inst_id > 0 && rooms > 0;
+    if score > 0 {
+        let best = info.get_key_int("rogue_res:best_score").max(i64::from(score));
+        info.set_key_int("rogue_res:best_score", best);
+    }
+    info.set_key_int("rogue_res:inst", 0);
+    info.set_key_int("rogue_res:room", 0);
+    info.set_key_int("rogue_res:evt", 0);
+    info.set_key_int("rogue_res:mood_cost", 0);
+    info.set_key_int("rogue_res:score", 0);
+    state
         .player_components
         .progress
-        .info
-        .get_key_int("rogue_res:inst") as i32;
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        "rogue_res:inst",
-        0,
-    )
-    .map_err(|e| e.to_string())?;
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     Ok(RogueResInstResultResponse {
         ErrorCode: Some(ErrorCode::Success),
         InstResultView: Some(InstResultView {
             InstId: inst_id,
-            IsSucc: true,
-            Score: 1000,
+            IsSucc: is_succ,
+            Score: score,
+            EventCount: evt_cnt,
+            SumMoodConsume: mood_consume,
             ..Default::default()
         }),
     })
@@ -1163,8 +1181,18 @@ pub fn handle_rogue_weekly_result_request(
     _req: RogueWeeklyResultRequest,
 ) -> Result<RogueWeeklyResultResponse, String> {
     let info = &mut state.player_components.progress.info;
-    info.add_key_int("rogue_weekly:score", 500);
+    let cleared_layers = info.get_key_int("rogue_weekly:layer").max(0);
+    let run_score = info.get_key_int("rogue_weekly:run_score").max(0);
+    let delta = if run_score > 0 {
+        run_score
+    } else {
+        cleared_layers * 150
+    };
+    if delta > 0 {
+        info.add_key_int("rogue_weekly:score", delta);
+    }
     info.set_key_int("rogue_weekly:layer", 0);
+    info.set_key_int("rogue_weekly:run_score", 0);
     state
         .player_components
         .progress
@@ -1481,22 +1509,38 @@ pub fn handle_rover_rogue_loot_info_request(
     state: &mut State,
     _req: RoverRogueLootInfoRequest,
 ) -> Result<RoverRogueLootInfoResponse, String> {
-    let loots = state
+    let mut loots: Vec<RoverRogueGainEntry> = state
         .player_components
         .progress
         .info
         .dynamic
-        .claims
+        .ints
         .iter()
-        .filter_map(|c| {
-            let lid = c.strip_prefix("rover_rogue:loot:")?.parse::<i32>().ok()?;
+        .filter_map(|e| {
+            let inc_id = e.key.strip_prefix("rover_rogue:loot:")?.parse::<i32>().ok()?;
+            let loot_id = i32::try_from(e.val).ok()?;
+            if loot_id <= 0 {
+                return None;
+            }
             Some(RoverRogueGainEntry {
-                ConfigId: lid,
-                IncId: lid,
+                ConfigId: loot_id,
+                IncId: inc_id,
                 ..Default::default()
             })
         })
         .collect();
+    for c in &state.player_components.progress.info.dynamic.claims {
+        if let Some(rest) = c.strip_prefix("rover_rogue:loot:")
+            && let Ok(lid) = rest.parse::<i32>()
+            && !loots.iter().any(|x| x.IncId == lid || x.ConfigId == lid)
+        {
+            loots.push(RoverRogueGainEntry {
+                ConfigId: lid,
+                IncId: lid,
+                ..Default::default()
+            });
+        }
+    }
     Ok(RoverRogueLootInfoResponse {
         ErrorCode: Some(ErrorCode::Success),
         Loots: loots,
@@ -1648,27 +1692,55 @@ pub fn handle_rover_rogue_result_request(
     state: &mut State,
     req: RoverRogueResultRequest,
 ) -> Result<RoverRogueResultResponse, String> {
-    let layer = state
+    let info = &mut state.player_components.progress.info;
+    let active_inst = info.get_key_int("rover_rogue:inst") as i32;
+    let inst_id = if req.InstId > 0 { req.InstId } else { active_inst };
+    let raw_layer = info.get_key_int("rover_rogue:layer").max(0) as i32;
+    let gain_loots: Vec<RoverRogueGainEntry> = info
+        .dynamic
+        .ints
+        .iter()
+        .filter_map(|e| {
+            let inc_id = e.key.strip_prefix("rover_rogue:loot:")?.parse::<i32>().ok()?;
+            let loot_id = i32::try_from(e.val).ok()?;
+            if loot_id <= 0 {
+                return None;
+            }
+            Some(RoverRogueGainEntry {
+                ConfigId: loot_id,
+                IncId: inc_id,
+                ..Default::default()
+            })
+        })
+        .collect();
+    let max_layer = raw_layer.max(5);
+    let grade = if raw_layer >= max_layer {
+        RoverRogueGrade::RoverRogueGradeS
+    } else if raw_layer >= 3 {
+        RoverRogueGrade::RoverRogueGradeA
+    } else {
+        RoverRogueGrade::RoverRogueGradeB
+    };
+    let gain_count = gain_loots.len() as i32;
+    let gain_loot_ids: Vec<i32> = gain_loots.iter().map(|g| g.ConfigId).collect();
+    info.set_key_int("rover_rogue:layer", 0);
+    info.set_key_int("rover_rogue:inst", 0);
+    state
         .player_components
         .progress
-        .info
-        .get_key_int("rover_rogue:layer")
-        .max(1) as i32;
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        "rover_rogue:layer",
-        0,
-    )
-    .map_err(|e| e.to_string())?;
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     Ok(RoverRogueResultResponse {
         ErrorCode: Some(ErrorCode::Success),
         ResultInfo: Some(RoverRogueResultInfo {
-            InstId: req.InstId,
-            Grade: Some(RoverRogueGrade::RoverRogueGradeS),
-            CurLayer: layer,
-            MaxLayer: 5,
-            RoomPassedCount: layer,
+            InstId: inst_id,
+            Grade: Some(grade),
+            CurLayer: raw_layer,
+            MaxLayer: max_layer,
+            GainCount: gain_count,
+            RoomPassedCount: raw_layer,
+            GainLootConfId: gain_loot_ids,
+            GainLootInfo: gain_loots,
             ..Default::default()
         }),
     })

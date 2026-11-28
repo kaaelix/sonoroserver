@@ -18,8 +18,9 @@ use sonoro_proto::pb::{
     ExploreSkillRouletteSetResponse, ExploreSkillRouletteUpdateNotify, MoralePosRequest,
     MoralePosResponse, MoraleTreasureBoxTraceRequest, MoraleTreasureBoxTraceResponse,
     PlayerAccessCasketRequest, PlayerAccessCasketResponse, RemoveSummonEntityRequest,
-    RemoveSummonEntityResponse, Summon3Request, Summon3Response, SummonRequest, SummonResponse,
-    VisionExploreSkillSetRequest, VisionExploreSkillSetResponse, VisionSkillChangeNotify,
+    RemoveSummonEntityResponse, Summon3Request, Summon3Response, SummonRequest,
+    SummonRequestInfo, SummonResponse, VisionExploreSkillSetRequest, VisionExploreSkillSetResponse,
+    VisionSkillChangeNotify,
 };
 
 use super::State;
@@ -238,20 +239,14 @@ fn summon_entity_type_from_blueprint(assets: &Assets, blueprint_type: &str) -> E
     }
 }
 
-pub fn handle_summon_request(
+pub(crate) fn spawn_custom_summon_entity(
     state: &mut State,
-    req: SummonRequest,
-) -> Result<SummonResponse, String> {
+    summoner_id: i64,
+    info: SummonRequestInfo,
+) -> Result<ErrorCode, String> {
     let now_ms = quest_engine::tree::now_ms_pub();
-    let Some(info) = req.SummonInfo else {
-        return Ok(SummonResponse {
-            ErrorCode: Some(ErrorCode::RequestParamError),
-        });
-    };
     if info.SummonEntityId <= 0 {
-        return Ok(SummonResponse {
-            ErrorCode: Some(ErrorCode::ErrSummonAddEntityFail),
-        });
+        return Ok(ErrorCode::ErrSummonAddEntityFail);
     }
     let State {
         conn,
@@ -263,9 +258,7 @@ pub fn handle_summon_request(
     let scene = scene_opt.as_mut().ok_or("no active scene")?;
 
     if scene.net_id_map.contains_key(&info.SummonEntityId) {
-        return Ok(SummonResponse {
-            ErrorCode: Some(ErrorCode::ErrSummonEntityIdAlreadyExist),
-        });
+        return Ok(ErrorCode::ErrSummonEntityIdAlreadyExist);
     }
     let Some(summon_cfg) = assets
         .tables
@@ -273,9 +266,7 @@ pub fn handle_summon_request(
         .get_data_by_id(&info.SummonConfigId)
         .map(|r| r.into_owned())
     else {
-        return Ok(SummonResponse {
-            ErrorCode: Some(ErrorCode::ErrSummonCfgNotFound),
-        });
+        return Ok(ErrorCode::ErrSummonCfgNotFound);
     };
 
     let template_config = if !summon_cfg.BlueprintType.is_empty() {
@@ -291,7 +282,7 @@ pub fn handle_summon_request(
     };
 
     let attr_comp = scene
-        .entity(req.SummonerEntityId)
+        .entity(summoner_id)
         .and_then(|s| s.attribute.clone())
         .unwrap_or_default();
     let pos = info.Pos.unwrap_or_default();
@@ -323,7 +314,7 @@ pub fn handle_summon_request(
         summon_cfg_id: summon_cfg.Id,
         summon_skill_id: info.SkillId,
         summon_type: ESummonType::ConcomitantCustom,
-        summoner_id: req.SummonerEntityId,
+        summoner_id,
     });
     storage.logic_state = Some(LogicStateComponent::default());
     storage.monster_ai = Some(MonsterAiComponent {
@@ -355,9 +346,7 @@ pub fn handle_summon_request(
     let entity = match scene.spawn_with_net_id(info.SummonEntityId, storage) {
         Ok(e) => e,
         Err("EntityIdAlreadyExists") => {
-            return Ok(SummonResponse {
-                ErrorCode: Some(ErrorCode::ErrSummonEntityIdAlreadyExist),
-            });
+            return Ok(ErrorCode::ErrSummonEntityIdAlreadyExist);
         }
         Err(err) => return Err(err.to_string()),
     };
@@ -371,8 +360,21 @@ pub fn handle_summon_request(
             EntityPbs: vec![pb],
         },
     );
+    Ok(ErrorCode::Success)
+}
+
+pub fn handle_summon_request(
+    state: &mut State,
+    req: SummonRequest,
+) -> Result<SummonResponse, String> {
+    let Some(info) = req.SummonInfo else {
+        return Ok(SummonResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    };
+    let code = spawn_custom_summon_entity(state, req.SummonerEntityId, info)?;
     Ok(SummonResponse {
-        ErrorCode: Some(ErrorCode::Success),
+        ErrorCode: Some(code),
     })
 }
 
@@ -485,16 +487,35 @@ pub fn handle_remove_summon_entity_request(
 
     let mut to_remove = Vec::new();
     for entity_id in req.RemoveENtityIds {
-        let Some(summoner) = scene.entity(entity_id).and_then(|s| s.summoner) else {
+        let Some(entity) = scene.entity(entity_id) else {
+            continue;
+        };
+        let Some(summoner) = entity.summoner else {
             continue;
         };
         if summoner.summoner_id != req.SummonerId {
             continue;
         }
+        let is_unconfigured_concomitant = summoner.summon_cfg_id == 0
+            && matches!(
+                summoner.summon_type,
+                ESummonType::ConcomitantCustom | ESummonType::ConcomitantVision
+            );
         if matches!(
             summoner.summon_type,
-            ESummonType::ConcomitantCustom | ESummonType::ConcomitantVision
-        ) {
+            ESummonType::ConcomitantMotorcycle
+        ) || entity.config.entity_type == EntityType::Player
+            || is_unconfigured_concomitant
+            || scene
+                .entity(req.SummonerId)
+                .and_then(|s| s.concomitant.as_ref())
+                .is_some_and(|c| {
+                    c.vision_entity_id.contains(&entity_id)
+                        || c.custom_entity_ids.contains(&entity_id)
+                        || c.phantom_role_id == entity_id
+                        || c.boss_rush_id == entity_id
+                })
+        {
             continue;
         }
         to_remove.push(entity_id);

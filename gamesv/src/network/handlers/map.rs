@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
+use serde_json::Value;
 use sonoro_gamesv_data::asset_indexes::entity_world_rot;
 use sonoro_gamesv_data::tables::entity_components::components::gravity_flip_from_default;
 use sonoro_gamesv_data::tables::entity_components::extra::ExtraEntry;
@@ -7,6 +9,7 @@ use sonoro_gamesv_fs::map_info::MapInfo;
 use sonoro_gamesv_logic::component::comp_util;
 use sonoro_gamesv_logic::component::entity::small::GravityComponent;
 use sonoro_gamesv_logic::event_queue::EventQueue;
+use sonoro_gamesv_logic::helpers::consume::{self, CostItem};
 use sonoro_gamesv_logic::helpers::{gravity as gravity_helper, quest_engine, reward::{self, RewardItem}};
 use sonoro_proto::enums::{AccessRangeType, ErrorCode, InfrStatusPb, InfrV2StatusPb};
 use sonoro_proto::pb::{
@@ -15,9 +18,9 @@ use sonoro_proto::pb::{
     EntityAccessRangeRequest, EntityAccessRangeResponse, ExploreLevelNotify,
     ExploreProgressRequest, ExploreProgressResponse, ExploreProgressRewardIdsNotify,
     ExploreProgressRewardRequest, ExploreProgressRewardResponse, ExploreScoreRewardRequest,
-    ExploreScoreRewardResponse, InfrInfoRequest, InfrInfoResponse, InfrOneRoad, InfrPb,
-    InfrRoadPb, InfrV2FirePb, InfrV2InfoRequest, InfrV2InfoResponse, InfrV2OneTree, InfrV2Pb,
-    InfrV2TreePb, InitRangeRequest, InitRangeResponse, MapCancelTraceRequest,
+    ExploreScoreRewardResponse, InfrFirePb, InfrInfoRequest, InfrInfoResponse, InfrOneRoad,
+    InfrPb, InfrRoadPb, InfrV2FirePb, InfrV2InfoRequest, InfrV2InfoResponse, InfrV2OneTree,
+    InfrV2Pb, InfrV2TreePb, InitRangeRequest, InitRangeResponse, MapCancelTraceRequest,
     MapCancelTraceResponse, MapMarkAddNotify, MapMarkInfoNotify, MapMarkInfoRequest,
     MapMarkInfoResponse, MapMarkInfoUpdateRequest, MapMarkInfoUpdateResponse, MapMarkRequest,
     MapMarkResponse, MapMarkShowInfo, MapRemoveAllMarkRequest, MapRemoveAllMarkResponse,
@@ -320,26 +323,134 @@ pub fn handle_map_remove_all_mark_request(
     })
 }
 
+fn multi_map_rules(assets: &sonoro_gamesv_data::Assets) -> &'static [(i32, i32, Vec<i32>, i32)] {
+    static RULES: OnceLock<Vec<(i32, i32, Vec<i32>, i32)>> = OnceLock::new();
+    RULES.get_or_init(|| {
+        assets
+            .read_raw_json_array("MultiMap")
+            .into_iter()
+            .filter_map(|row| {
+                let id = row.get("Id").and_then(Value::as_i64)? as i32;
+                let map_id = row.get("MapId").and_then(Value::as_i64).unwrap_or(0) as i32;
+                let cond_id = row
+                    .get("ConditionId")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+                let areas = row
+                    .get("Area")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_i64().map(|x| x as i32))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some((id, map_id, areas, cond_id))
+            })
+            .collect()
+    })
+}
+
+fn map_block_rules(assets: &sonoro_gamesv_data::Assets) -> &'static [(i32, i32)] {
+    static RULES: OnceLock<Vec<(i32, i32)>> = OnceLock::new();
+    RULES.get_or_init(|| {
+        assets
+            .read_raw_json_array("MapBlockInfo")
+            .into_iter()
+            .filter_map(|row| {
+                let block_id = row.get("BlockId").and_then(Value::as_i64)? as i32;
+                let map_id = row.get("MapId").and_then(Value::as_i64).unwrap_or(0) as i32;
+                Some((block_id, map_id))
+            })
+            .collect()
+    })
+}
+
 pub fn handle_map_unlock_field_info_request(
     state: &mut State,
     _req: MapUnlockFieldInfoRequest,
 ) -> Result<MapUnlockFieldInfoResponse, String> {
-    let multi_maps: Vec<i32> = state
-        .assets
-        .tables
-        .multi_map
-        .items
-        .iter()
-        .map(|m| m.Id)
-        .collect();
-    let map_blocks: Vec<i32> = state
-        .assets
-        .tables
-        .map_block_info
-        .items
-        .iter()
-        .map(|b| b.BlockId)
-        .collect();
+    let progress = &state.player_components.progress.info;
+    let map_info = &state.player_components.map.info;
+    let quest_info = &state.player_components.quest.info;
+    let cur_inst = state
+        .scene
+        .as_ref()
+        .map_or(state.player_components.scene.last_scene_info.instance_id, |s| s.instance_id);
+    let cur_map_id = state.assets.resolve_map_config_id(cur_inst);
+
+    let multi_rules = multi_map_rules(&state.assets);
+    let multi_maps: Vec<i32> = if multi_rules.is_empty() {
+        state
+            .assets
+            .tables
+            .multi_map
+            .items
+            .iter()
+            .filter(|m| {
+                progress.has_claim(&format!("map_unlock:multi:{}", m.Id))
+                    || progress.get_key_int(&format!("map_unlock:multi:{}", m.Id)) > 0
+            })
+            .map(|m| m.Id)
+            .collect()
+    } else {
+        multi_rules
+            .iter()
+            .filter(|(id, map_id, areas, cond_id)| {
+                progress.has_claim(&format!("map_unlock:multi:{id}"))
+                    || progress.get_key_int(&format!("map_unlock:multi:{id}")) > 0
+                    || (*cond_id == 0
+                        && (*map_id == cur_map_id || *map_id == 8)
+                        && (areas.is_empty()
+                            || areas
+                                .iter()
+                                .any(|a| map_info.unlocked_areas.contains(a))))
+            })
+            .map(|(id, _, _, _)| *id)
+            .collect()
+    };
+
+    let block_rules = map_block_rules(&state.assets);
+    let mut unlocked_map_ids = Vec::new();
+    if cur_map_id > 0 {
+        unlocked_map_ids.push(cur_map_id);
+    }
+    for &tid in &map_info.unlocked_teleporters {
+        if let Some(tp) = state.assets.tables.teleporter.get_data_by_id(&tid)
+            && !unlocked_map_ids.contains(&tp.MapId)
+        {
+            unlocked_map_ids.push(tp.MapId);
+        }
+    }
+    let map_blocks: Vec<i32> = if block_rules.is_empty() {
+        state
+            .assets
+            .tables
+            .map_block_info
+            .items
+            .iter()
+            .filter(|b| {
+                b.BlockId == 1
+                    || progress.has_claim(&format!("map_unlock:block:{}", b.BlockId))
+                    || progress.get_key_int(&format!("map_unlock:block:{}", b.BlockId)) > 0
+            })
+            .map(|b| b.BlockId)
+            .collect()
+    } else {
+        block_rules
+            .iter()
+            .filter(|(block_id, map_id)| {
+                *block_id == 1
+                    || progress.has_claim(&format!("map_unlock:block:{block_id}"))
+                    || progress.get_key_int(&format!("map_unlock:block:{block_id}")) > 0
+                    || (*map_id != 8
+                        && (unlocked_map_ids.contains(map_id)
+                            || quest_info.completed_dungeons.contains(map_id)))
+            })
+            .map(|(block_id, _)| *block_id)
+            .collect()
+    };
+
     let _ = state.conn.push_msg(
         MultiMapInfoNotify::MSG_ID,
         &MultiMapInfoNotify {
@@ -349,7 +460,7 @@ pub fn handle_map_unlock_field_info_request(
     );
     Ok(MapUnlockFieldInfoResponse {
         ErrorCode: Some(ErrorCode::Success),
-        FieldId: state.player_components.map.info.unlocked_fogs.clone(),
+        FieldId: map_info.unlocked_fogs.clone(),
     })
 }
 
@@ -1097,33 +1208,125 @@ pub fn handle_init_range_request(
     })
 }
 
+fn infr_v2_pre_quests(assets: &sonoro_gamesv_data::Assets) -> &'static BTreeMap<i32, i32> {
+    static PRE_QUESTS: OnceLock<BTreeMap<i32, i32>> = OnceLock::new();
+    PRE_QUESTS.get_or_init(|| {
+        let mut out = BTreeMap::new();
+        for row in &assets.read_raw_json_array("InfrV2TreeBuild") {
+            let id = row.get("Id").and_then(Value::as_i64).unwrap_or(0) as i32;
+            let pre = row.get("PreQuest").and_then(Value::as_i64).unwrap_or(0) as i32;
+            if id > 0 && pre > 0 {
+                out.insert(id, pre);
+            }
+        }
+        out
+    })
+}
+
+fn map_travel_config(assets: &sonoro_gamesv_data::Assets) -> (i32, i32, i32) {
+    static CFG: OnceLock<(i32, i32, i32)> = OnceLock::new();
+    *CFG.get_or_init(|| {
+        let rows = assets.read_raw_json_array("MapTravelConfig");
+        rows.first()
+            .map(|row| {
+                let max_lv = row
+                    .get("MaxLevel")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(10)
+                    .max(1) as i32;
+                let exp_item = row
+                    .get("ExpItemId")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(26) as i32;
+                let final_rwd = row
+                    .get("FinalRewardId")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0) as i32;
+                (max_lv, exp_item, final_rwd)
+            })
+            .unwrap_or((10, 26, 0))
+    })
+}
+
+fn map_travel_level_cost_reward(
+    assets: &sonoro_gamesv_data::Assets,
+    cur_level: i32,
+) -> Option<(i32, i32)> {
+    static LEVELS: OnceLock<BTreeMap<i32, (i32, i32)>> = OnceLock::new();
+    let table = LEVELS.get_or_init(|| {
+        let mut out = BTreeMap::new();
+        for row in &assets.read_raw_json_array("MapLevelExp") {
+            let lv = row.get("Level").and_then(Value::as_i64).unwrap_or(-1) as i32;
+            let need_exp = row
+                .get("NeedExp")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .max(0) as i32;
+            let reward_drop = row
+                .get("RewardDropId")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .max(0) as i32;
+            if lv >= 0 {
+                out.insert(lv, (need_exp, reward_drop));
+            }
+        }
+        out
+    });
+    table.get(&cur_level).copied()
+}
+
 pub fn handle_infr_v2_info_request(
     state: &mut State,
     _req: InfrV2InfoRequest,
 ) -> Result<InfrV2InfoResponse, String> {
+    let progress = &state.player_components.progress.info;
+    let completed_quests = &state.player_components.quest.info.finished_quests;
+    let pre_quests = infr_v2_pre_quests(&state.assets);
+    let fire_lv = progress.get_key_int("infr2:lvl").max(0) as i32;
+    let trace_tree = progress.get_key_int("infr2:trace_tree").max(0) as i32;
+
     let tree_list = state
         .assets
         .tables
         .infr_v2_tree_build
         .items
         .iter()
-        .map(|cfg| InfrV2OneTree {
-            TreeId: cfg.Id,
-            status: Some(InfrV2StatusPb::InfrV2StatusComplete),
-            ..Default::default()
+        .map(|cfg| {
+            let done = progress.has_claim(&format!("infr2:tree:{}", cfg.Id))
+                || progress.get_key_int(&format!("infr2:tree:{}", cfg.Id)) > 0;
+            let locked = pre_quests
+                .get(&cfg.Id)
+                .is_some_and(|pre| !completed_quests.contains(pre));
+            let status = if done {
+                InfrV2StatusPb::InfrV2StatusComplete
+            } else if locked {
+                InfrV2StatusPb::InfrV2StatusLock
+            } else {
+                InfrV2StatusPb::InfrV2StatusProgress
+            };
+            InfrV2OneTree {
+                TreeId: cfg.Id,
+                status: Some(status),
+                ..Default::default()
+            }
         })
         .collect();
     Ok(InfrV2InfoResponse {
         ErrorCode: Some(ErrorCode::Success),
         InfrInfo: Some(InfrV2Pb {
             FireInfo: Some(InfrV2FirePb {
-                FireLevel: 1,
-                FireStatus: Some(InfrV2StatusPb::InfrV2StatusComplete),
+                FireLevel: fire_lv,
+                FireStatus: Some(if fire_lv > 0 {
+                    InfrV2StatusPb::InfrV2StatusComplete
+                } else {
+                    InfrV2StatusPb::InfrV2StatusProgress
+                }),
                 ..Default::default()
             }),
             TreeInfo: Some(InfrV2TreePb {
                 Trees: tree_list,
-                ManualTraceTree: 0,
+                ManualTraceTree: trace_tree,
             }),
             ..Default::default()
         }),
@@ -1134,6 +1337,14 @@ pub fn handle_infr_info_request(
     state: &mut State,
     _req: InfrInfoRequest,
 ) -> Result<InfrInfoResponse, String> {
+    let progress = &state.player_components.progress.info;
+    let fire_lv = progress
+        .get_key_int("infr:lvl")
+        .max(progress.get_key_int("infr:lv"))
+        .max(0) as i32;
+    let fire_exp = progress.get_key_int("infr:exp").max(0);
+    let trace_road = progress.get_key_int("infr:trace_road").max(0) as i32;
+
     let roads = state
         .assets
         .tables
@@ -1141,17 +1352,36 @@ pub fn handle_infr_info_request(
         .items
         .iter()
         .filter(|cfg| cfg.DungeonId == LAHAI_ROI_DUNGEON_ID)
-        .map(|cfg| InfrOneRoad {
-            RoadId: cfg.Id,
-            status: Some(InfrStatusPb::InfrStatusComplete),
-            ..Default::default()
+        .map(|cfg| {
+            let done = progress.has_claim(&format!("infr:road:{}", cfg.Id))
+                || progress.get_key_int(&format!("infr:road:{}", cfg.Id)) > 0;
+            InfrOneRoad {
+                RoadId: cfg.Id,
+                status: Some(if done {
+                    InfrStatusPb::InfrStatusComplete
+                } else {
+                    InfrStatusPb::InfrStatusProgress
+                }),
+                ..Default::default()
+            }
         })
         .collect();
     Ok(InfrInfoResponse {
         ErrorCode: Some(ErrorCode::Success),
         InfrInfo: Some(InfrPb {
+            FireInfo: Some(InfrFirePb {
+                FireExp: fire_exp,
+                FireLevel: fire_lv,
+                FireLevelReachTime: 0,
+                FireStatus: Some(if fire_lv > 0 {
+                    InfrStatusPb::InfrStatusComplete
+                } else {
+                    InfrStatusPb::InfrStatusProgress
+                }),
+            }),
             RoadInfo: Some(InfrRoadPb {
                 Roads: roads,
+                ManualTraceRoad: trace_road,
                 ..Default::default()
             }),
             ..Default::default()
@@ -1163,37 +1393,77 @@ pub fn handle_map_travel_level_up_request(
     state: &mut State,
     _req: MapTravelLevelUpRequest,
 ) -> Result<MapTravelLevelUpResponse, String> {
-    let next_lvl = state
-        .player_components
-        .progress
-        .info
-        .add_key_int("map_travel:lvl", 1);
+    let (max_level, exp_item_id, _final_reward) = map_travel_config(&state.assets);
+    let cur_lvl = {
+        let info = &state.player_components.progress.info;
+        info.get_key_int("map_travel:lv")
+            .max(info.get_key_int("map_travel:lvl"))
+            .max(1) as i32
+    };
+    if cur_lvl >= max_level {
+        return Ok(MapTravelLevelUpResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
+    let (need_exp, reward_drop_id) = map_travel_level_cost_reward(&state.assets, cur_lvl)
+        .or_else(|| map_travel_level_cost_reward(&state.assets, cur_lvl - 1))
+        .unwrap_or((100, 0));
+    if exp_item_id > 0 && need_exp > 0 {
+        let ok = consume::consume_costs(
+            &mut state.conn,
+            &state.fs,
+            &mut state.player_components.basic,
+            &mut state.player_components.inventory,
+            &[CostItem {
+                id: exp_item_id,
+                count: need_exp,
+            }],
+        )
+        .map_err(|e| e.to_string())?;
+        if !ok {
+            return Ok(MapTravelLevelUpResponse {
+                ErrorCode: Some(ErrorCode::ErrItemNotEnough),
+            });
+        }
+    }
+    let next_lvl = (cur_lvl + 1).min(max_level);
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int("map_travel:lv", i64::from(next_lvl));
+        info.set_key_int("map_travel:lvl", i64::from(next_lvl));
+    }
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+
     let mut rctx = state.reward_context();
-    let _ = reward::grant_table_reward(
-        &mut rctx,
-        "MapTravelLevel",
-        next_lvl,
-        false,
-        true,
-        1,
-        &[
-            RewardItem {
-                item_id: 3,
-                count: 50,
-            },
-            RewardItem {
-                item_id: 2,
-                count: 10_000,
-            },
-        ],
-        None,
-    )
-    .map_err(|e| e.to_string())?;
+    if reward_drop_id > 0 {
+        let _ = reward::grant_drop_package_popup(&mut rctx, reward_drop_id, 19500)
+            .map_err(|e| e.to_string())?;
+    } else {
+        let _ = reward::grant_table_reward(
+            &mut rctx,
+            "MapTravelLevel",
+            i64::from(next_lvl),
+            false,
+            true,
+            1,
+            &[
+                RewardItem {
+                    item_id: 3,
+                    count: 50,
+                },
+                RewardItem {
+                    item_id: 2,
+                    count: 10_000,
+                },
+            ],
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(MapTravelLevelUpResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

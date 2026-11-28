@@ -18,11 +18,17 @@ pub fn handle_mail_bind_info_request(
     state: &mut State,
     _req: MailBindInfoRequest,
 ) -> Result<MailBindInfoResponse, String> {
-    let bind_rewarded = state.player_components.mail.info.bind_rewarded;
+    let is_reward = state.player_components.mail.info.bind_rewarded;
+    let is_bind = is_reward
+        || state
+            .player_components
+            .progress
+            .info
+            .has_claim("mail:bound");
     Ok(MailBindInfoResponse {
         MailBind: Some(MailBind {
-            IsBind: bind_rewarded,
-            IsReward: bind_rewarded,
+            IsBind: is_bind,
+            IsReward: is_reward,
             CloseTime: 0,
         }),
     })
@@ -244,12 +250,18 @@ pub fn handle_mail_bind_request(
     state: &mut State,
     _req: MailBindRequest,
 ) -> Result<MailBindResponse, String> {
-    state.player_components.mail.info.bind_rewarded = true;
-    state
+    if state
         .player_components
-        .mail
-        .save(&state.fs)
-        .map_err(|e| e.to_string())?;
+        .progress
+        .info
+        .mark_claim("mail:bound")
+    {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(MailBindResponse {})
 }
 
@@ -257,37 +269,46 @@ pub fn handle_mail_bind_reward_request(
     state: &mut State,
     _req: MailBindRewardRequest,
 ) -> Result<MailBindRewardResponse, String> {
-    let newly_claimed = if !state.player_components.mail.info.bind_rewarded {
-        state.player_components.mail.info.bind_rewarded = true;
-        state
-            .player_components
-            .mail
-            .save(&state.fs)
-            .map_err(|e| e.to_string())?;
-        true
-    } else {
-        false
-    };
-    if newly_claimed {
-        let mut rctx = state.reward_context();
-        let _ = reward::grant_items(
-            &mut rctx,
-            0,
-            true,
-            &[
-                RewardItem {
-                    item_id: 3,
-                    count: 100,
-                },
-                RewardItem {
-                    item_id: 2,
-                    count: 10_000,
-                },
-            ],
-            7000,
-        )
-        .map_err(|e| e.to_string())?;
+    if !state
+        .player_components
+        .progress
+        .info
+        .has_claim("mail:bound")
+        && !state.player_components.mail.info.bind_rewarded
+    {
+        return Ok(MailBindRewardResponse {
+            ErrorCode: Some(ErrorCode::ErrMailBindRewardNotBind),
+        });
     }
+    if state.player_components.mail.info.bind_rewarded {
+        return Ok(MailBindRewardResponse {
+            ErrorCode: Some(ErrorCode::ErrMailBindRewarded),
+        });
+    }
+    state.player_components.mail.info.bind_rewarded = true;
+    state
+        .player_components
+        .mail
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    let mut rctx = state.reward_context();
+    let _ = reward::grant_items(
+        &mut rctx,
+        0,
+        true,
+        &[
+            RewardItem {
+                item_id: 3,
+                count: 100,
+            },
+            RewardItem {
+                item_id: 2,
+                count: 10_000,
+            },
+        ],
+        7000,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(MailBindRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

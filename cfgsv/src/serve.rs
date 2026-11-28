@@ -1,6 +1,7 @@
 //! HTTP request handling for `sonoro-cfgsv`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -18,6 +19,9 @@ const AES_KEY_SIZE: usize = 32;
 const AES_IV_SIZE: usize = 16;
 const DEFAULT_GM_UPSTREAM: &str = "127.0.0.1:13101";
 const GM_PROXY_MAX_BODY: usize = 128 * 1024;
+const GM_PROXY_MAX_RESPONSE: usize = 16 * 1024 * 1024;
+const GM_UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const GM_UPSTREAM_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shared application state for `cfgsv`.
 #[derive(Clone)]
@@ -56,6 +60,30 @@ async fn proxy_to_gm_upstream(
     headers: &HeaderMap,
     body: Body,
 ) -> Response {
+    proxy_to_gm_upstream_with_limits(
+        upstream,
+        method,
+        uri,
+        headers,
+        body,
+        GM_UPSTREAM_CONNECT_TIMEOUT,
+        GM_UPSTREAM_READ_TIMEOUT,
+        GM_PROXY_MAX_RESPONSE,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn proxy_to_gm_upstream_with_limits(
+    upstream: &str,
+    method: Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: Body,
+    connect_timeout: Duration,
+    io_timeout: Duration,
+    max_resp_bytes: usize,
+) -> Response {
     if !matches!(method, Method::GET | Method::POST | Method::OPTIONS) {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
@@ -63,17 +91,27 @@ async fn proxy_to_gm_upstream(
         Ok(b) => b,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
-    let mut stream = match tokio::net::TcpStream::connect(upstream).await {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::warn!(%upstream, error = %err, "failed to connect to GM upstream");
-            return (
-                StatusCode::BAD_GATEWAY,
-                r#"{"ok":false,"message":"GM service unavailable"}"#,
-            )
-                .into_response();
-        }
-    };
+    let mut stream =
+        match tokio::time::timeout(connect_timeout, tokio::net::TcpStream::connect(upstream)).await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(err)) => {
+                tracing::warn!(%upstream, error = %err, "failed to connect to GM upstream");
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    r#"{"ok":false,"message":"GM service unavailable"}"#,
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                tracing::warn!(%upstream, "timed out connecting to GM upstream");
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    r#"{"ok":false,"message":"GM service timeout"}"#,
+                )
+                    .into_response();
+            }
+        };
 
     let target = uri
         .path_and_query()
@@ -90,14 +128,48 @@ async fn proxy_to_gm_upstream(
     }
     req_head.push_str("\r\n");
 
-    if stream.write_all(req_head.as_bytes()).await.is_err()
-        || (!body_bytes.is_empty() && stream.write_all(&body_bytes).await.is_err())
-    {
-        return StatusCode::BAD_GATEWAY.into_response();
+    let write_res = tokio::time::timeout(io_timeout, async {
+        stream.write_all(req_head.as_bytes()).await?;
+        if !body_bytes.is_empty() {
+            stream.write_all(&body_bytes).await?;
+        }
+        Ok::<(), std::io::Error>(())
+    })
+    .await;
+    match write_res {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(%upstream, error = %err, "failed writing request to GM upstream");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+        Err(_) => {
+            tracing::warn!(%upstream, "timed out writing request to GM upstream");
+            return StatusCode::GATEWAY_TIMEOUT.into_response();
+        }
     }
 
     let mut raw_resp = Vec::new();
-    if stream.read_to_end(&mut raw_resp).await.is_err() {
+    let limit = u64::try_from(max_resp_bytes.saturating_add(1)).unwrap_or(u64::MAX);
+    let read_res =
+        tokio::time::timeout(io_timeout, stream.take(limit).read_to_end(&mut raw_resp)).await;
+    match read_res {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => {
+            tracing::warn!(%upstream, error = %err, "failed reading response from GM upstream");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+        Err(_) => {
+            tracing::warn!(%upstream, "timed out reading response from GM upstream");
+            return StatusCode::GATEWAY_TIMEOUT.into_response();
+        }
+    }
+    if raw_resp.len() > max_resp_bytes {
+        tracing::warn!(
+            %upstream,
+            bytes = raw_resp.len(),
+            max_resp_bytes,
+            "GM upstream response exceeded size limit"
+        );
         return StatusCode::BAD_GATEWAY.into_response();
     }
 
@@ -326,5 +398,64 @@ mod tests {
         StatusCode::from_u16(status_code)
             .expect("valid status")
             .into_response()
+    }
+
+    #[tokio::test]
+    async fn gm_proxy_enforces_timeouts_and_response_size_cap() {
+        let slow_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind slow");
+        let slow_addr = slow_listener.local_addr().expect("addr");
+        let slow_srv = tokio::spawn(async move {
+            if let Ok((_sock, _)) = slow_listener.accept().await {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+
+        let timeout_resp = proxy_to_gm_upstream_with_limits(
+            &slow_addr.to_string(),
+            Method::GET,
+            &"/gm".parse::<Uri>().expect("uri"),
+            &HeaderMap::new(),
+            Body::empty(),
+            Duration::from_millis(200),
+            Duration::from_millis(50),
+            1024,
+        )
+        .await;
+        assert_eq!(timeout_resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        slow_srv.abort();
+
+        let big_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind big");
+        let big_addr = big_listener.local_addr().expect("addr");
+        let big_srv = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = big_listener.accept().await {
+                let mut req = [0u8; 512];
+                let _ = sock.read(&mut req).await;
+                let payload = vec![b'A'; 4096];
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&payload).await;
+            }
+        });
+
+        let big_resp = proxy_to_gm_upstream_with_limits(
+            &big_addr.to_string(),
+            Method::GET,
+            &"/gm".parse::<Uri>().expect("uri"),
+            &HeaderMap::new(),
+            Body::empty(),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            1024,
+        )
+        .await;
+        assert_eq!(big_resp.status(), StatusCode::BAD_GATEWAY);
+        big_srv.abort();
     }
 }

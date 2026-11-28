@@ -10,17 +10,22 @@ use sonoro_gamesv_fs::account::Account;
 use sonoro_gamesv_fs::inventory_info::InventoryInfo;
 use sonoro_gamesv_fs::role_info::{RoleInfo, SkillNode};
 use sonoro_gamesv_logic::component::comp_util;
+use sonoro_gamesv_logic::component::entity::small::{ConfigType, EntityType};
 use sonoro_gamesv_logic::component::player::{PlayerEchoComponent, PlayerWeaponComponent};
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::events::{BuffAdditionEntry, EntityHandle, Event};
+use sonoro_gamesv_logic::fsm::types::wake_reason;
 use sonoro_gamesv_logic::helpers::{
-    condition, consume, quest_engine, reward, role as role_helper, role_attribute_sync, role_stats,
+    attributes, buff as buff_helper, condition, consume, quest_engine, reward,
+    role as role_helper, role_attribute_sync, role_stats,
 };
 use sonoro_gamesv_logic::scene::Scene;
-use sonoro_proto::enums::{EquipPos, ErrorCode, FavorItemStatus};
+use sonoro_proto::enums::{EAttributeType, EquipPos, ErrorCode, FavorItemStatus, LivingStatus};
 use sonoro_proto::pb::{
     ArrayIntDouble, ArrayIntInt, ArraySkillNode, CharacterDeathRequest, CharacterDeathResponse,
-    ClientCurrentRoleReportPush, EquipTakeOnNotify, FavorItem, LogoutNotify, NormalItem,
+    ClientCurrentRoleReportPush, CombatCommon, CombatNotifyData, CombatNotifyDataMessageOneof,
+    CombatReceiveData, CombatReceiveDataMessageOneof, CombatReceivePackNotify,
+    EntityLivingStatusNotify, EquipTakeOnNotify, FavorItem, LogoutNotify, NormalItem,
     NormalItemUpdateNotify, PbGetRoleListRequest, PbGetRoleListResponse, PbOverRoleRequest,
     PbOverRoleResponse, PbUpLevelRoleRequest, PbUpLevelRoleResponse, PbUpLevelSkillRequest,
     PbUpLevelSkillResponse, PhantomPutOnNotify, PlayerAttr, PlayerAttrNotify,
@@ -2384,8 +2389,113 @@ pub fn handle_pb_get_role_list_request(
 }
 
 pub fn handle_character_death_request(
-    _state: &mut State,
-    _req: CharacterDeathRequest,
+    state: &mut State,
+    req: CharacterDeathRequest,
 ) -> Result<CharacterDeathResponse, String> {
+    state
+        .player_components
+        .progress
+        .info
+        .add_key_int("combat:char_death_cnt", 1);
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+
+    let mut events = EventQueue::new();
+    let State {
+        fs,
+        conn,
+        assets,
+        player_components,
+        scene: scene_opt,
+        buff_timers,
+        coop_service,
+        player_id,
+        ..
+    } = state;
+
+    if let Some(scene) = scene_opt.as_mut() {
+        let mut target_nid = scene.current_role_entity_id();
+        if req.RoleId > 0 {
+            for ent in &scene.entities {
+                if ent.config.entity_type == EntityType::Player
+                    && ent.config.config_type == ConfigType::Character
+                    && ent.config.config_id == req.RoleId
+                {
+                    target_nid = ent.net_id;
+                    break;
+                }
+            }
+        }
+        if let Some(&idx) = scene.net_id_map.get(&target_nid)
+            && !scene.entities[idx].dead_notified
+        {
+            scene.entities[idx].dead_notified = true;
+            let cfg_id = scene.entities[idx].config.config_id;
+            let is_char = scene.entities[idx].config.config_type == ConfigType::Character;
+            let mut cpack = Vec::new();
+            if let Some(attr) = scene.entities[idx].attribute.as_mut() {
+                let _ = attributes::set_life_unconditional(attr, 0);
+                attributes::generate_attr_messages(
+                    &mut cpack,
+                    target_nid,
+                    attr,
+                    &[EAttributeType::Life],
+                );
+            }
+            scene.set_battle_entity_active(target_nid, false);
+            cpack.push(CombatReceiveData {
+                Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
+                    CombatNotifyData {
+                        CombatCommon: Some(CombatCommon {
+                            EntityId: target_nid,
+                            ..Default::default()
+                        }),
+                        Message: Some(CombatNotifyDataMessageOneof::EntityLivingStatusNotify(
+                            EntityLivingStatusNotify {
+                                Id: target_nid,
+                                LivingStatus: Some(LivingStatus::Dead),
+                                DropVisionItem: Vec::new(),
+                            },
+                        )),
+                    },
+                )),
+            });
+            let removed_handles =
+                buff_helper::clear_dead_remove_buffs(&mut cpack, scene, target_nid, assets);
+            for handle_id in removed_handles {
+                buff_timers.cancel_handle(target_nid, handle_id);
+            }
+            if !cpack.is_empty() {
+                conn.push(
+                    CombatReceivePackNotify::MSG_ID,
+                    &CombatReceivePackNotify { Data: cpack },
+                );
+            }
+            if is_char
+                && let Some(role_info) = player_components.role.role_map.get_mut(&cfg_id)
+            {
+                role_info.current_hp = Some(0);
+                let _ = role_helper::save_role_info(fs, &player_components.role, cfg_id);
+            }
+            let cur_form = usize::try_from(scene.formation_info.cur_formation).unwrap_or(0);
+            if role_helper::ensure_alive_cur_role(scene, cur_form)
+                && let Some(form) = scene.formation_info.formations.get(cur_form)
+                && let Some(coop) = coop_service.as_ref()
+            {
+                coop.update_active_role(*player_id, form.cur_role);
+            }
+            role_helper::maybe_push_party_wipe_notify(conn, scene);
+            scene.mark_fsm_dirty(target_nid, wake_reason::ATTRIBUTE);
+            let _ = scene.save_persistent(fs);
+        }
+    }
+
+    {
+        let mut qctx = state.quest_context(&mut events);
+        let _ = quest_engine::on_condition_state_changed(&mut qctx);
+    }
     Ok(CharacterDeathResponse {})
 }

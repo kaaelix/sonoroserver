@@ -12,7 +12,7 @@ use sonoro_proto::pb::{
 use crate::component::entity::attribute::AttributeComponent;
 use crate::component::player::{PlayerEchoComponent, PlayerRoleComponent, PlayerWeaponComponent};
 use crate::fsm::types::wake_reason;
-use crate::helpers::{attributes, role_stats};
+use crate::helpers::{attributes, buff, role_stats};
 use crate::scene::Scene;
 use crate::sink::PushSink;
 
@@ -50,6 +50,16 @@ pub fn refresh_role<S: PushSink + ?Sized>(
                 attr_comp,
             )
             .map_err(io::Error::other)?;
+        }
+        // Snapshot reset cleared buff deltas from attributes; clear stale tracking and re-sync.
+        if let Some(buffs) = scene.entities[idx].buffs.as_mut() {
+            buffs.set_applied_buff_mods(Vec::new());
+        }
+        let mut buff_pack = Vec::new();
+        buff::sync_continuous_buff_modifiers(&mut buff_pack, scene, net_id, assets);
+        let ent = &mut scene.entities[idx];
+        if let (Some(buffs), Some(attr_comp)) = (ent.buffs.as_ref(), ent.attribute.as_mut()) {
+            buff::sync_shield_attribute(&mut buff_pack, net_id, buffs, attr_comp);
         }
         scene.mark_fsm_dirty(net_id, wake_reason::ATTRIBUTE);
         scene.save_entity_by_net_id(fs, net_id)?;

@@ -1,14 +1,44 @@
 use sonoro_gamesv_fs::progress_info::ProgressInfo;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::{level_play, quest_engine};
+use sonoro_gamesv_logic::scene::Scene;
 use sonoro_proto::enums::ErrorCode;
 use sonoro_proto::pb::{
     EnterLevelPlayNotify, LevelPlayStateNotify, LordGymBeginRequest, LordGymBeginResponse,
     LordGymEntranceInfo, LordGymGroupInfo, LordGymInfoRequest, LordGymInfoResponse,
-    LordGymPassRecord, LordGymReadRequest, LordGymReadResponse,
+    LordGymPassRecord, LordGymReadRequest, LordGymReadResponse, RoleBrief,
 };
 
 use super::State;
+
+fn current_formation_role_ids(scene: Option<&Scene>) -> Vec<i32> {
+    let Some(scene) = scene else {
+        return Vec::new();
+    };
+    let Ok(f_idx) = usize::try_from(scene.formation_info.cur_formation) else {
+        return Vec::new();
+    };
+    scene
+        .formation_info
+        .formations
+        .get(f_idx)
+        .map(|form| {
+            form.roles
+                .iter()
+                .flatten()
+                .map(|slot| slot.role_id)
+                .filter(|&rid| rid > 0)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_role_ids_csv(raw: &str) -> Vec<i32> {
+    raw.split(',')
+        .filter_map(|part| part.trim().parse::<i32>().ok())
+        .filter(|&id| id > 0)
+        .collect()
+}
 
 pub fn handle_lord_gym_info_request(
     state: &mut State,
@@ -44,6 +74,18 @@ pub fn handle_lord_gym_info_request(
         })
         .collect();
 
+    let fallback_roles: Vec<RoleBrief> = current_formation_role_ids(state.scene.as_ref())
+        .into_iter()
+        .map(|rid| RoleBrief {
+            RoleId: rid,
+            Level: state
+                .player_components
+                .role
+                .role_map
+                .get(&rid)
+                .map_or(1, |r| r.level),
+        })
+        .collect();
     let pass_records: Vec<LordGymPassRecord> = state
         .player_components
         .progress
@@ -51,10 +93,34 @@ pub fn handle_lord_gym_info_request(
         .challenge
         .passed_lord_gyms
         .iter()
-        .map(|rec| LordGymPassRecord {
-            LoadGymId: rec.gym_id,
-            PassTime: rec.pass_time,
-            RoleIds: Vec::new(),
+        .map(|rec| {
+            let stored: Vec<RoleBrief> = parse_role_ids_csv(
+                state
+                    .player_components
+                    .progress
+                    .info
+                    .get_key_str(&format!("lord_gym:roles:{}", rec.gym_id)),
+            )
+            .into_iter()
+            .map(|rid| RoleBrief {
+                RoleId: rid,
+                Level: state
+                    .player_components
+                    .role
+                    .role_map
+                    .get(&rid)
+                    .map_or(1, |r| r.level),
+            })
+            .collect();
+            LordGymPassRecord {
+                LoadGymId: rec.gym_id,
+                PassTime: rec.pass_time,
+                RoleIds: if stored.is_empty() {
+                    fallback_roles.clone()
+                } else {
+                    stored
+                },
+            }
         })
         .collect();
 
@@ -132,6 +198,25 @@ pub fn handle_lord_gym_begin_request(
             ErrorCode: Some(ErrorCode::ErrLordGymConfigNotFound),
         });
     };
+
+    let role_ids = current_formation_role_ids(state.scene.as_ref());
+    if !role_ids.is_empty() {
+        let csv = role_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_str(&format!("lord_gym:roles:{}", gym.Id), &csv);
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
 
     if gym.PlayId > 0 {
         if let Some(lp) = state

@@ -48,6 +48,7 @@ pub fn cleanup_gameplay(
 
     if handle.close_reason() == CloseReason::Replaced
         && let Some(player_id) = gameplay.claimed_player_id
+        && session_manager.has_pending_replacement(player_id)
         && let Some(live_state) = gameplay.state.take()
         && session_manager.release_with_handoff(
             handle,

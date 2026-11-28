@@ -98,14 +98,25 @@ pub fn plan_login_discard(
     active_nodes: &[i32],
     finished_nodes: &[i32],
 ) -> Discard {
+    plan_login_discard_with_extra(nodes, active_nodes, finished_nodes, &[])
+}
+
+pub fn plan_login_discard_with_extra(
+    nodes: &[NodeEntry],
+    active_nodes: &[i32],
+    finished_nodes: &[i32],
+    extra_paused_nodes: &[i32],
+) -> Discard {
     let mut blocks = Vec::new();
     let mut reenter = Vec::new();
 
-    for &node_id in active_nodes {
+    for &node_id in active_nodes.iter().chain(extra_paused_nodes.iter()) {
         let Some(block_id) = find_enclosing_save_node(nodes, node_id) else {
             continue;
         };
-        reenter.push(node_id);
+        if !reenter.contains(&node_id) {
+            reenter.push(node_id);
+        }
         if !blocks.contains(&block_id) {
             blocks.push(block_id);
         }

@@ -7,8 +7,9 @@ use sonoro_gamesv_logic::coop_service::{
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::{energy, pb_kv, quest_engine, reward};
 use sonoro_proto::enums::{
-    ActivityTaskState, EMatchPlayerUiState, ErrorCode, MatchPlayerLeaveReason, PbAdviceContentType,
-    PbAdviceVoteType, WorldEnterPermission, WorldTeamLeaveReason,
+    ActivityTaskState, EMatchAcceptInviteResult, EMatchPlayerUiState, EPlayerTeleportState,
+    ErrorCode, MatchPlayerLeaveReason, PbAdviceContentType, PbAdviceVoteType, WorldEnterPermission,
+    WorldTeamLeaveReason,
 };
 use sonoro_proto::pb::{
     ActivityTask, AdviceCreateRequest, AdviceCreateResponse, AdviceDeleteRequest,
@@ -28,10 +29,9 @@ use sonoro_proto::pb::{
     MatchRoleInfo, MutiplayerInfo, MutiplayerTeamRefreshNearListRequest,
     MutiplayerTeamRefreshNearListResponse, PbAdvice, PbAdviceContent, PlayerDetails,
     QueryOnlinePlayersAreaRequest, QueryOnlinePlayersAreaResponse, SetMatchTeamMatchFlagRequest,
-    SetMatchTeamMatchFlagResponse, StartMatchRequest, StartMatchResponse, TeamChallengeRequest,
-    TeamChallengeResponse, TeamMatchAcceptInviteNotify, TeamMatchAcceptInviteRequest,
-    TeamMatchAcceptInviteResponse, TeamMatchInviteRequest, TeamMatchInviteResponse,
-    TeamMatchInviteRetToHostNotify, TeamParkourRewardRequest, TeamParkourRewardResponse,
+    SetMatchTeamMatchFlagResponse, StartMatchRequest, StartMatchResponse, TeamChallengeRequest, TeamChallengeResponse,
+    TeamMatchAcceptInviteRequest, TeamMatchAcceptInviteResponse, TeamMatchInviteRequest,
+    TeamMatchInviteResponse, TeamParkourRewardRequest, TeamParkourRewardResponse,
     TeamParkourTaskNotify, WorldBlackboardNotify, WorldBlackboardRequest,
     WorldBlackboardResponse, WorldEnterPermissionsRequest, WorldEnterPermissionsResponse,
     WorldLevelDownRequest, WorldLevelDownResponse, WorldLevelRegainRequest,
@@ -441,9 +441,17 @@ pub fn handle_enter_match_inst_request(
     let inst_id = state
         .coop_service
         .as_ref()
-        .and_then(|coop| coop.with_online_player(state.player_id, |me| me.match_inst_id))
-        .unwrap_or(0);
+        .map_or(0, |coop| coop.prepare_team_enter_inst(state.player_id, 0, false));
     if inst_id > 0 {
+        if let Some(coop) = state.coop_service.as_ref() {
+            coop.notify_teleport_state(
+                state.player_id,
+                EPlayerTeleportState::Teleporting,
+                0,
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            );
+        }
         let mut qctx = state.quest_context(events);
         quest_engine::enter_inst(&mut qctx, inst_id, 0).map_err(|e| e.to_string())?;
     }
@@ -458,6 +466,16 @@ pub fn handle_team_challenge_request(
     req: TeamChallengeRequest,
 ) -> Result<TeamChallengeResponse, String> {
     if req.InstId > 0 {
+        if let Some(coop) = state.coop_service.as_ref() {
+            coop.prepare_team_enter_inst(state.player_id, req.InstId, req.IsInviteTeammate);
+            coop.notify_teleport_state(
+                state.player_id,
+                EPlayerTeleportState::Teleporting,
+                0,
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            );
+        }
         let mut qctx = state.quest_context(events);
         quest_engine::enter_inst(&mut qctx, req.InstId, 0).map_err(|e| e.to_string())?;
     }
@@ -471,14 +489,7 @@ pub fn handle_team_match_invite_request(
     req: TeamMatchInviteRequest,
 ) -> Result<TeamMatchInviteResponse, String> {
     if let Some(coop) = state.coop_service.as_ref() {
-        coop.push_to_player(
-            state.player_id,
-            TeamMatchInviteRetToHostNotify::MSG_ID,
-            &TeamMatchInviteRetToHostNotify {
-                ErrorCode: Some(ErrorCode::Success),
-                InstId: req.InstId,
-            },
-        );
+        coop.invite_room_to_match(state.player_id, req.InstId);
     }
     Ok(TeamMatchInviteResponse {
         ErrorCode: Some(ErrorCode::Success),
@@ -490,13 +501,11 @@ pub fn handle_team_match_accept_invite_request(
     req: TeamMatchAcceptInviteRequest,
 ) -> Result<TeamMatchAcceptInviteResponse, String> {
     if let Some(coop) = state.coop_service.as_ref() {
-        coop.push_to_player(
+        coop.respond_to_match_invite(
+            state.player_id,
             req.HostId,
-            TeamMatchAcceptInviteNotify::MSG_ID,
-            &TeamMatchAcceptInviteNotify {
-                PlayerId: state.player_id,
-                AcceptResult: req.AcceptResult,
-            },
+            req.InstId,
+            req.AcceptResult.unwrap_or(EMatchAcceptInviteResult::Accept),
         );
     }
     Ok(TeamMatchAcceptInviteResponse {

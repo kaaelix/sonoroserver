@@ -9855,8 +9855,8 @@ fn audit_225_event_slot_dreamlink_self_var_fade_and_cross_map_node() {
     )
     .expect("board gondola");
     let t0 = quest_engine::tree::now_ms_pub();
-    quest_engine::tree::on_timers_due(&mut h.state.quest_context(&mut events), t0 + 600)
-        .expect("flush node 2 Wait(0.5)");
+    quest_engine::tree::on_timers_due(&mut h.state.quest_context(&mut events), t0 + 1600)
+        .expect("flush node 2 Wait(0.5)+FadeInScreen(0.5)");
     let _ = h.drain_count();
 
     let t_move = quest_engine::tree::now_ms_pub();
@@ -9867,6 +9867,7 @@ fn audit_225_event_slot_dreamlink_self_var_fade_and_cross_map_node() {
         2_779.5,
     )
     .expect("reach node 408");
+    let t_after_move = quest_engine::tree::now_ms_pub();
     // Node 408's FadeInScreen(0.2) + Wait(0.2) must defer SetVar(Self."白屏"=1) so node 409's FadeOutScreen
     // cannot fire synchronously and get dropped while the client is still fading in.
     assert_eq!(
@@ -9874,7 +9875,7 @@ fn audit_225_event_slot_dreamlink_self_var_fade_and_cross_map_node() {
             .player_components
             .quest
             .info
-            .get_var_int("Self:145750001:白屏"),
+            .get_var_int("LpSelf:145750001:白屏"),
         0,
         "Self.白屏 must remain 0 until FadeInScreen + Wait completes"
     );
@@ -9895,14 +9896,26 @@ fn audit_225_event_slot_dreamlink_self_var_fade_and_cross_map_node() {
         "node 408 must push FadeInScreen+Wait LevelEventNotify immediately: {fade_in_events:?}"
     );
 
-    quest_engine::tree::on_timers_due(&mut h.state.quest_context(&mut events), t_move + 800)
+    quest_engine::tree::on_timers_due(&mut h.state.quest_context(&mut events), t_move + 750)
+        .expect("before safe FadeInScreen+Wait margin");
+    assert_eq!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_var_int("LpSelf:145750001:白屏"),
+        0,
+        "Self.白屏 must still wait past client CameraFade overhead (~650ms)"
+    );
+
+    quest_engine::tree::on_timers_due(&mut h.state.quest_context(&mut events), t_after_move + 1000)
         .expect("complete deferred FadeInScreen+Wait SetVar");
     assert_eq!(
         h.state
             .player_components
             .quest
             .info
-            .get_var_int("Self:145750001:白屏"),
+            .get_var_int("LpSelf:145750001:白屏"),
         1
     );
     assert!(
@@ -10340,6 +10353,13 @@ fn audit_154_kcp_stream_window_reconnect_and_nonblocking_syn_under_load() {
             super::PlayerComponentStorage::init(&fs, &assets, 154_000_001).expect("init 154000001");
         pcs.quest.info.finish_quest(quest_engine::PROLOGUE_QUEST_ID);
         pcs.quest.save(&fs).expect("save quest_info");
+        fs.write_file(
+            "account/154000001",
+            br#".{ .user_id = "154000001", .user_name = "154000001", .token = "tok", .sex = -1 }"#,
+        )
+        .expect("seed account 154000001");
+        fs.write_file("account/link/154000001", b".{ .player_id = 154000001 }")
+            .expect("seed account link 154000001");
     }
 
     let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind probe");
@@ -10636,6 +10656,780 @@ fn audit_154_kcp_stream_window_reconnect_and_nonblocking_syn_under_load() {
     srv_handle.abort();
 }
 
+#[test]
+fn audit_227_ease_fade_delay_level_play_tree_inc_id_and_teleport_sync() {
+    use sonoro_gamesv_logic::helpers::level_play::{self, LevelPlayContext};
+    use sonoro_gamesv_logic::helpers::quest_actions;
+    use sonoro_gamesv_logic::helpers::quest_types::{
+        LEVEL_PLAY_TREE_INC_OFFSET, bt_tree_inc_id, decode_tree_inc_id,
+    };
+    use sonoro_proto::pb::{BehaviorTreeInfoNotify, SubmitNodeRequest};
 
+    let mut h = TestHarness::new("audit_227", Some(8));
+    let mut events = EventQueue::new();
 
+    // 1) Disjoint TreeIncId encoding prevents Quest vs LevelPlay 169750001 collision.
+    assert_eq!(bt_tree_inc_id(BtType::BtTypeQuest, 169_750_001), 169_750_001);
+    assert_eq!(
+        bt_tree_inc_id(BtType::BtTypeLevelPlay, 169_750_001),
+        LEVEL_PLAY_TREE_INC_OFFSET + 169_750_001
+    );
+    assert_eq!(
+        decode_tree_inc_id(LEVEL_PLAY_TREE_INC_OFFSET + 169_750_001),
+        (true, 169_750_001)
+    );
+    assert_eq!(decode_tree_inc_id(169_750_001), (false, 169_750_001));
+
+    // Activate BOTH Quest 169750001 and LevelPlay 169750001 concurrently.
+    h.state
+        .player_components
+        .quest
+        .info
+        .get_or_add_active_quest(169_750_001)
+        .mark_node_active(10);
+    append_unique_int(
+        &mut h.state.player_components.quest.info.progress.entered_level_plays,
+        169_750_001,
+    );
+    if h.state.assets.tables.level_play_data.get_data_by_id(&169_750_001).is_some()
+        && h.state.assets.level_play_nodes.get_owner_nodes(169_750_001).is_ok()
+    {
+        let _ = h.drain_count();
+        {
+            let mut qctx = h.state.quest_context(&mut events);
+            let mut lctx = LevelPlayContext::from_quest_ctx(&mut qctx).unwrap();
+            let _ = level_play::sync_on_login(&mut lctx);
+        }
+        let bt_infos: Vec<BehaviorTreeInfoNotify> =
+            h.drain_decoded(BehaviorTreeInfoNotify::MSG_ID);
+        assert!(
+            bt_infos.iter().flat_map(|b| &b.TreeInfos).any(|ti| {
+                ti.BtType == Some(BtType::BtTypeLevelPlay)
+                    && ti.TreeOwnerId == 169_750_001
+                    && ti.TreeIncId == LEVEL_PLAY_TREE_INC_OFFSET + 169_750_001
+            }),
+            "LevelPlay 169750001 must use disjoint TreeIncId: {bt_infos:?}"
+        );
+        // Submitting with the LP TreeIncId must route to LevelPlay, never touching Quest 169750001 node 10.
+        let _ = crate::network::handlers::quest::handle_submit_node_request(
+            &mut h.state,
+            &mut events,
+            SubmitNodeRequest {
+                TreeOwnerId: 169_750_001,
+                TreeIncId: LEVEL_PLAY_TREE_INC_OFFSET + 169_750_001,
+                NodeId: 20,
+            },
+        )
+        .expect("submit LP 169750001 node 20");
+        assert!(
+            h.state
+                .player_components
+                .quest
+                .info
+                .find_active_quest(169_750_001)
+                .is_some_and(|aq| aq.is_node_active(10)),
+            "LP SubmitNodeRequest must never touch active Quest 169750001"
+        );
+    }
+
+    // 2) Real Ease.Duration in FadeInScreen(White, 0.2) + Wait(0.2) must defer SetVar past 700ms.
+    let fade_ease_acts = vec![
+        serde_json::json!({
+            "Name": "FadeInScreen",
+            "Params": {"ScreenType": "White", "Ease": {"Type": 1, "Duration": 0.2}}
+        }),
+        serde_json::json!({"Name": "Wait", "Params": {"Time": 0.2}}),
+        serde_json::json!({
+            "Name": "SetVar",
+            "Params": {
+                "VarLeft": {"Type": "Int", "Source": "Self", "Name": "白屏"},
+                "VarRight": {"Type": "Int", "Source": "Constant", "Value": 1}
+            }
+        }),
+    ];
+    let t_start = sonoro_gamesv_logic::scene::now_millis();
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = quest_engine::action_callbacks();
+        cbs.bt_type = BtType::BtTypeLevelPlay;
+        quest_actions::execute_action_list(&mut qctx, &mut cbs, 145_750_001, 408, &fade_ease_acts)
+            .expect("execute FadeInScreen(Ease 0.2) + Wait(0.2) + SetVar");
+    }
+    let t_after = sonoro_gamesv_logic::scene::now_millis();
+    assert_eq!(
+        h.state.player_components.quest.info.get_var_int("LpSelf:145750001:白屏"),
+        0,
+        "Self.白屏 must remain 0 immediately after FadeInScreen(Ease 0.2) + Wait(0.2)"
+    );
+    // At +600ms (which used to trigger prematurely when Ease.Duration was ignored), still deferred.
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let _ = quest_engine::tree::on_timers_due(&mut qctx, t_start + 600);
+    }
+    assert_eq!(
+        h.state.player_components.quest.info.get_var_int("LpSelf:145750001:白屏"),
+        0,
+        "Self.白屏 must STILL remain 0 at +600ms before client FadeInScreen+Wait finish"
+    );
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let _ = quest_engine::tree::on_timers_due(&mut qctx, t_after + 1000);
+    }
+    assert_eq!(
+        h.state.player_components.quest.info.get_var_int("LpSelf:145750001:白屏"),
+        1,
+        "Self.白屏 must flip to 1 once Ease.Duration(200) + margin(500) + Wait(200) elapses"
+    );
+
+    // 3) Intra-map teleport re-join on already synced instance_id skips redundant world sync flood.
+    let _ = h.drain_count();
+    {
+        let sc = h.state.scene.as_mut().unwrap();
+        sc.synced_world_instance_id = Some(8);
+        sc.deferred_join_sync_pending = true;
+        sc.login_world_synced = false;
+    }
+    crate::network::handlers::scene::handle_scene_loading_finish_request(
+        &mut h.state,
+        &mut events,
+        SceneLoadingFinishRequest::default(),
+    )
+    .expect("teleport SceneLoadingFinishRequest");
+    let tp_bt_infos = h.drain_decoded::<BehaviorTreeInfoNotify>(BehaviorTreeInfoNotify::MSG_ID);
+    assert!(
+        tp_bt_infos.is_empty(),
+        "same-instance teleport SceneLoadingFinish must not re-push login LevelPlay BehaviorTreeInfoNotify: {tp_bt_infos:?}"
+    );
+}
+
+#[test]
+fn audit_228_bt_type_isolation_shared_id_vars_flows_and_occupations() {
+    use sonoro_gamesv_logic::helpers::condition::{EvalContext, eval_single_inline_condition};
+    use sonoro_gamesv_logic::helpers::quest_actions;
+    use sonoro_gamesv_logic::helpers::quest_engine;
+    use sonoro_gamesv_logic::helpers::quest_types::{
+        ActionCallbacks, bt_tree_inc_id, scoped_var_key_with_bt,
+    };
+    use sonoro_gamesv_logic::scene::{ActiveBtTimer, BtOccupation};
+
+    let mut h = TestHarness::new("audit_228", Some(8));
+    let mut events = EventQueue::new();
+    let shared_id = 200_700_000;
+
+    // 1) Variable key scoping between Quest and LevelPlay sharing identical owner_id.
+    let self_var_obj = serde_json::json!({ "Source": "Self", "Name": "flag", "Type": "Boolean" })
+        .as_object()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        scoped_var_key_with_bt(None, BtType::BtTypeQuest, shared_id, &self_var_obj, "flag"),
+        Some("Self:200700000:flag".to_string())
+    );
+    assert_eq!(
+        scoped_var_key_with_bt(
+            None,
+            BtType::BtTypeLevelPlay,
+            shared_id,
+            &self_var_obj,
+            "flag"
+        ),
+        Some("LpSelf:200700000:flag".to_string())
+    );
+
+    h.state
+        .player_components
+        .quest
+        .info
+        .set_var_bool("flag", true);
+
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut q_cbs = quest_engine::action_callbacks();
+        q_cbs.bt_type = BtType::BtTypeQuest;
+        let set_q = serde_json::json!({
+            "Name": "SetVar",
+            "Params": {
+                "VarLeft": { "Source": "Self", "Name": "flag", "Type": "Boolean" },
+                "VarRight": { "Source": "Constant", "Type": "Boolean", "Value": true }
+            }
+        });
+        quest_actions::execute_action(&mut qctx, &mut q_cbs, shared_id, 1, &set_q)
+            .expect("Quest SetVar");
+
+        let mut lp_cbs = ActionCallbacks {
+            bt_type: BtType::BtTypeLevelPlay,
+            ..quest_engine::action_callbacks()
+        };
+        let set_lp = serde_json::json!({
+            "Name": "SetVar",
+            "Params": {
+                "VarLeft": { "Source": "Self", "Name": "flag", "Type": "Boolean" },
+                "VarRight": { "Source": "Constant", "Type": "Boolean", "Value": false }
+            }
+        });
+        quest_actions::execute_action(&mut qctx, &mut lp_cbs, shared_id, 1, &set_lp)
+            .expect("LP SetVar");
+    }
+
+    assert!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_var_bool("Self:200700000:flag")
+    );
+    assert!(
+        !h.state
+            .player_components
+            .quest
+            .info
+            .get_var_bool("LpSelf:200700000:flag")
+    );
+
+    // 2) resolve_var_value must NOT leak global bool `flag=true` when `LpSelf:...:flag=false` exists.
+    let cond = serde_json::json!({
+        "Type": "CompareVar",
+        "Var1": { "Source": "Self", "Name": "flag", "Type": "Boolean" },
+        "Var2": { "Source": "Constant", "Type": "Boolean", "Value": false },
+        "Compare": "Eq"
+    });
+    {
+        let mut ectx = EvalContext::new(
+            &h.state.player_components.basic,
+            &h.state.player_components.echo,
+            &h.state.player_components.inventory,
+            &h.state.player_components.map,
+            &h.state.player_components.quest,
+        );
+        ectx.owner_quest_id = shared_id;
+        ectx.owner_is_level_play = true;
+        assert!(
+            eval_single_inline_condition(&ectx, &cond),
+            "LP Self bool=false must not fall back to global bool=true"
+        );
+        ectx.owner_is_level_play = false;
+        assert!(
+            !eval_single_inline_condition(&ectx, &cond),
+            "Quest Self bool=true must stay isolated from LP bool=false"
+        );
+    }
+
+    // 3) Scene active flows, action cursors, save nodes, timers, and occupations are isolated by BtType.
+    let sc = h.state.scene.as_mut().expect("scene");
+    let lp_inc = bt_tree_inc_id(BtType::BtTypeLevelPlay, shared_id);
+    let q_inc = bt_tree_inc_id(BtType::BtTypeQuest, shared_id);
+    sc.set_active_flow_for_bt(lp_inc, BtType::BtTypeLevelPlay, shared_id, 5, "FlowA", 1, 1);
+    assert!(sc.is_flow_active_for_node(BtType::BtTypeLevelPlay, shared_id, 5));
+    assert!(!sc.is_flow_active_for_node(BtType::BtTypeQuest, shared_id, 5));
+
+    sc.set_action_node_next_idx(BtType::BtTypeQuest, shared_id, 9, 2);
+    sc.set_action_node_next_idx(BtType::BtTypeLevelPlay, shared_id, 9, 4);
+    assert_eq!(
+        sc.get_action_node_next_idx(BtType::BtTypeQuest, shared_id, 9),
+        Some(2)
+    );
+    assert_eq!(
+        sc.get_action_node_next_idx(BtType::BtTypeLevelPlay, shared_id, 9),
+        Some(4)
+    );
+    sc.clear_action_node_progress_for_bt(BtType::BtTypeQuest, shared_id);
+    assert_eq!(
+        sc.get_action_node_next_idx(BtType::BtTypeQuest, shared_id, 9),
+        None
+    );
+    assert_eq!(
+        sc.get_action_node_next_idx(BtType::BtTypeLevelPlay, shared_id, 9),
+        Some(4)
+    );
+
+    sc.mark_save_node_entered_for_bt(BtType::BtTypeLevelPlay, shared_id, 77);
+    assert!(sc.has_save_node_entered_for_bt(BtType::BtTypeLevelPlay, shared_id, 77));
+    assert!(!sc.has_save_node_entered_for_bt(BtType::BtTypeQuest, shared_id, 77));
+
+    sc.bt_timers.push(ActiveBtTimer {
+        owner_id: shared_id,
+        inc_id: lp_inc,
+        node_id: 88,
+        timer_type: "TestTimer".to_string(),
+        end_time_ms: 999_999,
+        pause_time_ms: 0,
+        paused: false,
+    });
+    assert_eq!(sc.find_bt_timer_node_id(shared_id, lp_inc, "TestTimer"), Some(88));
+    assert_eq!(sc.find_bt_timer_node_id(shared_id, q_inc, "TestTimer"), None);
+
+    sc.bt_occupations.push(BtOccupation {
+        bt_type: BtType::BtTypeQuest,
+        owner_id: shared_id,
+        inc_id: q_inc,
+        node_id: 11,
+        resource_name: "res:500".to_string(),
+    });
+    assert!(
+        sc.find_occupation_conflict_for_bt("res:500", BtType::BtTypeLevelPlay, shared_id, lp_inc)
+            .is_some()
+    );
+    assert!(
+        sc.find_occupation_conflict_for_bt("res:500", BtType::BtTypeQuest, shared_id, q_inc)
+            .is_none()
+    );
+    sc.release_occupations_for_tree_bt(BtType::BtTypeLevelPlay, shared_id, lp_inc);
+    assert_eq!(sc.bt_occupations.len(), 1);
+    sc.release_occupations_for_tree_bt(BtType::BtTypeQuest, shared_id, q_inc);
+    assert!(sc.bt_occupations.is_empty());
+}
+
+#[test]
+fn audit_229_client_actions_registered_and_playflow_defers_remaining_actions() {
+    use sonoro_gamesv_logic::helpers::quest_actions;
+    use sonoro_gamesv_logic::helpers::quest_engine;
+
+    let registered = [
+        "AdjustPlayerCameraGravity",
+        "CloseWalkingOverlayMontage",
+        "EnableTakePhotoClip",
+        "ExecBpActorFunc",
+        "ModifyActorMaterial",
+        "PlayLevelSequence",
+        "SendAiEvent",
+        "SwitchDataLayers",
+        "TriggerDeadeyeMode",
+        "VehicleSprint",
+    ];
+    for name in registered {
+        assert!(
+            quest_engine::is_client_action_name_registered(name),
+            "expected client action `{name}` to be binary-searchable in CLIENT_EXECUTABLE_BT_ACTIONS"
+        );
+    }
+
+    let mut h = TestHarness::new("audit_229", Some(8));
+    let mut events = EventQueue::new();
+    let owner_id = 199_001;
+
+    let actions = vec![
+        serde_json::json!({
+            "Name": "SetVar",
+            "Params": {
+                "VarLeft": { "Source": "Global", "Name": "before_flow", "Type": "Int" },
+                "VarRight": { "Source": "Constant", "Type": "Int", "Value": 1 }
+            }
+        }),
+        serde_json::json!({
+            "Name": "PlayFlow",
+            "Params": {
+                "FlowListName": "TestFlow_Audit229",
+                "FlowId": 1,
+                "StateId": 1,
+                "Async": false
+            }
+        }),
+        serde_json::json!({
+            "Name": "SetVar",
+            "Params": {
+                "VarLeft": { "Source": "Global", "Name": "after_flow", "Type": "Int" },
+                "VarRight": { "Source": "Constant", "Type": "Int", "Value": 2 }
+            }
+        }),
+    ];
+
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = quest_engine::action_callbacks();
+        cbs.bt_type = BtType::BtTypeLevelPlay;
+        quest_actions::execute_action_list(&mut qctx, &mut cbs, owner_id, 33, &actions)
+            .expect("execute_action_list");
+    }
+
+    assert_eq!(h.state.player_components.quest.info.get_var_int("before_flow"), 1);
+    assert_eq!(
+        h.state.player_components.quest.info.get_var_int("after_flow"),
+        0,
+        "actions after sync PlayFlow must wait for flow completion"
+    );
+    let flow_inc_id = {
+        let sc = h.state.scene.as_ref().expect("scene");
+        assert_eq!(sc.pending_deferred_actions.len(), 1);
+        assert_eq!(sc.pending_deferred_actions[0].bt_type, BtType::BtTypeLevelPlay);
+        assert_eq!(sc.pending_deferred_actions[0].quest_id, owner_id);
+        sc.active_flow_inc_id
+    };
+
+    // Completing the flow should dispatch the deferred post-flow action.
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        quest_engine::events::on_flow_end(&mut qctx, flow_inc_id)
+            .expect("on_flow_end");
+    }
+    assert_eq!(
+        h.state.player_components.quest.info.get_var_int("after_flow"),
+        2,
+        "post-flow SetVar must run once sync PlayFlow ends"
+    );
+}
+
+#[test]
+fn audit_230_level_play_state_child_quest_world_level_and_inline_conditions() {
+    use sonoro_gamesv_logic::helpers::condition::{
+        EvalContext, eval_activity_state, eval_single_inline_condition,
+    };
+
+    let mut h = TestHarness::new("audit_230", Some(8));
+    let lpid = 146_900_009;
+    let other_lp = 146_900_010;
+
+    fn mk_ctx<'a>(st: &'a crate::network::state::State) -> EvalContext<'a> {
+        let mut ectx = EvalContext::new(
+            &st.player_components.basic,
+            &st.player_components.echo,
+            &st.player_components.inventory,
+            &st.player_components.map,
+            &st.player_components.quest,
+        );
+        ectx.assets = Some(&st.assets);
+        ectx.progress_comp = Some(&st.player_components.progress);
+        ectx
+    }
+
+    // 1) CheckLevelPlayState: 0=Close, 1=Running/Open, 2=Complete.
+    let cond_close = serde_json::json!({"Type": "CheckLevelPlayState", "LevelId": lpid, "Compare": "Eq", "State": 0});
+    let cond_run = serde_json::json!({"Type": "CheckLevelPlayState", "LevelId": lpid, "Compare": "Eq", "State": 1});
+    let cond_done = serde_json::json!({"Type": "CheckLevelPlayState", "LevelId": lpid, "Compare": "Eq", "State": 2});
+    assert!(eval_single_inline_condition(&mk_ctx(&h.state), &cond_close));
+
+    h.state
+        .player_components
+        .progress
+        .info
+        .set_key_int(&format!("lp_state:{lpid}"), 2);
+    assert!(eval_single_inline_condition(&mk_ctx(&h.state), &cond_run));
+
+    h.state
+        .player_components
+        .progress
+        .info
+        .set_key_int(&format!("lp_state:{lpid}"), 0);
+    assert!(eval_single_inline_condition(&mk_ctx(&h.state), &cond_close));
+
+    h.state
+        .player_components
+        .quest
+        .info
+        .mark_level_play_completed(lpid);
+    h.state
+        .player_components
+        .progress
+        .info
+        .set_key_int(&format!("lp_state:{lpid}"), 3);
+    assert!(eval_single_inline_condition(&mk_ctx(&h.state), &cond_done));
+
+    // 2) CheckLevelPlayChildQuestFinished matches `lp_node:{lp_id}:{nid}` and respects LevelPlayId scoping.
+    h.state
+        .player_components
+        .progress
+        .info
+        .mark_claim(&format!("lp_node:{lpid}:203"));
+    let cq_implicit = serde_json::json!({"Type": "CheckLevelPlayChildQuestFinished", "ChildQuestId": 203, "Compare": "Eq"});
+    let cq_same = serde_json::json!({"Type": "CheckLevelPlayChildQuestFinished", "LevelPlayId": lpid, "ChildQuestId": 203, "Compare": "Eq"});
+    let cq_other = serde_json::json!({"Type": "CheckLevelPlayChildQuestFinished", "LevelPlayId": other_lp, "ChildQuestId": 203, "Compare": "Eq"});
+    assert!(eval_single_inline_condition(&mk_ctx(&h.state), &cq_implicit));
+    assert!(eval_single_inline_condition(&mk_ctx(&h.state), &cq_same));
+    assert!(!eval_single_inline_condition(&mk_ctx(&h.state), &cq_other));
+
+    // 3) CheckOriginWorldLevel & CheckCurWorldLevel honor Compare operators.
+    h.state.player_components.basic.info.attributes.cur_world_level = 3;
+    h.state.player_components.basic.info.attributes.origin_world_level = 4;
+    assert!(eval_single_inline_condition(
+        &mk_ctx(&h.state),
+        &serde_json::json!({"Type": "CheckCurWorldLevel", "Level": 3, "Compare": "Eq"})
+    ));
+    assert!(!eval_single_inline_condition(
+        &mk_ctx(&h.state),
+        &serde_json::json!({"Type": "CheckCurWorldLevel", "Level": 3, "Compare": "Gt"})
+    ));
+    assert!(eval_single_inline_condition(
+        &mk_ctx(&h.state),
+        &serde_json::json!({"Type": "CheckOriginWorldLevel", "Level": 5, "Op": "Lt"})
+    ));
+
+    // 4) New inline conditions & activity check.
+    h.state
+        .player_components
+        .quest
+        .info
+        .world
+        .hidden_entities
+        .push(143_000_341);
+    assert!(eval_single_inline_condition(
+        &mk_ctx(&h.state),
+        &serde_json::json!({"Type": "CheckEntityIsVisibility", "EntityId": 143000341, "IsVisible": false})
+    ));
+    h.state
+        .player_components
+        .progress
+        .info
+        .mark_claim("rogue:ability_select:3");
+    assert!(eval_single_inline_condition(
+        &mk_ctx(&h.state),
+        &serde_json::json!({"Type": "CheckRogueAbilitySelect", "BoardId": 3, "IsReceived": true})
+    ));
+    assert!(eval_single_inline_condition(
+        &mk_ctx(&h.state),
+        &serde_json::json!({"Type": "CheckIsInDollGrabGamePlay", "IsIn": false, "DollGrabEntityId": 150750322})
+    ));
+    assert!(eval_single_inline_condition(
+        &mk_ctx(&h.state),
+        &serde_json::json!({"Type": "CheckPlayerCanJoinActivity", "Config": {"Type": "Rogue", "CanJoin": true}})
+    ));
+    if let Some(first_act) = h.state.assets.tables.activity.items.first() {
+        assert_eq!(eval_activity_state(&mk_ctx(&h.state), first_act.Id), 1);
+    }
+}
+
+#[test]
+fn audit_231_wake_delay_login_discard_and_lp_submit_isolation() {
+    use sonoro_gamesv_data::lazy_node_store::NodeEntry;
+    use sonoro_gamesv_logic::helpers::quest_types::{
+        LEVEL_PLAY_TREE_INC_OFFSET, bt_tree_inc_id, repeater_cooldown_key,
+    };
+    use sonoro_gamesv_logic::helpers::save_block;
+    use sonoro_proto::pb::SubmitNodeRequest;
+
+    let mut h = TestHarness::new("audit_231", Some(8));
+    let mut events = EventQueue::new();
+
+    // 1) next_quest_wake_delay_ms includes lp_repeater_cooldowns.
+    {
+        let sc = h.state.scene.as_mut().expect("scene");
+        sc.lp_repeater_cooldowns
+            .insert(repeater_cooldown_key(123_456, 7), 10_500);
+        let delay = sc.next_quest_wake_delay_ms(10_000);
+        assert_eq!(delay, Some(500));
+    }
+
+    // 2) plan_login_discard_with_extra discards paused Action node in active SaveConfig block.
+    let nodes = vec![
+        NodeEntry {
+            id: 1,
+            parent_id: 0,
+            node_type: "Sequence".into(),
+            count: 0,
+            reward_id: 0,
+            data: serde_json::json!({"Type": "Sequence", "Id": 1, "Children": [2, 3]}),
+        },
+        NodeEntry {
+            id: 2,
+            parent_id: 1,
+            node_type: "Sequence".into(),
+            count: 0,
+            reward_id: 0,
+            data: serde_json::json!({"Type": "Sequence", "Id": 2, "SaveConfig": {"Enable": true}, "Children": [5, 4]}),
+        },
+        NodeEntry {
+            id: 5,
+            parent_id: 2,
+            node_type: "ChildQuest".into(),
+            count: 0,
+            reward_id: 0,
+            data: serde_json::json!({"Type": "ChildQuest", "Id": 5}),
+        },
+        NodeEntry {
+            id: 4,
+            parent_id: 2,
+            node_type: "Action".into(),
+            count: 0,
+            reward_id: 0,
+            data: serde_json::json!({"Type": "Action", "Id": 4}),
+        },
+        NodeEntry {
+            id: 3,
+            parent_id: 1,
+            node_type: "ChildQuest".into(),
+            count: 0,
+            reward_id: 0,
+            data: serde_json::json!({"Type": "ChildQuest", "Id": 3}),
+        },
+    ];
+    let discard = save_block::plan_login_discard_with_extra(&nodes, &[], &[5], &[4]);
+    assert!(discard.blocks.contains(&2));
+    assert!(discard.reenter.contains(&4));
+    assert!(discard.unfinish.contains(&5));
+
+    // 3) SubmitNodeRequest with BtTypeLevelPlay TreeIncId never finishes Quest node with identical IDs.
+    let shared = 200_700_000;
+    h.state
+        .player_components
+        .quest
+        .info
+        .get_or_add_active_quest(shared)
+        .mark_node_active(10);
+    let _ = crate::network::handlers::quest::handle_submit_node_request(
+        &mut h.state,
+        &mut events,
+        SubmitNodeRequest {
+            TreeOwnerId: shared,
+            TreeIncId: bt_tree_inc_id(BtType::BtTypeLevelPlay, shared),
+            NodeId: 10,
+        },
+    )
+    .expect("SubmitNodeRequest LP isolated");
+    assert_eq!(
+        LEVEL_PLAY_TREE_INC_OFFSET + i64::from(shared),
+        bt_tree_inc_id(BtType::BtTypeLevelPlay, shared)
+    );
+    let aq = h
+        .state
+        .player_components
+        .quest
+        .info
+        .find_active_quest(shared)
+        .expect("quest stays untouched");
+    assert!(aq.is_node_active(10));
+    assert!(!aq.is_node_finished(10));
+}
+
+#[test]
+fn audit_232_finish_condition_and_lp_dynamic_interact_respect_bt_type_and_guards() {
+    use sonoro_gamesv_logic::helpers::quest_actions;
+    use sonoro_gamesv_logic::helpers::quest_engine;
+    use sonoro_gamesv_logic::helpers::quest_types::bt_tree_inc_id;
+    use sonoro_gamesv_logic::scene::DynamicInteractKind;
+    use sonoro_proto::pb::SubmitNodeRequest;
+
+    let mut h = TestHarness::new("audit_232_fc_lp_interact", Some(8));
+    let mut events = EventQueue::new();
+
+    // 1) Server FinishCondition completes Quest 109000001 node 31 (DoInteract) even though client SubmitNodeRequest blocks DoInteract.
+    {
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_or_add_active_quest(109000001)
+            .mark_node_active(31);
+        // Client SubmitNodeRequest must still stay blocked on DoInteract.
+        let _ = crate::network::handlers::quest::handle_submit_node_request(
+            &mut h.state,
+            &mut events,
+            SubmitNodeRequest {
+                TreeOwnerId: 109000001,
+                TreeIncId: 109000001,
+                NodeId: 31,
+            },
+        )
+        .expect("client SubmitNodeRequest");
+        assert!(
+            h.state
+                .player_components
+                .quest
+                .info
+                .find_active_quest(109000001)
+                .is_some_and(|aq| aq.is_node_active(31)),
+            "client SubmitNodeRequest must still block DoInteract node 31"
+        );
+
+        let mut qctx = h.state.quest_context(&mut events);
+        let mut cbs = quest_engine::action_callbacks();
+        cbs.bt_type = BtType::BtTypeQuest;
+        quest_actions::execute_action_list(
+            &mut qctx,
+            &mut cbs,
+            109000001,
+            31,
+            &[serde_json::json!({"Name": "FinishCondition", "Params": {}})],
+        )
+        .expect("server FinishCondition");
+        assert!(
+            h.state
+                .player_components
+                .quest
+                .info
+                .find_active_quest(109000001)
+                .is_none_or(|aq| aq.is_node_finished(31) || !aq.is_node_active(31)),
+            "server FinishCondition must advance DoInteract node 31"
+        );
+    }
+
+    // 2) BtTypeLevelPlay DynamicInteractOption dispatched via on_interact_handled must NOT collide with Quest ID 169750002.
+    {
+        let shared = 169_750_002;
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_or_add_active_quest(shared)
+            .mark_node_active(7);
+        let cfg_id = 145_750_138_i32;
+        let net_id = i64::from(cfg_id);
+        h.state
+            .scene
+            .as_mut()
+            .expect("scene")
+            .upsert_dynamic_interact_option_with_bt(
+                "4cae376712984b8095a277b04d5d0a26",
+                net_id,
+                cfg_id,
+                BtType::BtTypeLevelPlay,
+                145_750_001,
+                2,
+                DynamicInteractKind::Actions,
+                "",
+                0,
+                0,
+                "[]",
+                "Board Gondola",
+            );
+        let handled = {
+            let mut qctx = h.state.quest_context(&mut events);
+            quest_engine::events::on_interact_handled(&mut qctx, net_id, 1)
+                .expect("on_interact_handled")
+        };
+        assert!(
+            handled,
+            "on_interact_handled must handle BtTypeLevelPlay DynamicInteractOption cleanly"
+        );
+        assert!(
+            h.state
+                .player_components
+                .progress
+                .info
+                .has_claim("lp_node:145750001:2"),
+            "LevelPlay 145750001 node 2 must complete via dynamic interact"
+        );
+        // If someone registers a colliding LP option whose LP ID == Quest ID, Quest 169750002 must stay untouched.
+        let collide_net_id = i64::from(shared);
+        h.state
+            .scene
+            .as_mut()
+            .expect("scene")
+            .upsert_dynamic_interact_option_with_bt(
+                "lp-colliding-opt",
+                collide_net_id,
+                shared,
+                BtType::BtTypeLevelPlay,
+                shared,
+                7,
+                DynamicInteractKind::Actions,
+                "",
+                0,
+                0,
+                "[]",
+                "Colliding",
+            );
+        let _ = {
+            let mut qctx = h.state.quest_context(&mut events);
+            quest_engine::events::on_interact_handled(&mut qctx, collide_net_id, 99)
+        };
+        assert!(
+            h.state
+                .player_components
+                .quest
+                .info
+                .find_active_quest(shared)
+                .is_some_and(|aq| aq.is_node_active(7) && !aq.is_node_finished(7)),
+            "Quest {shared} node 7 must remain isolated from BtTypeLevelPlay DynamicInteractOption ({})",
+            bt_tree_inc_id(BtType::BtTypeLevelPlay, shared)
+        );
+    }
+}
 

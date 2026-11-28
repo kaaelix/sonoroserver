@@ -2,7 +2,7 @@ use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::quest_engine;
 use sonoro_proto::enums::{BtType, ErrorCode};
 use sonoro_proto::pb::{
-    FlowActionRequest, FlowActionResponse, FlowEndNotify, FlowEndRequest, FlowEndResponse,
+    FlowActionRequest, FlowActionResponse, FlowEndRequest, FlowEndResponse,
     FlowServerSkipNotify, GameCtxPb, GameCtxPbCtxInfoOneof,
 };
 
@@ -56,17 +56,6 @@ pub fn handle_flow_end_request(
         .scene
         .as_ref()
         .map_or(0, |scene| scene.active_flow_inc_id);
-
-    if active_flow_inc_id == 0 && had_active_flow {
-        let _ = state.conn.push_msg(
-            FlowEndNotify::MSG_ID,
-            &FlowEndNotify {
-                FlowIncId: req.FlowIncId,
-                Async: false,
-                IsFinished: true,
-            },
-        );
-    }
 
     let client_black_screen_open = state
         .scene
@@ -134,11 +123,12 @@ pub fn handle_flow_action_request(
 
 #[allow(dead_code)]
 pub fn build_flow_bt_ctx(bt_type: BtType, bt_id: i32, node_id: i32) -> GameCtxPb {
+    let inc_id = sonoro_gamesv_logic::helpers::quest_types::bt_tree_inc_id(bt_type, bt_id);
     GameCtxPb {
         CtxType: Some(sonoro_proto::enums::GameCtxType::BehaviorTree),
         CtxInfo: Some(GameCtxPbCtxInfoOneof::BehaviorTree(
             sonoro_proto::pb::BehaviorTreeCtxPb {
-                IncId: i64::from(bt_id),
+                IncId: inc_id,
                 BtType: Some(bt_type),
                 BtId: bt_id,
                 NodeId: node_id,

@@ -77,7 +77,12 @@ pub fn push_data<S: PushSink + ?Sized>(
         );
     }
 
-    sink.push(AdviceSettingNotify::MSG_ID, &AdviceSettingNotify { IsShow: false });
+    sink.push(
+        AdviceSettingNotify::MSG_ID,
+        &AdviceSettingNotify {
+            IsShow: progress_comp.info.get_key_int("advice:show") != 0,
+        },
+    );
     sink.push(
         ControlInfoNotify::MSG_ID,
         &ControlInfoNotify {
@@ -86,7 +91,7 @@ pub fn push_data<S: PushSink + ?Sized>(
     );
     sink.push(
         InstDataNotify::MSG_ID,
-        &build_inst_data_notify(assets, quest_comp),
+        &build_inst_data_notify_with_progress(assets, quest_comp, Some(progress_comp)),
     );
     let calabash_notify = calabash::build_msg_notify(assets, basic_comp, echo_comp);
     sink.push(sonoro_proto::pb::CalabashMsgNotify::MSG_ID, &calabash_notify);
@@ -149,7 +154,12 @@ pub fn push_data<S: PushSink + ?Sized>(
 
     sink.push(
         LevelPlayInfoNotify::MSG_ID,
-        &build_level_play_info_notify(assets, basic_comp, quest_comp),
+        &build_level_play_info_notify_with_progress(
+            assets,
+            basic_comp,
+            quest_comp,
+            Some(progress_comp),
+        ),
     );
     sink.push(
         MapMarkInfoNotify::MSG_ID,
@@ -333,7 +343,12 @@ pub fn is_entity_blocked_by_locked_level_play(
 pub fn push_level_play_and_map_mark_sync<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
 ) {
-    let lp_notify = build_level_play_info_notify(ctx.assets, ctx.basic_comp, ctx.quest_comp);
+    let lp_notify = build_level_play_info_notify_with_progress(
+        ctx.assets,
+        ctx.basic_comp,
+        ctx.quest_comp,
+        ctx.progress_comp.as_deref(),
+    );
     let mm_notify = build_map_mark_info_notify(
         ctx.assets,
         ctx.map_comp,
@@ -349,11 +364,21 @@ pub fn build_level_play_info_notify(
     basic_comp: &PlayerBasicComponent,
     quest_comp: &PlayerQuestComponent,
 ) -> LevelPlayInfoNotify {
+    build_level_play_info_notify_with_progress(assets, basic_comp, quest_comp, None)
+}
+
+pub fn build_level_play_info_notify_with_progress(
+    assets: &Assets,
+    basic_comp: &PlayerBasicComponent,
+    quest_comp: &PlayerQuestComponent,
+    progress_comp: Option<&PlayerProgressComponent>,
+) -> LevelPlayInfoNotify {
     let empty_map = PlayerMapComponent {
         player_id: basic_comp.player_id,
         info: Default::default(),
     };
-    let eval_ctx = build_unlock_eval_context(assets, basic_comp, quest_comp, &empty_map);
+    let mut eval_ctx = build_unlock_eval_context(assets, basic_comp, quest_comp, &empty_map);
+    eval_ctx.progress_comp = progress_comp;
     let mut seen = HashSet::new();
     let mut infos = Vec::new();
     for mark in &assets.tables.map_mark.items {
@@ -376,16 +401,52 @@ pub fn build_level_play_info_notify(
         if !seen.insert(mark.RelativeId) {
             continue;
         }
+        let lp_state_key = format!("lp_state:{}", mark.RelativeId);
+        let explicit_lp_state = progress_comp.and_then(|pc| {
+            pc.info
+                .dynamic
+                .ints
+                .iter()
+                .find(|e| e.key == lp_state_key)
+                .map(|e| e.val)
+        });
+        let reward_cnt = progress_comp
+            .and_then(|pc| {
+                lp.Data
+                    .LevelPlayRewardConfig
+                    .as_ref()
+                    .filter(|rc| rc.RewardEntityId > 0)
+                    .map(|rc| {
+                        pc.info
+                            .get_key_int(&format!("lp:reward_cnt:{}", rc.RewardEntityId))
+                            .clamp(0, i64::from(i32::MAX)) as i32
+                    })
+            })
+            .unwrap_or(0);
         let done = quest_comp
             .info
             .completed_level_plays
-            .contains(&mark.RelativeId);
+            .contains(&mark.RelativeId)
+            || explicit_lp_state.is_some_and(|v| v >= 3);
+        let is_running = quest_comp
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&mark.RelativeId)
+            || explicit_lp_state == Some(2);
+        let state_val = if done {
+            3
+        } else if is_running {
+            2
+        } else {
+            1
+        };
         infos.push(LevelPlayInfo {
             Id: mark.RelativeId,
             IsFirst: !done,
-            State: if done { 3 } else { 1 },
+            State: state_val,
             UpdateTime: 0,
-            GetRewardCount: 0,
+            GetRewardCount: reward_cnt,
         });
     }
     LevelPlayInfoNotify {
@@ -472,12 +533,12 @@ pub fn build_map_mark_info_notify(
     }
 }
 
-pub fn build_inst_data_notify(
+pub fn build_inst_data_notify_with_progress(
     assets: &Assets,
     quest_comp: &PlayerQuestComponent,
+    progress_comp: Option<&PlayerProgressComponent>,
 ) -> InstDataNotify {
-    let mut enter_infos = Vec::new();
-    let mut seen_shares = HashSet::new();
+    let mut counts_by_share: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
     for &inst_id in &quest_comp.info.completed_dungeons {
         if inst_id <= 0 {
             continue;
@@ -486,17 +547,51 @@ pub fn build_inst_data_notify(
         let Some(dg) = assets.tables.instance_dungeon.get_data_by_id(&inst_id) else {
             continue;
         };
-        if dg.EnterControlId <= 0 || !seen_shares.insert(dg.EnterControlId) {
+        if dg.EnterControlId <= 0 {
             continue;
         }
-        enter_infos.push(InstEnterInfoPb {
-            Id: dg.EnterControlId,
-            ChallengedTimes: 1,
-        });
+        let stored_inst_clears = progress_comp
+            .map(|p| {
+                p.info
+                    .get_key_int(&format!("inst:clear:{inst_id}"))
+                    .max(p.info.get_key_int(&format!("inst:finish:{inst_id}")))
+            })
+            .unwrap_or(0);
+        let inc = if stored_inst_clears > 0 {
+            stored_inst_clears.clamp(1, i64::from(i32::MAX)) as i32
+        } else {
+            1
+        };
+        let entry = counts_by_share.entry(dg.EnterControlId).or_insert(0);
+        *entry = entry.saturating_add(inc);
     }
+    let enter_infos = counts_by_share
+        .into_iter()
+        .map(|(share_id, done_count)| {
+            let explicit_share = progress_comp
+                .map(|p| p.info.get_key_int(&format!("inst:challenged:{share_id}")))
+                .unwrap_or(0);
+            let challenged_times = if explicit_share > 0 {
+                (explicit_share.clamp(1, i64::from(i32::MAX)) as i32).max(done_count)
+            } else {
+                done_count
+            };
+            InstEnterInfoPb {
+                Id: share_id,
+                ChallengedTimes: challenged_times,
+            }
+        })
+        .collect();
     InstDataNotify {
         EnterInfos: enter_infos,
     }
+}
+
+pub fn build_inst_data_notify(
+    assets: &Assets,
+    quest_comp: &PlayerQuestComponent,
+) -> InstDataNotify {
+    build_inst_data_notify_with_progress(assets, quest_comp, None)
 }
 
 pub fn handle_reconnect_resync<S: PushSink + ?Sized>(

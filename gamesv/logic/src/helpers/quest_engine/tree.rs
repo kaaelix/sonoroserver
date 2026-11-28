@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io;
 
 use serde_json::{Map, Value};
@@ -32,14 +32,14 @@ use crate::schedulers::quest_timer_queue::{QuestTimerEntry, QuestTimerQueue};
 use crate::sink::PushSink;
 
 use super::triggers::{
-    action_node_progress_key, build_pre_show_quest_list, build_tree_info, entity_hp_percent,
-    eval_compare_var_list, execute_actions, extract_node_action_items, find_node_by_id,
-    find_root_node, get_child_condition, init_tree_info, is_sync_play_flow_action,
-    push_ancestor_activations, push_bt_level_events, push_daily_and_branch_notifies,
-    push_do_interact_options_for_node, push_node_status, push_ready_quest_list,
-    remove_do_interact_options_for_node, should_auto_complete_child_quest,
-    snapshot_active_quest_ids, start_flow_from_obj, sync_scene_current_node,
-    ensure_tracked_focus_valid,
+    build_pre_show_quest_list, build_tree_info, child_quest_timer_type, entity_hp_percent,
+    ensure_tracked_focus_valid, execute_actions, extract_node_action_items, find_node_by_id,
+    find_root_node, get_child_condition, init_tree_info, next_action_slice_end,
+    push_ancestor_activations, push_bt_level_events, push_bt_node_activate, push_bt_timer_info,
+    push_daily_and_branch_notifies, push_do_interact_options_for_node, push_node_status,
+    push_ready_quest_list, quest_failed_timer_type, remove_do_interact_options_for_node,
+    should_auto_complete_child_quest, snapshot_active_quest_ids, start_flow_from_obj,
+    sync_scene_current_node,
 };
 use super::{PROLOGUE_QUEST_ID, interrupt_active_flow_for_quest, spawn_node_target_entities};
 
@@ -62,6 +62,30 @@ thread_local! {
     pub(super) static PENDING_RECHECK_CONDITIONS: Cell<bool> = const { Cell::new(false) };
     static QUEST_TRANSITION_DEPTH: Cell<u8> = const { Cell::new(0) };
     static FINALIZING_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static ROLLBACK_ACTIVE_QUESTS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+}
+
+struct QuestRollbackGuard {
+    quest_id: i32,
+}
+impl QuestRollbackGuard {
+    fn try_enter(quest_id: i32) -> Option<Self> {
+        ROLLBACK_ACTIVE_QUESTS.with(|list| {
+            let mut v = list.borrow_mut();
+            if v.contains(&quest_id) {
+                return None;
+            }
+            v.push(quest_id);
+            Some(Self { quest_id })
+        })
+    }
+}
+impl Drop for QuestRollbackGuard {
+    fn drop(&mut self) {
+        ROLLBACK_ACTIVE_QUESTS.with(|list| {
+            list.borrow_mut().retain(|&q| q != self.quest_id);
+        });
+    }
 }
 
 struct RefreshLoopGuard;
@@ -284,6 +308,13 @@ fn recheck_pending_conditions_pass<S: PushSink + ?Sized>(
                 | "CompareVar"
                 | "CheckEntityState"
                 | "CheckLevelPlay"
+                | "CheckLevelPlayState"
+                | "CheckLevelPlayCompleteNumber"
+                | "CheckLevelPlayChildQuestFinished"
+                | "CompareQuestState"
+                | "CheckQuestState"
+                | "CheckChildQuestFinished"
+                | "CheckQuestFinished"
                 | "CheckActivityState"
                 | "GetItem"
                 | "VisionSystem"
@@ -298,8 +329,13 @@ fn recheck_pending_conditions_pass<S: PushSink + ?Sized>(
                 | "CheckUiGame"
                 | "CheckFinishLoading"
                 | "CheckElementalBoxState"
+                | "CheckElementalWaterBoxStagnationSeq"
                 | "CheckEntityBuffStack"
+                | "CheckEntityIsVisibility"
+                | "CheckEntityPrefabPerformanceType"
+                | "CheckEntityReward"
                 | "CheckEntitySelfDirection"
+                | "CheckIsInDollGrabGamePlay"
                 | "CheckIsInDragActorPlay"
                 | "CompareTeammateDie"
                 | "CompareCost"
@@ -312,7 +348,9 @@ fn recheck_pending_conditions_pass<S: PushSink + ?Sized>(
                 | "CheckHasFollowShooter"
                 | "CheckIsGramophonePlayingMusic"
                 | "CheckPhotographCameraParam"
+                | "CheckPlayerCanJoinActivity"
                 | "CheckPlayerUseSkill"
+                | "CheckRogueAbilitySelect"
                 | "CheckRoverRogueAbilitySelect"
         ) {
             if should_auto_complete_child_quest(c, qid, node) {
@@ -346,7 +384,13 @@ pub fn step_pending_control_nodes<S: PushSink + ?Sized>(
             !aq.is_node_finished(n.id)
                 && matches!(
                     n.node_type.as_str(),
-                    "Condition" | "ConditionSelector" | "Repeater" | "Parallel" | "ParallelSelect"
+                    "Condition"
+                        | "ConditionSelector"
+                        | "Repeater"
+                        | "Parallel"
+                        | "ParallelSelect"
+                        | "Select"
+                        | "AlwaysTrue"
                 )
         });
         if has_control || aq.active_nodes.is_empty() {
@@ -760,12 +804,22 @@ pub fn step_node<S: PushSink + ?Sized>(
                 if child.parent_id != node.id {
                     continue;
                 }
+                let was_finished = ctx
+                    .quest_comp
+                    .info
+                    .find_active_quest(quest_id)
+                    .is_some_and(|aq| aq.is_node_finished(child.id));
                 let child_res = step_node(ctx, quest_id, nodes, child, push_updates, steps)?;
                 match child_res {
                     StepResult::Running | StepResult::Failed | StepResult::QuestEnded => {
                         return Ok(child_res);
                     }
-                    StepResult::Completed => continue,
+                    StepResult::Completed => {
+                        if !was_finished && has_pending_wait_for_quest(ctx, quest_id) {
+                            return Ok(StepResult::Running);
+                        }
+                        continue;
+                    }
                 }
             }
             finish_non_child_node(ctx, quest_id, node, push_updates)?;
@@ -803,7 +857,7 @@ pub fn step_node<S: PushSink + ?Sized>(
             let needed_sel = if node.count > 0 {
                 node.count
             } else {
-                eligible_children.max(1)
+                eligible_children
             };
             let mut finished_count = 0i32;
             let mut failed_count = 0i32;
@@ -814,12 +868,17 @@ pub fn step_node<S: PushSink + ?Sized>(
                 if child.parent_id != node.id {
                     continue;
                 }
-                total_children += 1;
+                let is_monitor = child.node_type == "QuestFailed";
+                if !is_monitor {
+                    total_children += 1;
+                }
                 let Some(cur_aq) = ctx.quest_comp.info.find_active_quest(quest_id) else {
                     return Ok(StepResult::QuestEnded);
                 };
                 if cur_aq.is_node_finished(child.id) {
-                    finished_count += 1;
+                    if !is_monitor {
+                        finished_count += 1;
+                    }
                     continue;
                 }
                 let child_res = step_node(ctx, quest_id, nodes, child, push_updates, steps)?;
@@ -829,12 +888,18 @@ pub fn step_node<S: PushSink + ?Sized>(
                         break;
                     }
                     StepResult::Completed => {
-                        finished_count += 1;
-                        if !is_parallel_all && finished_count >= needed_sel {
-                            break;
+                        if !is_monitor {
+                            finished_count += 1;
+                            if !is_parallel_all && finished_count >= needed_sel {
+                                break;
+                            }
                         }
                     }
-                    StepResult::Failed => failed_count += 1,
+                    StepResult::Failed => {
+                        if !is_monitor {
+                            failed_count += 1;
+                        }
+                    }
                     StepResult::Running => {}
                 }
             }
@@ -843,6 +908,8 @@ pub fn step_node<S: PushSink + ?Sized>(
             }
             let needed = if is_parallel_all {
                 total_children
+            } else if eligible_children == 0 {
+                0
             } else {
                 needed_sel
             };
@@ -920,16 +987,29 @@ pub fn step_node<S: PushSink + ?Sized>(
         }
         "QuestFailed" => step_quest_failed_node(ctx, quest_id, node, push_updates),
         "Action" | "ActionWithResult" => {
+            let is_action_with_result = node.node_type == "ActionWithResult";
             let mut single_buf = [Value::Null];
             let items: Vec<Value> =
                 extract_node_action_items(&node.data, &mut single_buf).to_vec();
-            if !items.is_empty() {
-                let akey = action_node_progress_key(quest_id, node.id);
+            let mut action_failed =
+                is_action_with_result && action_node_signaled_failure(ctx, quest_id, node, &items);
+            if !action_failed && !items.is_empty() {
                 let start_idx = ctx
                     .scene
                     .as_deref()
-                    .and_then(|sc| sc.action_node_next_idx.get(&akey).copied())
+                    .and_then(|sc| sc.get_action_node_next_idx(BtType::BtTypeQuest, quest_id, node.id))
                     .unwrap_or(0);
+                if start_idx < items.len()
+                    && ctx.scene.as_deref().is_some_and(|sc| {
+                        sc.has_pending_or_deferred_flow_for_bt_node(
+                            BtType::BtTypeQuest,
+                            quest_id,
+                            node.id,
+                        )
+                    })
+                {
+                    return Ok(StepResult::Running);
+                }
                 if start_idx == 0 && push_updates {
                     ctx.sink.push(
                         UpdateNodeStatusNotify::MSG_ID,
@@ -948,32 +1028,72 @@ pub fn step_node<S: PushSink + ?Sized>(
                         &items,
                     )?;
                 }
-                if start_idx < items.len() {
-                    for (idx, act_item) in items.iter().enumerate().skip(start_idx) {
-                        execute_actions(ctx, quest_id, node.id, std::slice::from_ref(act_item))?;
-                        if let Some(scene) = ctx.scene.as_deref_mut()
-                            && is_sync_play_flow_action(act_item)
-                            && ((scene.active_flow_inc_id != 0
-                                && scene.active_flow_quest_id == quest_id
-                                && scene.active_flow_node_id == node.id)
-                                || scene.has_pending_flow_for_node(quest_id, node.id))
+                let mut cursor = start_idx;
+                while cursor < items.len() {
+                    let (end_idx, _) = next_action_slice_end(&items, cursor);
+                    let slice = &items[cursor..=end_idx];
+                    let exec_res = execute_actions(ctx, quest_id, node.id, slice);
+                    if is_action_with_result {
+                        if exec_res.is_err()
+                            || action_node_signaled_failure(ctx, quest_id, node, slice)
                         {
-                            scene.action_node_next_idx.insert(akey, idx + 1);
-                            return Ok(StepResult::Running);
+                            action_failed = true;
+                            break;
                         }
+                    } else {
+                        exec_res?;
                     }
-                }
-                if let Some(scene) = ctx.scene.as_deref_mut() {
-                    if (scene.active_flow_inc_id != 0
-                        && scene.active_flow_quest_id == quest_id
-                        && scene.active_flow_node_id == node.id)
-                        || scene.has_pending_flow_for_node(quest_id, node.id)
+                    cursor = end_idx + 1;
+                    if let Some(scene) = ctx.scene.as_deref_mut()
+                        && scene.has_pending_or_deferred_flow_for_bt_node(
+                            BtType::BtTypeQuest,
+                            quest_id,
+                            node.id,
+                        )
                     {
-                        scene.action_node_next_idx.insert(akey, items.len());
+                        scene.set_action_node_next_idx(
+                            BtType::BtTypeQuest,
+                            quest_id,
+                            node.id,
+                            cursor,
+                        );
                         return Ok(StepResult::Running);
                     }
-                    scene.action_node_next_idx.remove(&akey);
                 }
+                if !action_failed && let Some(scene) = ctx.scene.as_deref_mut() {
+                    if scene.has_pending_or_deferred_flow_for_bt_node(
+                        BtType::BtTypeQuest,
+                        quest_id,
+                        node.id,
+                    ) {
+                        scene.set_action_node_next_idx(
+                            BtType::BtTypeQuest,
+                            quest_id,
+                            node.id,
+                            items.len(),
+                        );
+                        return Ok(StepResult::Running);
+                    }
+                    scene.remove_action_node_next_idx(BtType::BtTypeQuest, quest_id, node.id);
+                }
+            }
+            if action_failed {
+                if let Some(scene) = ctx.scene.as_deref_mut() {
+                    scene.release_occupations_for_node_bt(BtType::BtTypeQuest, quest_id, node.id);
+                    scene.remove_action_node_next_idx(BtType::BtTypeQuest, quest_id, node.id);
+                }
+                if push_updates {
+                    ctx.sink.push(
+                        UpdateNodeStatusNotify::MSG_ID,
+                        &UpdateNodeStatusNotify {
+                            TreeOwnerId: quest_id,
+                            TreeIncId: i64::from(quest_id),
+                            NodeId: node.id,
+                            Status: Some(NodeStatus::CompletedFailed),
+                        },
+                    );
+                }
+                return Ok(StepResult::Failed);
             }
             finish_non_child_node(ctx, quest_id, node, push_updates)?;
             Ok(StepResult::Completed)
@@ -1003,6 +1123,7 @@ pub fn step_node<S: PushSink + ?Sized>(
             })
         }
         "ConditionSelector" => {
+            let mut active_slot_cid: Option<i32> = None;
             if let Some(Value::Array(slots)) = node.data.get("Slots") {
                 for slot in slots {
                     let Value::Object(sobj) = slot else {
@@ -1026,28 +1147,61 @@ pub fn step_node<S: PushSink + ?Sized>(
                     let Some(cnode) = find_node_by_id(nodes, cid) else {
                         continue;
                     };
+                    deactivate_other_selector_slots(
+                        ctx,
+                        quest_id,
+                        nodes,
+                        slots,
+                        Some(cid),
+                        push_updates,
+                    )?;
                     let res = step_node(ctx, quest_id, nodes, cnode, push_updates, steps)?;
                     match res {
                         StepResult::Completed => {
                             finish_non_child_node(ctx, quest_id, node, push_updates)?;
                             return Ok(StepResult::Completed);
                         }
-                        StepResult::Running | StepResult::QuestEnded => return Ok(res),
+                        StepResult::Running | StepResult::QuestEnded => {
+                            active_slot_cid = Some(cid);
+                            if res == StepResult::QuestEnded {
+                                return Ok(res);
+                            }
+                            break;
+                        }
                         StepResult::Failed => continue,
                     }
+                }
+                if active_slot_cid.is_none() {
+                    deactivate_other_selector_slots(ctx, quest_id, nodes, slots, None, push_updates)?;
                 }
             }
             Ok(StepResult::Running)
         }
         "Repeater" => {
             let cd_key = repeater_cooldown_key(-quest_id, node.id);
+            let max_repeat = node
+                .data
+                .get("MaxRepeatTimes")
+                .and_then(|v| json_int(Some(v)))
+                .unwrap_or(0);
             while *steps < MAX_STEPS_PER_ADVANCE {
-                if let Some(ec) = node.data.get("ExitCondition")
-                    && condition::eval_inline_condition_block(
+                let exit_ok = node.data.get("ExitCondition").is_some_and(|ec| {
+                    condition::eval_inline_condition_block(
                         &ctx.make_eval_context_for_quest(quest_id),
                         ec,
                     )
-                {
+                }) || (max_repeat > 0
+                    && ctx
+                        .scene
+                        .as_deref()
+                        .and_then(|s| s.repeater_counts.get(&cd_key).copied())
+                        .unwrap_or(0)
+                        >= max_repeat);
+                if exit_ok {
+                    if let Some(scene) = ctx.scene.as_deref_mut() {
+                        scene.lp_repeater_cooldowns.remove(&cd_key);
+                        scene.repeater_counts.remove(&cd_key);
+                    }
                     deactivate_subtree(ctx, quest_id, nodes, node.id, push_updates)?;
                     finish_non_child_node(ctx, quest_id, node, push_updates)?;
                     return Ok(StepResult::Completed);
@@ -1076,13 +1230,34 @@ pub fn step_node<S: PushSink + ?Sized>(
                     return Ok(StepResult::Running);
                 }
                 if !any_child {
+                    if let Some(scene) = ctx.scene.as_deref_mut() {
+                        scene.lp_repeater_cooldowns.remove(&cd_key);
+                        scene.repeater_counts.remove(&cd_key);
+                    }
                     finish_non_child_node(ctx, quest_id, node, push_updates)?;
                     return Ok(StepResult::Completed);
                 }
                 if !child_completed {
                     return Ok(StepResult::Running);
                 }
+                let new_cnt = ctx
+                    .scene
+                    .as_deref_mut()
+                    .map(|scene| {
+                        let next = scene.repeater_counts.get(&cd_key).copied().unwrap_or(0) + 1;
+                        scene.repeater_counts.insert(cd_key, next);
+                        next
+                    })
+                    .unwrap_or(0);
                 reset_quest_subtree_finished_nodes(ctx, quest_id, nodes, node.id);
+                if max_repeat > 0 && new_cnt >= max_repeat {
+                    if let Some(scene) = ctx.scene.as_deref_mut() {
+                        scene.lp_repeater_cooldowns.remove(&cd_key);
+                        scene.repeater_counts.remove(&cd_key);
+                    }
+                    finish_non_child_node(ctx, quest_id, node, push_updates)?;
+                    return Ok(StepResult::Completed);
+                }
                 let wait_ms = subtree_wait_delay_ms(nodes, node.id);
                 if wait_ms > 0
                     && let Some(scene) = ctx.scene.as_deref_mut()
@@ -1129,7 +1304,7 @@ fn step_child_quest<S: PushSink + ?Sized>(
         if let Some(Value::Array(acts)) = node.data.get("EnterActions") {
             execute_actions(ctx, quest_id, node.id, acts)?;
         }
-        on_enter_child_quest_special(ctx, quest_id, node)?;
+        on_enter_child_quest_special(ctx, quest_id, node, push_updates)?;
     }
 
     if should_auto_complete_child_quest(ctx, quest_id, node) {
@@ -1139,11 +1314,45 @@ fn step_child_quest<S: PushSink + ?Sized>(
     Ok(StepResult::Running)
 }
 
+fn has_pending_wait_for_quest<S: PushSink + ?Sized>(ctx: &QuestContext<'_, S>, quest_id: i32) -> bool {
+    ctx.scene.as_deref().is_some_and(|s| {
+        s.pending_deferred_actions.iter().any(|e| {
+            e.bt_type == BtType::BtTypeQuest && e.quest_id == quest_id && e.wait_due_ms.is_some()
+        })
+    })
+}
+
+fn action_node_signaled_failure<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    quest_id: i32,
+    node: &NodeEntry,
+    items: &[Value],
+) -> bool {
+    if node.data.get("Result").and_then(Value::as_bool) == Some(false)
+        || node
+            .data
+            .get("Action")
+            .and_then(|a| a.get("Result"))
+            .and_then(Value::as_bool)
+            == Some(false)
+        || items.iter().any(|item| {
+            item.get("Result").and_then(Value::as_bool) == Some(false)
+                || item.get("Success").and_then(Value::as_bool) == Some(false)
+        })
+    {
+        return true;
+    }
+    ctx.progress_comp
+        .as_deref()
+        .is_some_and(|pc| pc.info.get_key_int(&format!("action_result:{quest_id}:{}", node.id)) < 0)
+}
+
 pub fn ensure_active_quest_timers_scheduled<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
 ) -> io::Result<()> {
     let now_ms = now_millis();
     let active_snap = ctx.quest_comp.info.active_quests.clone();
+    let mut newly_scheduled: Vec<(i32, i32, String, i64)> = Vec::new();
     if let Some(scene) = ctx.scene.as_deref_mut() {
         for aq in &active_snap {
             let Ok(nodes) = ctx.assets.quest_nodes.get_owner_nodes(aq.quest_id) else {
@@ -1165,14 +1374,24 @@ pub fn ensure_active_quest_timers_scheduled<S: PushSink + ?Sized>(
                 if let Some(delay_ms) = parse_timer_delay_ms(cond)
                     && delay_ms > 0
                 {
+                    let due_ms = now_ms + delay_ms;
                     scene.quest_timers.upsert(QuestTimerEntry {
                         quest_id: aq.quest_id,
                         node_id: nid,
-                        due_ms: now_ms + delay_ms,
+                        due_ms,
                     });
+                    newly_scheduled.push((
+                        aq.quest_id,
+                        nid,
+                        child_quest_timer_type(cond).to_string(),
+                        due_ms,
+                    ));
                 }
             }
         }
+    }
+    for (qid, nid, timer_type, due_ms) in newly_scheduled {
+        push_bt_timer_info(ctx.sink, BtType::BtTypeQuest, qid, nid, &timer_type, due_ms);
     }
     if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(ctx) {
         level_play::ensure_active_timers_scheduled(&mut lp_ctx)?;
@@ -1257,14 +1476,53 @@ pub fn on_timers_due<S: PushSink + ?Sized>(
         }
     }
 
+    let due_repeaters: Vec<i64> = ctx
+        .scene
+        .as_deref_mut()
+        .map(|scene| {
+            let keys: Vec<i64> = scene
+                .lp_repeater_cooldowns
+                .iter()
+                .filter_map(|(&k, &ready_ms)| (ready_ms <= now_ms).then_some(k))
+                .collect();
+            for k in &keys {
+                scene.lp_repeater_cooldowns.remove(k);
+            }
+            keys
+        })
+        .unwrap_or_default();
+    for cd_key in due_repeaters {
+        let owner = (cd_key >> 32) as i32;
+        if owner < 0 {
+            let qid = -owner;
+            if ctx.quest_comp.info.has_active_quest(qid) {
+                advance_quest_tree(ctx, qid, true)?;
+                progressed = true;
+            }
+        } else if owner > 0
+            && !ctx.quest_comp.info.completed_level_plays.contains(&owner)
+            && ctx.quest_comp.info.progress.entered_level_plays.contains(&owner)
+            && let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(ctx)
+        {
+            let _ = crate::helpers::level_play::step_entered_tree_by_id(&mut lp_ctx, owner)?;
+        }
+    }
+
     let due_wait_actions = ctx
         .scene
         .as_deref_mut()
         .map(|s| s.pop_due_wait_actions(now_ms))
         .unwrap_or_default();
+    let mut lp_wait_recheck_ids = Vec::new();
+    let mut quest_wait_recheck_ids = Vec::new();
     for entry in due_wait_actions {
         let mut cbs = super::action_callbacks::<S>();
         cbs.bt_type = entry.bt_type;
+        if entry.bt_type == BtType::BtTypeLevelPlay && entry.quest_id > 0 {
+            lp_wait_recheck_ids.push(entry.quest_id);
+        } else if entry.bt_type == BtType::BtTypeQuest && entry.quest_id > 0 {
+            append_unique_int(&mut quest_wait_recheck_ids, entry.quest_id);
+        }
         quest_actions::execute_action_list(
             ctx,
             &mut cbs,
@@ -1273,6 +1531,18 @@ pub fn on_timers_due<S: PushSink + ?Sized>(
             &entry.actions,
         )?;
         progressed = true;
+    }
+    for qid in quest_wait_recheck_ids {
+        if ctx.quest_comp.info.has_active_quest(qid) {
+            advance_quest_tree(ctx, qid, true)?;
+        }
+    }
+    if !lp_wait_recheck_ids.is_empty()
+        && let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(ctx)
+    {
+        for lpid in lp_wait_recheck_ids {
+            let _ = crate::helpers::level_play::step_entered_tree_by_id(&mut lp_ctx, lpid)?;
+        }
     }
 
     if let Some(lp_ctx_check) = LevelPlayContext::from_quest_ctx(ctx) {
@@ -1337,6 +1607,7 @@ fn on_enter_child_quest_special<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     quest_id: i32,
     node: &NodeEntry,
+    push_updates: bool,
 ) -> io::Result<()> {
     if quest_id == PROLOGUE_QUEST_ID && matches!(node.id, 155 | 10 | 14 | 91 | 182 | 131) {
         let mut sc = ctx.scene.as_deref_mut();
@@ -1370,15 +1641,28 @@ fn on_enter_child_quest_special<S: PushSink + ?Sized>(
     };
 
     if let Some(delay_ms) = parse_timer_delay_ms(cond) {
+        let mut new_due_ms = None;
         if delay_ms > 0
             && let Some(scene) = ctx.scene.as_deref_mut()
             && !scene.quest_timers.contains(quest_id, node.id)
         {
+            let due_ms = now_millis() + delay_ms;
             scene.quest_timers.upsert(QuestTimerEntry {
                 quest_id,
                 node_id: node.id,
-                due_ms: now_millis() + delay_ms,
+                due_ms,
             });
+            new_due_ms = Some(due_ms);
+        }
+        if push_updates && let Some(due_ms) = new_due_ms {
+            push_bt_timer_info(
+                ctx.sink,
+                BtType::BtTypeQuest,
+                quest_id,
+                node.id,
+                child_quest_timer_type(cond),
+                due_ms,
+            );
         }
         return Ok(());
     }
@@ -1387,7 +1671,17 @@ fn on_enter_child_quest_special<S: PushSink + ?Sized>(
         && !(quest_id == PROLOGUE_QUEST_ID && node.id == 19)
         && let Some(Value::Object(flow_val)) = cond.get("Flow")
     {
-        start_flow_from_obj(ctx, quest_id, node.id, flow_val)?;
+        let already_running = ctx.scene.as_deref().is_some_and(|s| {
+            s.is_flow_active_for_node(BtType::BtTypeQuest, quest_id, node.id)
+                || s.async_flows.iter().any(|af| {
+                    af.bt_type == BtType::BtTypeQuest
+                        && af.quest_id == quest_id
+                        && af.node_id == node.id
+                })
+        });
+        if !already_running {
+            start_flow_from_obj(ctx, quest_id, node.id, flow_val)?;
+        }
     } else if ctype == "ProgramSpecialProcess"
         && let Some(Value::Object(sp)) = cond.get("SpecialProcess")
         && json_str(sp.get("Type")) == Some("LowMemorySceneSwitch")
@@ -1457,7 +1751,7 @@ pub fn finish_non_child_node<S: PushSink + ?Sized>(
     push_updates: bool,
 ) -> io::Result<()> {
     if let Some(scene) = ctx.scene.as_deref_mut() {
-        scene.release_occupations_for_node(quest_id, node.id);
+        scene.release_occupations_for_node_bt(BtType::BtTypeQuest, quest_id, node.id);
     }
     if node.reward_id > 0 {
         let _ = reward::grant_drop_package(&mut ctx.make_reward_context(), node.reward_id, 6003)?;
@@ -1515,7 +1809,25 @@ pub fn eval_quest_failed_condition_pub<S: PushSink + ?Sized>(
     player_pos_opt: Option<[f32; 3]>,
     fail_queue: &mut QuestTimerQueue,
 ) -> io::Result<Option<FailReason>> {
-    eval_quest_failed_condition(ctx, owner_id, node, player_pos_opt, fail_queue)
+    eval_quest_failed_condition(
+        ctx,
+        BtType::BtTypeQuest,
+        owner_id,
+        node,
+        player_pos_opt,
+        fail_queue,
+    )
+}
+
+pub fn eval_quest_failed_condition_for_bt_pub<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    bt_type: BtType,
+    owner_id: i32,
+    node: &NodeEntry,
+    player_pos_opt: Option<[f32; 3]>,
+    fail_queue: &mut QuestTimerQueue,
+) -> io::Result<Option<FailReason>> {
+    eval_quest_failed_condition(ctx, bt_type, owner_id, node, player_pos_opt, fail_queue)
 }
 
 fn check_node_occupation_and_save<S: PushSink + ?Sized>(
@@ -1535,14 +1847,19 @@ fn check_node_occupation_and_save<S: PushSink + ?Sized>(
             && !occ_list.is_empty()
             && let Some(scene) = ctx.scene.as_deref_mut()
         {
+            let bt_inc_id = crate::helpers::quest_types::bt_tree_inc_id(bt_type, quest_id);
             let mut conflicts = Vec::new();
             for item in occ_list {
                 let Some(res_name) = json_str(Some(item)) else {
                     continue;
                 };
                 if !reclaim
-                    && let Some(conf) =
-                        scene.find_occupation_conflict(res_name, quest_id, i64::from(quest_id))
+                    && let Some(conf) = scene.find_occupation_conflict_for_bt(
+                        res_name,
+                        bt_type,
+                        quest_id,
+                        bt_inc_id,
+                    )
                 {
                     conflicts.push(OccupationPbInfo {
                         ResourceName: conf.resource_name.as_bytes().to_vec(),
@@ -1560,7 +1877,7 @@ fn check_node_occupation_and_save<S: PushSink + ?Sized>(
                             SuspendType: SuspendType::Occupation.to_i32(),
                             OccupationInfo: conflicts,
                             TreeOwnerId: quest_id,
-                            TreeIncId: i64::from(quest_id),
+                            TreeIncId: bt_inc_id,
                             IsScreenOccupy: false,
                         },
                     );
@@ -1574,7 +1891,7 @@ fn check_node_occupation_and_save<S: PushSink + ?Sized>(
                 scene.upsert_occupation(
                     bt_type,
                     quest_id,
-                    i64::from(quest_id),
+                    bt_inc_id,
                     node.id,
                     res_name,
                 );
@@ -1586,7 +1903,7 @@ fn check_node_occupation_and_save<S: PushSink + ?Sized>(
         let newly_entered = ctx
             .scene
             .as_deref_mut()
-            .is_some_and(|scene| scene.mark_save_node_entered(quest_id, node.id));
+            .is_some_and(|scene| scene.mark_save_node_entered_for_bt(bt_type, quest_id, node.id));
         if newly_entered {
             if let Some(Value::Array(init_acts)) = save_val.get("InitConditionActions")
                 && !init_acts.is_empty()
@@ -1610,6 +1927,7 @@ fn check_node_occupation_and_save<S: PushSink + ?Sized>(
 
 fn eval_quest_failed_condition<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
+    bt_type: BtType,
     quest_id: i32,
     node: &NodeEntry,
     player_pos_opt: Option<[f32; 3]>,
@@ -1642,7 +1960,7 @@ fn eval_quest_failed_condition<S: PushSink + ?Sized>(
             let pz = json_float(pt.get("Z")).unwrap_or(0.0);
             if px != 0.0 || py != 0.0 || pz != 0.0 {
                 let ppos_opt = player_pos_opt.or_else(|| {
-                    condition::current_player_pos_3d(&ctx.make_eval_context_for_quest(quest_id))
+                    condition::current_player_pos_3d(&ctx.make_eval_context_for_bt(bt_type, quest_id))
                 });
                 if let Some(ppos) = ppos_opt
                     && let Some(scene) = ctx.scene.as_deref_mut()
@@ -1653,11 +1971,11 @@ fn eval_quest_failed_condition<S: PushSink + ?Sized>(
                     let inside = (dx * dx + dy * dy + dz * dz) <= (range * range);
                     let entered_marker_id = node.id + 1_000_000_000;
                     if inside {
-                        scene.mark_save_node_entered(quest_id, entered_marker_id);
+                        scene.mark_save_node_entered_for_bt(bt_type, quest_id, entered_marker_id);
                         if rl_val.get("OverRangeCountdown").is_some() {
                             fail_queue.cancel(quest_id, node.id);
                         }
-                    } else if scene.has_save_node_entered(quest_id, entered_marker_id) {
+                    } else if scene.has_save_node_entered_for_bt(bt_type, quest_id, entered_marker_id) {
                         let countdown = json_float(rl_val.get("OverRangeCountdown")).unwrap_or(0.0);
                         if countdown > 0.0 {
                             if !fail_queue.contains(quest_id, node.id) {
@@ -1678,7 +1996,7 @@ fn eval_quest_failed_condition<S: PushSink + ?Sized>(
     }
 
     if let Some(Value::Object(cv_val)) = fc.get("CompareVar")
-        && eval_compare_var_list(ctx, quest_id, cv_val)
+        && super::triggers::eval_compare_var_list_bt(ctx, bt_type, quest_id, cv_val)
     {
         return Ok(Some(FailReason::CompareVarFail));
     }
@@ -1688,7 +2006,7 @@ fn eval_quest_failed_condition<S: PushSink + ?Sized>(
         let max_dist = json_float(edl_val.get("MaxDistance")).unwrap_or(0.0);
         if target_eid > 0 && max_dist > 0.0 {
             let ppos_opt = player_pos_opt.or_else(|| {
-                condition::current_player_pos_3d(&ctx.make_eval_context_for_quest(quest_id))
+                condition::current_player_pos_3d(&ctx.make_eval_context_for_bt(bt_type, quest_id))
             });
             let epos_opt = resolve_scene_or_asset_entity_pos_3d(ctx, target_eid);
             if let (Some(ppos), Some(epos)) = (ppos_opt, epos_opt)
@@ -1700,11 +2018,11 @@ fn eval_quest_failed_condition<S: PushSink + ?Sized>(
                 let inside = (dx * dx + dy * dy + dz * dz) <= (max_dist * max_dist);
                 let entered_marker_id = node.id + 1_500_000_000;
                 if inside {
-                    scene.mark_save_node_entered(quest_id, entered_marker_id);
+                    scene.mark_save_node_entered_for_bt(bt_type, quest_id, entered_marker_id);
                     if edl_val.get("OverMaxCountdown").is_some() {
                         fail_queue.cancel(quest_id, node.id);
                     }
-                } else if scene.has_save_node_entered(quest_id, entered_marker_id) {
+                } else if scene.has_save_node_entered_for_bt(bt_type, quest_id, entered_marker_id) {
                     let countdown = json_float(edl_val.get("OverMaxCountdown")).unwrap_or(0.0);
                     if countdown > 0.0 {
                         if !fail_queue.contains(quest_id, node.id) {
@@ -1726,7 +2044,6 @@ fn eval_quest_failed_condition<S: PushSink + ?Sized>(
     if let Some(Value::Object(edc_val)) = fc.get("EntityDeathCondition")
         && let Some(Value::Array(eids_val)) = edc_val.get("EntityIds")
     {
-        let aq_opt = ctx.quest_comp.info.find_active_quest(quest_id);
         for v in eids_val {
             let Some(eid) = json_int(Some(v)) else {
                 continue;
@@ -1734,7 +2051,20 @@ fn eval_quest_failed_condition<S: PushSink + ?Sized>(
             if eid <= 0 {
                 continue;
             }
-            if aq_opt.is_some_and(|aq| aq.has_killed_entity(eid)) {
+            if bt_type == BtType::BtTypeLevelPlay {
+                if ctx
+                    .scene
+                    .as_deref()
+                    .is_some_and(|s| s.has_lp_killed_entity(quest_id, eid))
+                {
+                    return Ok(Some(FailReason::EntityDieFail));
+                }
+            } else if ctx
+                .quest_comp
+                .info
+                .find_active_quest(quest_id)
+                .is_some_and(|aq| aq.has_killed_entity(eid))
+            {
                 return Ok(Some(FailReason::EntityDieFail));
             }
             if let Some(hp_pct) = entity_hp_percent(ctx, eid)
@@ -1818,7 +2148,7 @@ fn eval_quest_failed_condition<S: PushSink + ?Sized>(
         let motion = json_str(pm_val.get("MotionState")).unwrap_or("");
         let cmp = json_str(pm_val.get("Compare")).unwrap_or("Eq");
         if let Some(matched) = condition::eval_player_motion_state(
-            &ctx.make_eval_context_for_quest(quest_id),
+            &ctx.make_eval_context_for_bt(bt_type, quest_id),
             motion,
         ) {
             let fail = if cmp == "Ne" || cmp == "NotEq" {
@@ -1940,8 +2270,8 @@ fn resolve_scene_or_asset_entity_pos_3d<S: PushSink + ?Sized>(
 fn extend_fail_timers_on_kill_in_queue(
     timers: &mut QuestTimerQueue,
     store: &sonoro_gamesv_data::lazy_node_store::LazyNodeStore,
-) -> bool {
-    let mut extended = false;
+) -> Vec<(i32, i32, String, i64)> {
+    let mut extended = Vec::new();
     let items: Vec<QuestTimerEntry> = timers.entries().to_vec();
     for entry in items {
         let Ok(nodes) = store.get_owner_nodes(entry.quest_id) else {
@@ -1963,12 +2293,18 @@ fn extend_fail_timers_on_kill_in_queue(
             continue;
         }
         let add_ms = (f64::from(add_secs) * 1000.0).round() as i64;
+        let new_due_ms = entry.due_ms + add_ms;
         timers.upsert(QuestTimerEntry {
             quest_id: entry.quest_id,
             node_id: entry.node_id,
-            due_ms: entry.due_ms + add_ms,
+            due_ms: new_due_ms,
         });
-        extended = true;
+        extended.push((
+            entry.quest_id,
+            entry.node_id,
+            quest_failed_timer_type(&node.data).to_string(),
+            new_due_ms,
+        ));
     }
     extended
 }
@@ -1976,15 +2312,31 @@ fn extend_fail_timers_on_kill_in_queue(
 pub fn extend_fail_timers_on_kill<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
 ) -> bool {
-    let Some(scene) = ctx.scene.as_deref_mut() else {
-        return false;
+    let (ext_q, ext_lp) = {
+        let Some(scene) = ctx.scene.as_deref_mut() else {
+            return false;
+        };
+        (
+            extend_fail_timers_on_kill_in_queue(&mut scene.fail_timers, &ctx.assets.quest_nodes),
+            extend_fail_timers_on_kill_in_queue(
+                &mut scene.lp_fail_timers,
+                &ctx.assets.level_play_nodes,
+            ),
+        )
     };
-    let a = extend_fail_timers_on_kill_in_queue(&mut scene.fail_timers, &ctx.assets.quest_nodes);
-    let b = extend_fail_timers_on_kill_in_queue(
-        &mut scene.lp_fail_timers,
-        &ctx.assets.level_play_nodes,
-    );
-    a || b
+    push_extended_fail_timers(ctx.sink, BtType::BtTypeQuest, &ext_q);
+    push_extended_fail_timers(ctx.sink, BtType::BtTypeLevelPlay, &ext_lp);
+    !ext_q.is_empty() || !ext_lp.is_empty()
+}
+
+fn push_extended_fail_timers<S: PushSink + ?Sized>(
+    sink: &mut S,
+    bt_type: BtType,
+    entries: &[(i32, i32, String, i64)],
+) {
+    for (owner_id, node_id, timer_type, due_ms) in entries {
+        push_bt_timer_info(sink, bt_type, *owner_id, *node_id, timer_type, *due_ms);
+    }
 }
 
 fn extend_fail_timers_on_entity_state_in_queue(
@@ -1992,8 +2344,8 @@ fn extend_fail_timers_on_entity_state_in_queue(
     store: &sonoro_gamesv_data::lazy_node_store::LazyNodeStore,
     entity_config_id: i32,
     state_name: &str,
-) -> bool {
-    let mut extended = false;
+) -> Vec<(i32, i32, String, i64)> {
+    let mut extended = Vec::new();
     let items: Vec<QuestTimerEntry> = timers.entries().to_vec();
     for entry in items {
         let Ok(nodes) = store.get_owner_nodes(entry.quest_id) else {
@@ -2027,12 +2379,18 @@ fn extend_fail_timers_on_entity_state_in_queue(
             continue;
         }
         let add_ms = (f64::from(add_secs) * 1000.0).round() as i64;
+        let new_due_ms = entry.due_ms + add_ms;
         timers.upsert(QuestTimerEntry {
             quest_id: entry.quest_id,
             node_id: entry.node_id,
-            due_ms: entry.due_ms + add_ms,
+            due_ms: new_due_ms,
         });
-        extended = true;
+        extended.push((
+            entry.quest_id,
+            entry.node_id,
+            quest_failed_timer_type(&node.data).to_string(),
+            new_due_ms,
+        ));
     }
     extended
 }
@@ -2042,22 +2400,76 @@ pub fn extend_fail_timers_on_entity_state<S: PushSink + ?Sized>(
     entity_config_id: i32,
     state_name: &str,
 ) -> bool {
-    let Some(scene) = ctx.scene.as_deref_mut() else {
-        return false;
+    let (ext_q, ext_lp) = {
+        let Some(scene) = ctx.scene.as_deref_mut() else {
+            return false;
+        };
+        (
+            extend_fail_timers_on_entity_state_in_queue(
+                &mut scene.fail_timers,
+                &ctx.assets.quest_nodes,
+                entity_config_id,
+                state_name,
+            ),
+            extend_fail_timers_on_entity_state_in_queue(
+                &mut scene.lp_fail_timers,
+                &ctx.assets.level_play_nodes,
+                entity_config_id,
+                state_name,
+            ),
+        )
     };
-    let a = extend_fail_timers_on_entity_state_in_queue(
-        &mut scene.fail_timers,
-        &ctx.assets.quest_nodes,
-        entity_config_id,
-        state_name,
-    );
-    let b = extend_fail_timers_on_entity_state_in_queue(
-        &mut scene.lp_fail_timers,
-        &ctx.assets.level_play_nodes,
-        entity_config_id,
-        state_name,
-    );
-    a || b
+    push_extended_fail_timers(ctx.sink, BtType::BtTypeQuest, &ext_q);
+    push_extended_fail_timers(ctx.sink, BtType::BtTypeLevelPlay, &ext_lp);
+    !ext_q.is_empty() || !ext_lp.is_empty()
+}
+
+fn evaluate_quest_failed_node<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    quest_id: i32,
+    node: &NodeEntry,
+    pos_opt: Option<[f32; 3]>,
+    push_updates: bool,
+) -> io::Result<Option<FailReason>> {
+    let had_fail_timer = ctx
+        .scene
+        .as_deref()
+        .is_some_and(|s| s.fail_timers.contains(quest_id, node.id));
+    let fail_reason = {
+        let mut fail_timers =
+            std::mem::take(&mut ctx.scene.as_deref_mut().expect("scene").fail_timers);
+        let res = eval_quest_failed_condition(
+            ctx,
+            BtType::BtTypeQuest,
+            quest_id,
+            node,
+            pos_opt,
+            &mut fail_timers,
+        );
+        if let Some(scene) = ctx.scene.as_deref_mut() {
+            scene.fail_timers = fail_timers;
+        }
+        res?
+    };
+    if fail_reason.is_none()
+        && !had_fail_timer
+        && push_updates
+        && let Some(due_ms) = ctx
+            .scene
+            .as_deref()
+            .and_then(|s| s.fail_timers.get_due_ms(quest_id, node.id))
+    {
+        push_bt_node_activate(ctx.sink, BtType::BtTypeQuest, quest_id, node.id);
+        push_bt_timer_info(
+            ctx.sink,
+            BtType::BtTypeQuest,
+            quest_id,
+            node.id,
+            quest_failed_timer_type(&node.data),
+            due_ms,
+        );
+    }
+    Ok(fail_reason)
 }
 
 fn step_quest_failed_node<S: PushSink + ?Sized>(
@@ -2069,14 +2481,7 @@ fn step_quest_failed_node<S: PushSink + ?Sized>(
     if ctx.scene.is_none() {
         return Ok(StepResult::Running);
     }
-    let fail_reason = {
-        let mut fail_timers = std::mem::take(&mut ctx.scene.as_deref_mut().expect("scene").fail_timers);
-        let res = eval_quest_failed_condition(ctx, quest_id, node, None, &mut fail_timers);
-        if let Some(scene) = ctx.scene.as_deref_mut() {
-            scene.fail_timers = fail_timers;
-        }
-        res?
-    };
+    let fail_reason = evaluate_quest_failed_node(ctx, quest_id, node, None, push_updates)?;
     if let Some(reason) = fail_reason {
         rollback_quest_to_node(ctx, quest_id, node.id, reason, !push_updates)?;
         return Ok(if ctx.quest_comp.info.has_active_quest(quest_id) {
@@ -2086,6 +2491,30 @@ fn step_quest_failed_node<S: PushSink + ?Sized>(
         });
     }
     Ok(StepResult::Running)
+}
+
+pub fn active_monitor_nodes_for_quest<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    quest_id: i32,
+    aq: &ActiveQuest,
+) -> Vec<i32> {
+    let mut out = aq.active_nodes.clone();
+    if let Some(scene) = ctx.scene.as_deref() {
+        for nid in scene.paused_action_node_ids_for_bt(BtType::BtTypeQuest, quest_id) {
+            if !out.contains(&nid) {
+                out.push(nid);
+            }
+        }
+        if scene.active_flow_inc_id != 0
+            && scene.active_flow_bt_type == BtType::BtTypeQuest
+            && scene.active_flow_quest_id == quest_id
+            && scene.active_flow_node_id > 0
+            && !out.contains(&scene.active_flow_node_id)
+        {
+            out.push(scene.active_flow_node_id);
+        }
+    }
+    out
 }
 
 pub fn is_subtree_active_for_monitor(
@@ -2127,6 +2556,7 @@ pub fn check_active_quest_failed_monitors<S: PushSink + ?Sized>(
         let Ok(nodes) = ctx.assets.quest_nodes.get_owner_nodes(aq.quest_id) else {
             continue;
         };
+        let monitor_nodes = active_monitor_nodes_for_quest(ctx, aq.quest_id, &aq);
         for node in nodes.iter() {
             if node.node_type != "QuestFailed" {
                 continue;
@@ -2134,19 +2564,10 @@ pub fn check_active_quest_failed_monitors<S: PushSink + ?Sized>(
             if aq.is_node_finished(node.id) {
                 continue;
             }
-            if !is_subtree_active_for_monitor(&nodes, &aq.active_nodes, node.parent_id) {
+            if !is_subtree_active_for_monitor(&nodes, &monitor_nodes, node.parent_id) {
                 continue;
             }
-            let fail_reason = {
-                let mut fail_timers =
-                    std::mem::take(&mut ctx.scene.as_deref_mut().expect("scene").fail_timers);
-                let res =
-                    eval_quest_failed_condition(ctx, aq.quest_id, node, pos_opt, &mut fail_timers);
-                if let Some(scene) = ctx.scene.as_deref_mut() {
-                    scene.fail_timers = fail_timers;
-                }
-                res?
-            };
+            let fail_reason = evaluate_quest_failed_node(ctx, aq.quest_id, node, pos_opt, true)?;
             if let Some(reason) = fail_reason {
                 rollback_quest_to_node(ctx, aq.quest_id, node.id, reason, false)?;
                 changed = true;
@@ -2164,6 +2585,9 @@ pub fn rollback_quest_to_node<S: PushSink + ?Sized>(
     reason: FailReason,
     client_initiated: bool,
 ) -> io::Result<()> {
+    let Some(_rollback_guard) = QuestRollbackGuard::try_enter(quest_id) else {
+        return Ok(());
+    };
     if !ctx.quest_comp.info.has_active_quest(quest_id) {
         return Ok(());
     }
@@ -2177,10 +2601,12 @@ pub fn rollback_quest_to_node<S: PushSink + ?Sized>(
     if let Some(scene) = ctx.scene.as_deref_mut() {
         scene.quest_timers.cancel_quest(quest_id);
         scene.fail_timers.cancel_quest(quest_id);
-        scene.release_occupations_for_tree(quest_id, i64::from(quest_id));
-        scene.clear_save_nodes_for_owner(quest_id);
-        scene.clear_action_node_progress_for_owner(quest_id);
-        scene.clear_deferred_actions_for_owner(quest_id);
+        scene.release_occupations_for_tree_bt(BtType::BtTypeQuest, quest_id, i64::from(quest_id));
+        scene.clear_save_nodes_for_bt(BtType::BtTypeQuest, quest_id);
+        scene.clear_action_node_progress_for_bt(BtType::BtTypeQuest, quest_id);
+        scene.clear_deferred_actions_for_bt(BtType::BtTypeQuest, quest_id);
+        scene.remove_bt_timers_for_bt(BtType::BtTypeQuest, quest_id);
+        scene.clear_repeater_state_for_bt(BtType::BtTypeQuest, quest_id);
         if !client_initiated && reason != FailReason::GiveUpFail {
             scene.last_server_rollback_quest_id = quest_id;
             scene.last_server_rollback_ms = now_millis();
@@ -2249,21 +2675,43 @@ pub fn rollback_quest_to_node<S: PushSink + ?Sized>(
         run_node_finish_effects(ctx, quest_id, fn_entry)?;
     }
 
-    let (latest_ckpt_id, active_copy) = {
+    let seq_of = |nid: i32| -> Option<usize> { nodes.iter().position(|n| n.id == nid) };
+    let fail_seq = if fail_node_id > 0 {
+        seq_of(fail_node_id)
+    } else {
+        None
+    };
+
+    let (latest_ckpt_id, latest_ckpt_seq, active_copy) = {
         let Some(aq) = ctx.quest_comp.info.find_active_quest(quest_id) else {
             return Ok(());
         };
-        let mut latest_ckpt = 0;
+        let mut best_id = 0;
+        let mut best_seq = None;
         for &fid in aq.finished_nodes.iter().chain(aq.active_nodes.iter()) {
-            if (fail_node_id <= 0 || fid <= fail_node_id)
-                && let Some(fnode) = find_node_by_id(&nodes, fid)
-                && fnode.data.get("SaveConfig").is_some()
-                && fid > latest_ckpt
+            let Some(fseq) = seq_of(fid) else {
+                continue;
+            };
+            let candidate_id = if find_node_by_id(&nodes, fid)
+                .is_some_and(|n| n.data.get("SaveConfig").is_some_and(|v| !v.is_null()))
             {
-                latest_ckpt = fid;
+                Some(fid)
+            } else {
+                crate::helpers::save_block::find_enclosing_save_node(&nodes, fid)
+            };
+            let Some(cid) = candidate_id else {
+                continue;
+            };
+            let Some(cseq) = seq_of(cid) else {
+                continue;
+            };
+            let within_fail = fail_seq.is_none_or(|fs| fseq <= fs && cseq <= fs);
+            if within_fail && best_seq.is_none_or(|bs| cseq > bs) {
+                best_id = cid;
+                best_seq = Some(cseq);
             }
         }
-        (latest_ckpt, aq.active_nodes.clone())
+        (best_id, best_seq, aq.active_nodes.clone())
     };
 
     for aid in active_copy {
@@ -2273,10 +2721,45 @@ pub fn rollback_quest_to_node<S: PushSink + ?Sized>(
         }
     }
 
+    let reset_ids: Vec<i32> = ctx
+        .quest_comp
+        .info
+        .find_active_quest(quest_id)
+        .map(|aq| {
+            aq.finished_nodes
+                .iter()
+                .copied()
+                .filter(|&fid| match (latest_ckpt_id, latest_ckpt_seq) {
+                    (cid, Some(cseq)) if cid > 0 => {
+                        crate::helpers::save_block::is_in_block(&nodes, fid, cid)
+                            || seq_of(fid).is_none_or(|fs| fs >= cseq)
+                    }
+                    _ => true,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for &rid in &reset_ids {
+        remove_do_interact_options_for_node(ctx, quest_id, rid);
+        ctx.quest_comp
+            .info
+            .forget_child_quest_finished(quest_id, rid);
+        if let Some(rnode) = find_node_by_id(&nodes, rid)
+            && let Some(progress) = ctx.progress_comp.as_deref_mut()
+        {
+            for tid in super::extract_node_target_entity_ids(rnode) {
+                progress
+                    .info
+                    .remove_claim(&format!("interact_done:{quest_id}:{rid}:{tid}"));
+            }
+        }
+    }
+
     if let Some(aq_ptr) = ctx.quest_comp.info.find_active_quest_mut(quest_id) {
         aq_ptr.killed_entities.clear();
         if latest_ckpt_id > 0 {
-            aq_ptr.finished_nodes.retain(|&fid| fid < latest_ckpt_id);
+            aq_ptr.finished_nodes.retain(|fid| !reset_ids.contains(fid));
         } else {
             aq_ptr.finished_nodes.clear();
         }
@@ -2318,9 +2801,12 @@ pub fn succeed_quest<S: PushSink + ?Sized>(
     if let Some(scene) = ctx.scene.as_deref_mut() {
         scene.quest_timers.cancel_quest(quest_id);
         scene.fail_timers.cancel_quest(quest_id);
-        scene.release_occupations_for_tree(quest_id, i64::from(quest_id));
-        scene.clear_save_nodes_for_owner(quest_id);
-        scene.clear_action_node_progress_for_owner(quest_id);
+        scene.release_occupations_for_tree_bt(BtType::BtTypeQuest, quest_id, i64::from(quest_id));
+        scene.clear_save_nodes_for_bt(BtType::BtTypeQuest, quest_id);
+        scene.clear_action_node_progress_for_bt(BtType::BtTypeQuest, quest_id);
+        scene.clear_deferred_actions_for_bt(BtType::BtTypeQuest, quest_id);
+        scene.remove_bt_timers_for_bt(BtType::BtTypeQuest, quest_id);
+        scene.clear_repeater_state_for_bt(BtType::BtTypeQuest, quest_id);
     }
 
     let quest_opt = ctx.assets.tables.quest_data.get_data_by_id(&quest_id);
@@ -2367,26 +2853,121 @@ pub fn succeed_quest<S: PushSink + ?Sized>(
     Ok(())
 }
 
+fn is_node_or_subtree_active(
+    aq: &ActiveQuest,
+    nodes: &[NodeEntry],
+    root_id: i32,
+) -> bool {
+    if aq.is_node_active(root_id) || aq.is_node_finished(root_id) {
+        return true;
+    }
+    nodes
+        .iter()
+        .any(|n| n.parent_id == root_id && is_node_or_subtree_active(aq, nodes, n.id))
+}
+
+fn deactivate_other_selector_slots<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    quest_id: i32,
+    nodes: &[NodeEntry],
+    slots: &[Value],
+    keep_cid: Option<i32>,
+    push_updates: bool,
+) -> io::Result<()> {
+    let mut to_deactivate = Vec::new();
+    if let Some(aq) = ctx.quest_comp.info.find_active_quest(quest_id) {
+        for slot in slots {
+            let Some(cid) = slot
+                .as_object()
+                .and_then(|s| s.get("Node"))
+                .and_then(|n| n.as_object())
+                .and_then(|n| json_int(n.get("Id")))
+            else {
+                continue;
+            };
+            if Some(cid) != keep_cid && is_node_or_subtree_active(aq, nodes, cid) {
+                to_deactivate.push(cid);
+            }
+        }
+    }
+    for cid in to_deactivate {
+        deactivate_subtree(ctx, quest_id, nodes, cid, push_updates)?;
+        if let Some(scene) = ctx.scene.as_deref_mut() {
+            scene.quest_timers.cancel(quest_id, cid);
+            scene.fail_timers.cancel(quest_id, cid);
+            scene.release_occupations_for_node_bt(BtType::BtTypeQuest, quest_id, cid);
+            scene.remove_action_node_next_idx(BtType::BtTypeQuest, quest_id, cid);
+        }
+        remove_do_interact_options_for_node(ctx, quest_id, cid);
+        let was_active = ctx
+            .quest_comp
+            .info
+            .find_active_quest_mut(quest_id)
+            .is_some_and(|aq| aq.mark_node_inactive(cid));
+        if push_updates && was_active {
+            push_node_status(
+                ctx,
+                quest_id,
+                cid,
+                NodeStatus::Destroy,
+                ChildQuestNodeStatus::NotActive,
+            )?;
+        }
+        if let Some(aq_ptr) = ctx.quest_comp.info.find_active_quest_mut(quest_id) {
+            remove_int_value(&mut aq_ptr.finished_nodes, cid);
+        }
+        reset_quest_subtree_finished_nodes(ctx, quest_id, nodes, cid);
+    }
+    Ok(())
+}
+
 fn reset_quest_subtree_finished_nodes<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     quest_id: i32,
     nodes: &[NodeEntry],
     parent_id: i32,
 ) {
-    let Some(aq_ptr) = ctx.quest_comp.info.find_active_quest_mut(quest_id) else {
-        return;
-    };
-    reset_subtree_recursive(aq_ptr, nodes, parent_id);
+    let mut reset_nodes = Vec::new();
+    if let Some(aq_ptr) = ctx.quest_comp.info.find_active_quest_mut(quest_id) {
+        reset_subtree_recursive(aq_ptr, nodes, parent_id, &mut reset_nodes);
+    }
+    for nid in reset_nodes {
+        if let Some(scene) = ctx.scene.as_deref_mut() {
+            scene.quest_timers.cancel(quest_id, nid);
+            scene.fail_timers.cancel(quest_id, nid);
+            scene.release_occupations_for_node_bt(BtType::BtTypeQuest, quest_id, nid);
+            scene.remove_action_node_next_idx(BtType::BtTypeQuest, quest_id, nid);
+        }
+        remove_do_interact_options_for_node(ctx, quest_id, nid);
+        ctx.quest_comp
+            .info
+            .forget_child_quest_finished(quest_id, nid);
+        if let Some(node) = find_node_by_id(nodes, nid)
+            && let Some(progress) = ctx.progress_comp.as_deref_mut()
+        {
+            for tid in super::extract_node_target_entity_ids(node) {
+                progress
+                    .info
+                    .remove_claim(&format!("interact_done:{quest_id}:{nid}:{tid}"));
+            }
+        }
+    }
 }
 
-fn reset_subtree_recursive(aq_ptr: &mut ActiveQuest, nodes: &[NodeEntry], parent_id: i32) {
+fn reset_subtree_recursive(
+    aq_ptr: &mut ActiveQuest,
+    nodes: &[NodeEntry],
+    parent_id: i32,
+    out_ids: &mut Vec<i32>,
+) {
     for n in nodes {
         if n.parent_id != parent_id {
             continue;
         }
+        out_ids.push(n.id);
         remove_int_value(&mut aq_ptr.finished_nodes, n.id);
         aq_ptr.mark_node_inactive(n.id);
-        reset_subtree_recursive(aq_ptr, nodes, n.id);
+        reset_subtree_recursive(aq_ptr, nodes, n.id, out_ids);
     }
 }
 
@@ -2407,7 +2988,8 @@ pub fn deactivate_subtree<S: PushSink + ?Sized>(
         if let Some(scene) = ctx.scene.as_deref_mut() {
             scene.quest_timers.cancel(quest_id, n.id);
             scene.fail_timers.cancel(quest_id, n.id);
-            scene.release_occupations_for_node(quest_id, n.id);
+            scene.release_occupations_for_node_bt(BtType::BtTypeQuest, quest_id, n.id);
+            scene.remove_action_node_next_idx(BtType::BtTypeQuest, quest_id, n.id);
         }
         remove_do_interact_options_for_node(ctx, quest_id, n.id);
         let was_active = ctx

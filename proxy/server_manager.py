@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import random
+import re
 import select
 import socket
 import ssl
@@ -78,23 +79,124 @@ GATEWAY_PORT = 13100
 
 _PAYLOAD_CACHE: dict[str, bytes] = {}
 _PAYLOAD_LOCK = threading.Lock()
-_ACCOUNT_SEX_CACHE: dict[str, int] = {"597938510": 1}
-_ACCOUNT_CACHE_LOCK = threading.Lock()
+_UDP_HDR_LOCK = threading.Lock()
+UDP_IDLE_TIMEOUT_SECS = 330
+_UPSTREAM_HOST_SUFFIXES = (".aki-game.net", ".aki-game.com", ".kurogame.com", ".kurogames.net")
+
 # Direct internal HTTP client that ignores Windows/Linux HTTP_PROXY env vars
 # so local forwarding never routes back through :8080.
 _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def _sync_loginsv_async(target_url: str, user_id: str) -> None:
+class _BlockedTargetError(Exception):
+    """Raised when an HTTP proxy or tunnel target resolves to a forbidden address."""
+
+
+def _is_upstream_kuro_host(host: str) -> bool:
+    h = host.strip().lower().rstrip(".")
+    if not h:
+        return False
+    if "aki-config" in h or "aki-gm-resources" in h:
+        return True
+    return any(h == suffix.lstrip(".") or h.endswith(suffix) for suffix in _UPSTREAM_HOST_SUFFIXES)
+
+
+def _unwrap_ip(ip_str: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    ip = ipaddress.ip_address(ip_str.split("%", 1)[0])
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
+
+
+def _is_ip_allowed(host: str, port: int, ip_str: str, proto: str) -> bool:
+    if proto == "udp" and port == GATEWAY_PORT:
+        return True
     try:
-        with _NO_PROXY_OPENER.open(target_url, timeout=2) as sv_resp:
-            sv_data = json.loads(sv_resp.read().decode("utf-8"))
-            sex = sv_data.get("sex", -1)
-            if sex is not None and sex >= 0:
-                with _ACCOUNT_CACHE_LOCK:
-                    _ACCOUNT_SEX_CACHE[user_id] = sex
-    except Exception:
-        pass
+        ip = _unwrap_ip(ip_str)
+    except ValueError:
+        return False
+
+    if ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved:
+        return False
+
+    if ip.is_private:
+        if OVERRIDE_HOST and host.strip("[]").lower() == OVERRIDE_HOST.strip("[]").lower():
+            return port in (LOGIN_PORT, GATEWAY_PORT)
+        return False
+
+    return True
+
+
+def _resolve_safe_targets(host: str, port: int, *, proto: str) -> list[tuple]:
+    clean_host = host.strip().strip("[]")
+    if not clean_host or port <= 0 or port > 65535:
+        raise _BlockedTargetError("invalid host or port")
+
+    if proto == "udp" and port == GATEWAY_PORT:
+        return [(socket.AF_INET, socket.SOCK_DGRAM, 0, "", ("127.0.0.1", GATEWAY_PORT))]
+
+    socktype = socket.SOCK_STREAM if proto == "tcp" else socket.SOCK_DGRAM
+    try:
+        infos = socket.getaddrinfo(clean_host, port, type=socktype)
+    except OSError as exc:
+        raise _BlockedTargetError(f"resolution failed: {exc}") from exc
+
+    if not infos:
+        raise _BlockedTargetError("no resolved addresses")
+
+    for info in infos:
+        sockaddr = info[4]
+        ip_str = sockaddr[0]
+        if not _is_ip_allowed(clean_host, port, ip_str, proto):
+            raise _BlockedTargetError(f"blocked target address: {ip_str}:{port}")
+
+    return infos
+
+
+def _connect_safe_tcp(host: str, port: int, timeout: float = 10.0) -> socket.socket:
+    infos = _resolve_safe_targets(host, port, proto="tcp")
+    last_err: Exception | None = None
+    for family, socktype, proto, _, sockaddr in infos:
+        sock = None
+        try:
+            sock = socket.socket(family, socktype, proto)
+            sock.settimeout(timeout)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as exc:
+            last_err = exc
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+    raise last_err or OSError("failed to connect")
+
+
+def _validate_http_proxy_url(url: str) -> None:
+    parsed = urlparse(url)
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise _BlockedTargetError("invalid port") from exc
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise _BlockedTargetError("unsupported URL scheme or missing host")
+    _resolve_safe_targets(parsed.hostname, port, proto="tcp")
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        try:
+            _validate_http_proxy_url(newurl)
+        except _BlockedTargetError as exc:
+            raise urllib.error.HTTPError(newurl, 403, f"Forbidden redirect: {exc}", headers, None) from exc
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SAFE_PROXY_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _SafeRedirectHandler(),
+)
 
 
 def get_encrypted_payload(target_host: str) -> bytes:
@@ -120,21 +222,60 @@ def get_encrypted_payload(target_host: str) -> bytes:
         return encoded
 
 
-def resolve_target_host(handler: BaseHTTPRequestHandler) -> str:
+def _detect_outbound_ip() -> str:
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        if ip and ip not in ("0.0.0.0", "127.0.0.1"):
+            return ip
+    except Exception:
+        pass
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+    return "127.0.0.1"
+
+
+def _extract_host_header(headers) -> str:
+    if not headers:
+        return ""
+    raw_h = headers.get("Host", "").strip()
+    if not raw_h:
+        return ""
+    try:
+        parsed_h = urlparse(f"//{raw_h}").hostname or ""
+    except Exception:
+        parsed_h = raw_h.split(":")[0].strip()
+    return parsed_h.strip("[]")
+
+
+def _resolve_socket_target_host(sock: socket.socket, headers=None) -> str:
     if OVERRIDE_HOST:
         return OVERRIDE_HOST
-    if hasattr(handler, "headers") and handler.headers:
-        raw_h = handler.headers.get("Host", "")
-        if raw_h:
-            req_host = raw_h.split(":")[0].strip()
-            if req_host and req_host not in ("", "0.0.0.0", "::", "::1", "localhost"):
-                return req_host
-    host = handler.connection.getsockname()[0]
+    req_host = _extract_host_header(headers)
+    if (
+        req_host
+        and req_host not in ("", "0.0.0.0", "::", "::1", "localhost")
+        and not _is_upstream_kuro_host(req_host)
+    ):
+        return req_host
+    host = sock.getsockname()[0]
     if host.startswith("::ffff:"):
         host = host[7:]
-    if host in ("", "0.0.0.0", "::", "::1", "127.0.0.1"):
-        return "43.167.31.150"
+    if host in ("", "0.0.0.0", "::"):
+        return _detect_outbound_ip()
+    if host == "::1":
+        return "127.0.0.1"
     return host
+
+
+def resolve_target_host(handler: BaseHTTPRequestHandler) -> str:
+    return _resolve_socket_target_host(handler.connection, getattr(handler, "headers", None))
 
 
 def _ensure_tls_cert() -> None:
@@ -319,7 +460,7 @@ class LoginHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-GM-Sign, X-GM-Admin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -349,33 +490,42 @@ class LoginHandler(BaseHTTPRequestHandler):
             self._send_bytes(200, "application/json", payload)
         elif parsed.path.startswith("/api/getResourcePackageInfo"):
             qs = parse_qs(parsed.query)
-            uid = qs.get("userId", [""])[0]
-            if not uid:
+            raw_uid = qs.get("userId", [""])[0].strip()
+            if raw_uid:
+                if not (raw_uid.isascii() and raw_uid.isdigit()):
+                    self._send_bytes(400, "application/json", b'{"code":-1,"msg":"invalid userId"}')
+                    return
+                uid = raw_uid
+            else:
                 uid = str(random.randint(10000000, 99999999))
             sex = 0
             finished_quests = []
             need_confirm_quests = []
             state_root = os.environ.get("GAMESV_STATE_DIR", "/root/wuwa-server/state")
-            pdir = os.path.join(state_root, "player", uid)
+            players_root = os.path.realpath(os.path.join(state_root, "player"))
+            pdir = os.path.realpath(os.path.join(players_root, uid))
+            if not pdir.startswith(players_root + os.sep):
+                self._send_bytes(400, "application/json", b'{"code":-1,"msg":"invalid userId"}')
+                return
             try:
                 basic_p = os.path.join(pdir, "basic_info")
                 if os.path.exists(basic_p):
-                    import re as _re
-                    m_sex = _re.search(r"\.sex\s*=\s*(\d+)", open(basic_p, "r", encoding="utf-8").read())
+                    with open(basic_p, "r", encoding="utf-8") as f:
+                        m_sex = re.search(r"\.sex\s*=\s*(\d+)", f.read())
                     if m_sex:
                         sex = int(m_sex.group(1))
                 quest_p = os.path.join(pdir, "quest_info")
                 if os.path.exists(quest_p):
-                    import re as _re
-                    qtxt = open(quest_p, "r", encoding="utf-8").read()
-                    mf = _re.search(r"\.finished_quests\s*=\s*\.\{(.*?)\}", qtxt, _re.S)
+                    with open(quest_p, "r", encoding="utf-8") as f:
+                        qtxt = f.read()
+                    mf = re.search(r"\.finished_quests\s*=\s*\.\{(.*?)\}", qtxt, re.S)
                     if mf:
                         finished_quests = [int(x.strip()) for x in mf.group(1).split(",") if x.strip().isdigit()]
                 prog_p = os.path.join(pdir, "progress_info")
                 if os.path.exists(prog_p):
-                    import re as _re
-                    ptxt = open(prog_p, "r", encoding="utf-8").read()
-                    mm = _re.search(r'\.key\s*=\s*"quest:missing_res",\s*\.val\s*=\s*"([^"]*)"', ptxt, _re.S)
+                    with open(prog_p, "r", encoding="utf-8") as f:
+                        ptxt = f.read()
+                    mm = re.search(r'\.key\s*=\s*"quest:missing_res",\s*\.val\s*=\s*"([^"]*)"', ptxt, re.S)
                     if mm and mm.group(1):
                         need_confirm_quests = [int(x.strip()) for x in mm.group(1).split(",") if x.strip().isdigit()]
             except Exception as exc:
@@ -419,39 +569,56 @@ class LoginHandler(BaseHTTPRequestHandler):
                     "userData": user_data,
                 })
                 target_url = f"{LOGINSV_UPSTREAM}/api/login?{query_str}"
-                with _ACCOUNT_CACHE_LOCK:
-                    cached_sex = _ACCOUNT_SEX_CACHE.get(user_id)
-                account_sex = cached_sex if cached_sex is not None else -1
-                sv_code = 0
-                sv_extra: dict = {}
-                if cached_sex is not None:
-                    threading.Thread(
-                        target=_sync_loginsv_async,
-                        args=(target_url, user_id),
-                        daemon=True,
-                    ).start()
-                else:
-                    print(f"login:{LOGIN_PORT} sync loginsv: {target_url}")
+                print(f"login:{LOGIN_PORT} sync loginsv: {target_url}")
+                try:
+                    with _NO_PROXY_OPENER.open(target_url, timeout=5) as sv_resp:
+                        sv_status = sv_resp.status
+                        sv_data = json.loads(sv_resp.read().decode("utf-8"))
+                except urllib.error.HTTPError as ex:
+                    err_body = ex.read()
+                    print(f"login:{LOGIN_PORT} loginsv HTTP {ex.code}: {err_body[:200]!r}")
                     try:
-                        with _NO_PROXY_OPENER.open(target_url, timeout=1.5) as sv_resp:
-                            sv_data = json.loads(sv_resp.read().decode("utf-8"))
-                            sv_code = sv_data.get("code", 0)
-                            account_sex = sv_data.get("sex", -1)
-                            if account_sex is None:
-                                account_sex = -1
-                            if account_sex >= 0:
-                                with _ACCOUNT_CACHE_LOCK:
-                                    _ACCOUNT_SEX_CACHE[user_id] = account_sex
-                            if sv_code != 0:
-                                for k in ("errMessage", "banTimeStamp"):
-                                    if sv_data.get(k) is not None:
-                                        sv_extra[k] = sv_data[k]
-                    except Exception as ex:
-                        print(f"login:{LOGIN_PORT} loginsv error: {ex}")
+                        err_json = json.loads(err_body.decode("utf-8"))
+                        if "code" not in err_json:
+                            err_json["code"] = -1
+                        self._send_bytes(ex.code, "application/json", json.dumps(err_json).encode("utf-8"))
+                    except Exception:
+                        self._send_bytes(
+                            ex.code,
+                            "application/json",
+                            json.dumps({"code": -1, "errMessage": f"login service error ({ex.code})"}).encode("utf-8"),
+                        )
+                    return
+                except Exception as ex:
+                    print(f"login:{LOGIN_PORT} loginsv error: {ex}")
+                    self._send_bytes(
+                        502,
+                        "application/json",
+                        json.dumps({"code": -1, "errMessage": "login service unavailable"}).encode("utf-8"),
+                    )
+                    return
+
+                sv_code = sv_data.get("code", -1)
+                if sv_code != 0:
+                    err_payload = {
+                        "code": sv_code,
+                        "hasRpc": sv_data.get("hasRpc", True),
+                        "userData": sv_data.get("userData", user_data),
+                    }
+                    for k in ("errMessage", "banTimeStamp"):
+                        if sv_data.get(k) is not None:
+                            err_payload[k] = sv_data[k]
+                    self._send_bytes(sv_status, "application/json", json.dumps(err_payload).encode("utf-8"))
+                    return
+
+                resolved_token = sv_data.get("token") or token
+                account_sex = sv_data.get("sex", -1)
+                if account_sex is None:
+                    account_sex = -1
 
                 resp_data = {
-                    "code": sv_code,
-                    "token": token,
+                    "code": 0,
+                    "token": resolved_token,
                     "udpHosts": [{"host": target_host, "port": GATEWAY_PORT}],
                     "tcpHosts": [{"host": target_host, "port": GATEWAY_PORT}],
                     "tcpRatio": 0,
@@ -462,7 +629,6 @@ class LoginHandler(BaseHTTPRequestHandler):
                         "count": 1,
                         "timeoutMs": 3000,
                     },
-                    **sv_extra,
                 }
                 body = json.dumps(resp_data).encode("utf-8")
                 print(f"login:{LOGIN_PORT} login uid={user_id} host={target_host}:{GATEWAY_PORT} sex={account_sex}")
@@ -490,21 +656,44 @@ class LoginHandler(BaseHTTPRequestHandler):
                 target_url = f"{LOGINSV_UPSTREAM}{self.path}"
                 content_length = _parse_content_length(self.headers)
                 post_body = self.rfile.read(content_length) if content_length > 0 else None
-                req = urllib.request.Request(target_url, data=post_body, method="POST")
+                req_headers = {}
+                ctype_in = self.headers.get("Content-Type") if self.headers else None
+                if ctype_in:
+                    req_headers["Content-Type"] = ctype_in
+                req = urllib.request.Request(target_url, data=post_body, headers=req_headers, method="POST")
                 with _NO_PROXY_OPENER.open(req, timeout=5) as resp:
                     resp_data = resp.read()
                     data = json.loads(resp_data.decode("utf-8"))
-                    data["udpHosts"] = [{"host": target_host, "port": GATEWAY_PORT}]
-                    data["tcpHosts"] = [{"host": target_host, "port": GATEWAY_PORT}]
-                    data["tcpRatio"] = 0
-                    if data.get("sex") is None:
-                        data["sex"] = -1
-                    data["gatewayLatencyConfig"] = {"enabled": False, "count": 1, "timeoutMs": 3000}
+                    if data.get("code", -1) == 0:
+                        data["udpHosts"] = [{"host": target_host, "port": GATEWAY_PORT}]
+                        data["tcpHosts"] = [{"host": target_host, "port": GATEWAY_PORT}]
+                        data["tcpRatio"] = 0
+                        if data.get("sex") is None:
+                            data["sex"] = -1
+                        data["gatewayLatencyConfig"] = {"enabled": False, "count": 1, "timeoutMs": 3000}
                     enriched = json.dumps(data).encode("utf-8")
                     self._send_bytes(resp.status, "application/json", enriched)
+            except urllib.error.HTTPError as e:
+                err_body = e.read()
+                print(f"login:{LOGIN_PORT} post login HTTP {e.code}: {err_body[:200]!r}")
+                try:
+                    err_json = json.loads(err_body.decode("utf-8"))
+                    if "code" not in err_json:
+                        err_json["code"] = -1
+                    self._send_bytes(e.code, "application/json", json.dumps(err_json).encode("utf-8"))
+                except Exception:
+                    self._send_bytes(
+                        e.code,
+                        "application/json",
+                        json.dumps({"code": -1, "errMessage": f"login service error ({e.code})"}).encode("utf-8"),
+                    )
             except Exception as e:
                 print(f"login:{LOGIN_PORT} post login error: {e}")
-                self._send_bytes(200, "application/json", b'{"code": 0}')
+                self._send_bytes(
+                    502,
+                    "application/json",
+                    json.dumps({"code": -1, "errMessage": "login service unavailable"}).encode("utf-8"),
+                )
         else:
             self._send_bytes(200, "application/json", b'{"code": 0, "msg": "success"}')
 
@@ -581,11 +770,12 @@ def serve_aki_config_mitm(client_sock: socket.socket, host: str, target_host: st
 
 
 def serve_aki_notice_mitm(client_sock: socket.socket, host: str, send_http_200: bool) -> None:
-    if send_http_200:
-        try:
+    try:
+        client_sock.settimeout(10)
+        if send_http_200:
             client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        except Exception:
-            return
+    except Exception:
+        return
     try:
         with ssl_ctx.wrap_socket(client_sock, server_side=True) as ssl_conn:
             buf = b""
@@ -667,7 +857,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _forward_http(self):
         parsed = urlparse(self.path)
         target_host = resolve_target_host(self)
-        if "index.json" in parsed.path and "aki-config" in self.path:
+        explicit_host = (parsed.hostname or "").strip("[]").lower()
+        try:
+            explicit_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        except ValueError:
+            self.send_response(400)
+            self.end_headers()
+            return
+        host_for_kuro = explicit_host or _extract_host_header(self.headers).lower()
+        if "index.json" in parsed.path and "aki-config" in host_for_kuro:
             payload = get_encrypted_payload(target_host)
             print(f"proxy:{PROXY_PORT} index.json (host={target_host}) {self.path}")
             self.send_response(200)
@@ -677,7 +875,22 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
 
-        if "aki-gm-resources-back" in self.path or _is_notice_path(parsed.path) or _is_gm_ui_or_api_path(parsed.path):
+        allow_local_notice_or_gm = (
+            not parsed.netloc
+            or _is_upstream_kuro_host(explicit_host)
+            or (
+                explicit_port == LOGIN_PORT
+                and (
+                    explicit_host in ("127.0.0.1", "localhost", "::1")
+                    or (OVERRIDE_HOST and explicit_host == OVERRIDE_HOST.strip("[]").lower())
+                )
+            )
+        )
+        if allow_local_notice_or_gm and (
+            "aki-gm-resources-back" in host_for_kuro
+            or _is_notice_path(parsed.path)
+            or _is_gm_ui_or_api_path(parsed.path)
+        ):
             req_path = parsed.path + (f"?{parsed.query}" if parsed.query else "")
             if _is_gm_ui_or_api_path(parsed.path):
                 cl = _parse_content_length(self.headers)
@@ -696,10 +909,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         url = self.path
         if not url.startswith("http://") and not url.startswith("https://"):
-            host_hdr = self.headers.get("Host", "127.0.0.1")
+            host_hdr = self.headers.get("Host", "").strip()
+            if not host_hdr:
+                self.send_response(400)
+                self.end_headers()
+                return
             url = f"http://{host_hdr}{self.path}"
 
         try:
+            _validate_http_proxy_url(url)
             content_length = _parse_content_length(self.headers)
             body = self.rfile.read(content_length) if content_length > 0 else None
 
@@ -710,7 +928,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             }
             req = urllib.request.Request(url, data=body, headers=headers, method=self.command)
 
-            with _NO_PROXY_OPENER.open(req, timeout=30) as resp:
+            with _SAFE_PROXY_OPENER.open(req, timeout=30) as resp:
                 self.send_response(resp.status)
                 has_cl = False
                 for k, v in resp.getheaders():
@@ -732,6 +950,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         if not chunk:
                             break
                         self.wfile.write(chunk)
+        except _BlockedTargetError:
+            msg = b'{"code":403,"msg":"Forbidden target"}'
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
         except urllib.error.HTTPError as e:
             try:
                 resp_body = e.read()
@@ -746,10 +971,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self.send_response(e.code)
                 self.end_headers()
         except Exception:
-            self.send_response(200)
+            self.send_response(502)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "27")
             self.end_headers()
-            self.wfile.write(b'{"code":0}')
+            self.wfile.write(b'{"code":502,"msg":"error"}')
 
     def do_CONNECT(self):
         try:
@@ -757,26 +983,34 @@ class ProxyHandler(BaseHTTPRequestHandler):
             host = host.strip("[]")
             port = int(port_str)
         except Exception:
-            host = self.path.strip("[]")
-            port = 443
+            self.connection.sendall(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+            return
 
         target_host = resolve_target_host(self)
 
         # TLS MITM only for Kuro config/notice domains; tunnel CDN directly.
-        if "aki-config" in host:
+        if "aki-config" in host and port == 443:
             serve_aki_config_mitm(self.connection, host, target_host, send_http_200=True)
             return
-        if "aki-gm-resources-back" in host:
+        if "aki-gm-resources-back" in host and port == 443:
             serve_aki_notice_mitm(self.connection, host, send_http_200=True)
             return
 
         target = None
         try:
-            target = socket.create_connection((host, port), timeout=10)
+            target = _connect_safe_tcp(host, port, timeout=10)
             self.connection.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             _tunnel_stream(self.connection, target)
+        except _BlockedTargetError:
+            try:
+                self.connection.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except Exception:
+                pass
         except Exception:
-            pass
+            try:
+                self.connection.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except Exception:
+                pass
         finally:
             if target:
                 try:
@@ -822,14 +1056,15 @@ _UDP_HDR_CACHE: dict[tuple[str, int], bytes] = {}
 
 def _encode_socks_udp_header(host: str, port: int) -> bytes:
     key = (host, port)
-    cached = _UDP_HDR_CACHE.get(key)
+    with _UDP_HDR_LOCK:
+        cached = _UDP_HDR_CACHE.get(key)
     if cached is not None:
         return cached
     try:
         hdr = b"\x00\x00\x00\x01" + socket.inet_aton(host) + struct.pack("!H", port)
     except OSError:
         try:
-            ip = ipaddress.ip_address(host)
+            ip = _unwrap_ip(host)
             if ip.version == 4:
                 hdr = b"\x00\x00\x00\x01" + ip.packed + struct.pack("!H", port)
             else:
@@ -837,19 +1072,32 @@ def _encode_socks_udp_header(host: str, port: int) -> bytes:
         except ValueError:
             enc = host.encode("utf-8")[:255]
             hdr = b"\x00\x00\x00\x03" + bytes([len(enc)]) + enc + struct.pack("!H", port)
-    if len(_UDP_HDR_CACHE) < 1024:
-        _UDP_HDR_CACHE[key] = hdr
+    with _UDP_HDR_LOCK:
+        if len(_UDP_HDR_CACHE) < 1024:
+            _UDP_HDR_CACHE[key] = hdr
     return hdr
 
 
 def _socks_reply(rep: int, bind_ip: str, bind_port: int) -> bytes:
     try:
-        ip = ipaddress.ip_address(bind_ip)
+        ip = _unwrap_ip(bind_ip)
         if ip.version == 4:
             return struct.pack("!BBBB", 5, rep, 0, 1) + ip.packed + struct.pack("!H", bind_port)
         return struct.pack("!BBBB", 5, rep, 0, 4) + ip.packed + struct.pack("!H", bind_port)
     except ValueError:
         return struct.pack("!BBBB", 5, rep, 0, 1) + b"\x00\x00\x00\x00" + struct.pack("!H", bind_port)
+
+
+class _UdpSession:
+    __slots__ = ("out_sock", "orig_host", "orig_port", "last_active", "closed", "lock")
+
+    def __init__(self, out_sock: socket.socket, orig_host: str, orig_port: int, now: float):
+        self.out_sock = out_sock
+        self.orig_host = orig_host
+        self.orig_port = orig_port
+        self.last_active = now
+        self.closed = False
+        self.lock = threading.Lock()
 
 
 class Socks5UdpRelay:
@@ -860,7 +1108,7 @@ class Socks5UdpRelay:
         _configure_udp_socket(self.sock)
         self.sock.bind(("0.0.0.0", port))
         self._lock = threading.Lock()
-        self._sessions: dict[tuple[str, int], list] = {}
+        self._sessions: dict[tuple, _UdpSession] = {}
 
     def start(self):
         t = threading.Thread(target=self._run, daemon=True)
@@ -868,64 +1116,95 @@ class Socks5UdpRelay:
         t_clean = threading.Thread(target=self._cleanup_loop, daemon=True)
         t_clean.start()
 
-    def _get_or_create_outbound(self, client_addr: tuple[str, int]) -> socket.socket:
-        now = time.monotonic()
-        entry = self._sessions.get(client_addr)
-        if entry is not None:
-            entry[1] = now
-            return entry[0]
-        with self._lock:
-            entry = self._sessions.get(client_addr)
-            if entry is not None:
-                entry[1] = now
-                return entry[0]
-            out_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            _configure_udp_socket(out_sock)
-            entry = [out_sock, now]
-            self._sessions[client_addr] = entry
-            threading.Thread(
-                target=self._pump_outbound,
-                args=(client_addr, out_sock, entry),
-                daemon=True,
-            ).start()
-            return out_sock
+    def _send_outbound(
+        self,
+        client_addr: tuple,
+        orig_host: str,
+        orig_port: int,
+        family: int,
+        target_addr: tuple,
+        payload: bytes,
+    ) -> None:
+        session_key = (client_addr, orig_host, orig_port, family)
+        for _ in range(2):
+            now = time.monotonic()
+            with self._lock:
+                session = self._sessions.get(session_key)
+                if session is None:
+                    out_sock = socket.socket(family, socket.SOCK_DGRAM)
+                    _configure_udp_socket(out_sock)
+                    out_sock.settimeout(UDP_IDLE_TIMEOUT_SECS)
+                    session = _UdpSession(out_sock, orig_host, orig_port, now)
+                    self._sessions[session_key] = session
+                    threading.Thread(
+                        target=self._pump_outbound,
+                        args=(client_addr, session_key, session),
+                        daemon=True,
+                    ).start()
+                else:
+                    session.last_active = now
+            with session.lock:
+                if session.closed:
+                    continue
+                session.last_active = time.monotonic()
+                session.out_sock.sendto(payload, target_addr)
+                return
 
-    def _pump_outbound(self, client_addr: tuple[str, int], out_sock: socket.socket, entry: list):
-        out_sock.settimeout(180)
+    def _pump_outbound(self, client_addr: tuple, session_key: tuple, session: _UdpSession):
         try:
             while True:
                 try:
-                    data, remote_addr = out_sock.recvfrom(65535)
-                except Exception:
+                    data, remote_addr = session.out_sock.recvfrom(65535)
+                except (TimeoutError, socket.timeout):
+                    with session.lock:
+                        if session.closed or (time.monotonic() - session.last_active) >= UDP_IDLE_TIMEOUT_SECS:
+                            break
+                    continue
+                except OSError:
                     break
+                with session.lock:
+                    if session.closed:
+                        break
+                    session.last_active = time.monotonic()
+                if session.orig_port == GATEWAY_PORT:
+                    reply_host, reply_port = session.orig_host, session.orig_port
+                else:
+                    reply_host = remote_addr[0].split("%", 1)[0]
+                    reply_port = remote_addr[1]
                 try:
-                    header = _encode_socks_udp_header(remote_addr[0], remote_addr[1])
+                    header = _encode_socks_udp_header(reply_host, reply_port)
                     self.sock.sendto(header + data, client_addr)
-                    entry[1] = time.monotonic()
                 except Exception:
                     pass
         finally:
             with self._lock:
-                cur = self._sessions.get(client_addr)
-                if cur is not None and cur[0] is out_sock:
-                    self._sessions.pop(client_addr, None)
-            try:
-                out_sock.close()
-            except Exception:
-                pass
+                if self._sessions.get(session_key) is session:
+                    self._sessions.pop(session_key, None)
+            with session.lock:
+                if not session.closed:
+                    session.closed = True
+                    try:
+                        session.out_sock.close()
+                    except Exception:
+                        pass
 
     def _cleanup_loop(self):
         while True:
             time.sleep(30)
-            cutoff = time.monotonic() - 180
+            cutoff = time.monotonic() - UDP_IDLE_TIMEOUT_SECS
+            stale: list[_UdpSession] = []
             with self._lock:
-                stale = [k for k, entry in self._sessions.items() if entry[1] < cutoff]
-                for k in stale:
-                    entry = self._sessions.pop(k)
-                    try:
-                        entry[0].close()
-                    except Exception:
-                        pass
+                stale_keys = [k for k, entry in self._sessions.items() if entry.last_active < cutoff]
+                for k in stale_keys:
+                    stale.append(self._sessions.pop(k))
+            for entry in stale:
+                with entry.lock:
+                    if not entry.closed:
+                        entry.closed = True
+                        try:
+                            entry.out_sock.close()
+                        except Exception:
+                            pass
 
     def _run(self):
         while True:
@@ -934,11 +1213,14 @@ class Socks5UdpRelay:
                 if len(packet) < 10 or packet[2] != 0:
                     continue
                 dst_host, dst_port, data_off = _parse_socks_addr(packet, 3)
+                orig_host = dst_host.strip("[]")
                 payload = packet[data_off:]
-                if dst_port == GATEWAY_PORT:
-                    dst_host = "127.0.0.1"
-                out_sock = self._get_or_create_outbound(client_addr)
-                out_sock.sendto(payload, (dst_host, dst_port))
+                try:
+                    infos = _resolve_safe_targets(orig_host, dst_port, proto="udp")
+                except _BlockedTargetError:
+                    continue
+                family, _, _, _, sockaddr = infos[0]
+                self._send_outbound(client_addr, orig_host, dst_port, family, sockaddr, payload)
             except Exception:
                 pass
 
@@ -946,6 +1228,7 @@ class Socks5UdpRelay:
 def _handle_socks5_client(conn: socket.socket, udp_port: int):
     try:
         _configure_tcp_socket(conn)
+        conn.settimeout(10)
         ver_n = _recv_exact(conn, 2)
         if ver_n[0] != 5:
             return
@@ -976,7 +1259,7 @@ def _handle_socks5_client(conn: socket.socket, udp_port: int):
         local_ip = conn.getsockname()[0]
         if local_ip.startswith("::ffff:"):
             local_ip = local_ip[7:]
-        target_host = OVERRIDE_HOST or ("43.167.31.150" if local_ip in ("", "0.0.0.0", "::", "::1", "127.0.0.1") else local_ip)
+        target_host = _resolve_socket_target_host(conn)
 
         if cmd == 0x01:  # CONNECT (TCP)
             if "aki-config" in dst_host and dst_port == 443:
@@ -990,9 +1273,14 @@ def _handle_socks5_client(conn: socket.socket, udp_port: int):
 
             remote = None
             try:
-                remote = socket.create_connection((dst_host, dst_port), timeout=10)
+                remote = _connect_safe_tcp(dst_host, dst_port, timeout=10)
                 conn.sendall(_socks_reply(0, local_ip, SOCKS_PORT))
                 _tunnel_stream(conn, remote)
+            except _BlockedTargetError:
+                try:
+                    conn.sendall(_socks_reply(2, "0.0.0.0", 0))
+                except Exception:
+                    pass
             except Exception:
                 try:
                     conn.sendall(_socks_reply(4, "0.0.0.0", 0))
@@ -1005,6 +1293,7 @@ def _handle_socks5_client(conn: socket.socket, udp_port: int):
                     except Exception:
                         pass
         elif cmd == 0x03:  # UDP ASSOCIATE
+            conn.settimeout(None)
             conn.sendall(_socks_reply(0, local_ip, udp_port))
             while True:
                 if not conn.recv(1024):
@@ -1054,11 +1343,10 @@ def run_servers():
     GAMESV_GM_UPSTREAM = args.gm_url.rstrip("/")
 
     # Warm default payload + verify template
-    for warm_host in ("127.0.0.1", "43.167.31.150"):
-        try:
-            _ = get_encrypted_payload(warm_host)
-        except Exception:
-            pass
+    try:
+        _ = get_encrypted_payload("127.0.0.1")
+    except Exception:
+        pass
     if OVERRIDE_HOST:
         _ = get_encrypted_payload(OVERRIDE_HOST)
 

@@ -1,16 +1,22 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
 
+use serde_json::Value;
 use sonoro_gamesv_logic::component::entity::small::{ConfigType, EntityType};
 use sonoro_gamesv_logic::component::player::PlayerEchoComponent;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::events::Event;
 use sonoro_gamesv_logic::fsm::types::wake_reason;
-use sonoro_gamesv_logic::helpers::quest_engine;
 use sonoro_gamesv_logic::helpers::reward::RewardItem;
-use sonoro_gamesv_logic::helpers::{attributes as attributes_helper, pb_kv, reward, role as role_helper};
+use sonoro_gamesv_logic::helpers::{
+    attributes as attributes_helper, condition, pb_kv, quest_actions, quest_engine, reward,
+    role as role_helper,
+};
 use sonoro_proto::enums::{
     DetectionType, EAttributeType, ErrorCode, LivingStatus, PhantomFuncValue, PhantomSettingType,
+    TeleportReason,
 };
+use sonoro_proto::wire::PbEnum;
 use sonoro_proto::pb::{
     AdviceSetRequest, AdviceSetResponse, BlackScreenStatePush, BtnStateRequest, BtnStateResponse,
     ButtonEnableResult, CdKeyVerifyRequest, CdKeyVerifyResponse, CharacterDeathPush,
@@ -52,9 +58,10 @@ use sonoro_proto::pb::{
     SecGetReportData2FlowRequest, SecGetReportData2FlowResponse, SelectDetectionTargetRequest,
     SelectDetectionTargetResponse, ServerPlayStationPlayOnlyStateRequest,
     ServerPlayStationPlayOnlyStateResponse, SheriffZoneInfo, SheriffZoneInfoRequest,
-    SheriffZoneInfoResponse, TeamRecommendRequest, TeamRecommendResponse, UnlockDetectionLabelInfo,
+    SheriffZoneInfoResponse, TeamRecommendRequest, TeamRecommendResponse, TeleportNotify,
+    UnlockDetectionLabelInfo, UnlimitedScoreInfo,
     UpdatePlayStationBlockAccountRequest, UpdatePlayStationBlockAccountResponse,
-    ValidTimeItemRequest, ValidTimeItemResponse, WebSignRequest, WebSignResponse,
+    ValidTimeItemRequest, ValidTimeItemResponse, Vector, WebSignRequest, WebSignResponse,
     XboxSettingRequest, XboxSettingResponse,
 };
 
@@ -67,19 +74,53 @@ pub fn handle_doll_small_map_info_request(
     state: &mut State,
     _req: DollSmallMapInfoRequest,
 ) -> Result<DollSmallMapInfoResponse, String> {
-    let mut scores = Vec::new();
-    if state
+    let mut doll_scores: BTreeMap<i32, (i32, i32)> = BTreeMap::new();
+    for entry in &state.player_components.progress.info.dynamic.ints {
+        if let Some(rest) = entry.key.strip_prefix("doll:high:")
+            && let Ok(eid) = rest.parse::<i32>()
+            && eid > 0
+            && entry.val > 0
+        {
+            doll_scores.entry(eid).or_insert((0, 0)).0 = entry.val.clamp(0, i64::from(i32::MAX)) as i32;
+        } else if let Some(rest) = entry.key.strip_prefix("doll:acc:")
+            && let Ok(eid) = rest.parse::<i32>()
+            && eid > 0
+            && entry.val > 0
+        {
+            doll_scores.entry(eid).or_insert((0, 0)).1 = entry.val.clamp(0, i64::from(i32::MAX)) as i32;
+        }
+    }
+    let fallback_score = state
         .player_components
         .progress
         .info
         .get_key_int("doll:score")
-        > 0
-    {
-        scores.push(SceneUnlimitedScoreInfo {
-            instId: 8,
-            ..Default::default()
+        .clamp(0, i64::from(i32::MAX)) as i32;
+    let inst_id = state.player_components.scene.last_scene_info.instance_id;
+    let inst_id = if inst_id > 0 { inst_id } else { 8 };
+    let mut unlimited_list: Vec<UnlimitedScoreInfo> = doll_scores
+        .into_iter()
+        .map(|(eid, (high, acc))| UnlimitedScoreInfo {
+            entityId: eid,
+            HighestScore: high,
+            AccumulatedScore: acc.max(high),
+        })
+        .collect();
+    if unlimited_list.is_empty() && fallback_score > 0 {
+        unlimited_list.push(UnlimitedScoreInfo {
+            entityId: 0,
+            HighestScore: fallback_score,
+            AccumulatedScore: fallback_score,
         });
     }
+    let scores = if unlimited_list.is_empty() {
+        Vec::new()
+    } else {
+        vec![SceneUnlimitedScoreInfo {
+            instId: inst_id,
+            UnlimitedScoreInfos: unlimited_list,
+        }]
+    };
     let mut by_showcase: BTreeMap<i32, Vec<i32>> = BTreeMap::new();
     for c in &state.player_components.progress.info.dynamic.claims {
         if let Some(rest) = c.strip_prefix("doll:item:") {
@@ -551,20 +592,46 @@ pub fn handle_sheriff_zone_info_request(
     state: &mut State,
     _req: SheriffZoneInfoRequest,
 ) -> Result<SheriffZoneInfoResponse, String> {
-    let clue_cnt = state
-        .player_components
-        .progress
-        .info
-        .count_claims_prefix("sheriff_clue:");
-    let zones = if clue_cnt > 0 {
-        vec![SheriffZoneInfo {
-            ZoneId: 1,
-            ItemCount: clue_cnt as i64,
+    static CLUE_ZONE_MAP: OnceLock<HashMap<i32, i32>> = OnceLock::new();
+    let clue_to_zone = CLUE_ZONE_MAP.get_or_init(|| {
+        let mut anomaly_zone = HashMap::new();
+        for row in state.assets.read_raw_json_array("SheriffAnomaly") {
+            if let (Some(aid), Some(zid)) = (
+                row.get("Id").and_then(Value::as_i64),
+                row.get("SheriffZoneId").and_then(Value::as_i64),
+            ) {
+                anomaly_zone.insert(aid as i32, zid.max(1) as i32);
+            }
+        }
+        let mut map = HashMap::new();
+        for row in state.assets.read_raw_json_array("SheriffClue") {
+            if let Some(cid) = row.get("Id").and_then(Value::as_i64) {
+                let aid = row.get("SheriffAnomalyId").and_then(Value::as_i64).unwrap_or(0) as i32;
+                let zid = anomaly_zone.get(&aid).copied().unwrap_or(1);
+                map.insert(cid as i32, zid);
+            }
+        }
+        map
+    });
+    let mut per_zone: BTreeMap<i32, i64> = BTreeMap::new();
+    for c in &state.player_components.progress.info.dynamic.claims {
+        if let Some(rest) = c.strip_prefix("sheriff_clue:") {
+            let zone_id = rest
+                .parse::<i32>()
+                .ok()
+                .and_then(|cid| clue_to_zone.get(&cid).copied())
+                .unwrap_or(1);
+            *per_zone.entry(zone_id).or_insert(0) += 1;
+        }
+    }
+    let zones: Vec<SheriffZoneInfo> = per_zone
+        .into_iter()
+        .map(|(zone_id, cnt)| SheriffZoneInfo {
+            ZoneId: zone_id,
+            ItemCount: cnt,
             ..Default::default()
-        }]
-    } else {
-        Vec::new()
-    };
+        })
+        .collect();
     Ok(SheriffZoneInfoResponse {
         errorCode: Some(ErrorCode::Success),
         ZoneInfos: zones,
@@ -905,22 +972,48 @@ pub fn handle_pay_info_request(
     })
 }
 
+fn is_btn_enabled(
+    state: &State,
+    eval_ctx: &sonoro_gamesv_logic::helpers::condition::EvalContext<'_>,
+    bt_raw: i32,
+) -> bool {
+    if bt_raw > 0
+        && let Some(fc) = state
+            .assets
+            .tables
+            .function_condition
+            .get_data_by_id(&bt_raw)
+    {
+        return fc.IsOn
+            && (fc.OpenConditionId <= 0
+                || condition::eval_condition_or_group(eval_ctx, fc.OpenConditionId));
+    }
+    true
+}
+
 pub fn handle_btn_state_request(
-    _state: &mut State,
+    state: &mut State,
     req: BtnStateRequest,
 ) -> Result<BtnStateResponse, String> {
+    let eval_ctx = state.eval_context();
+    let single_enabled = req
+        .Type
+        .map_or(true, |bt| is_btn_enabled(state, &eval_ctx, bt.to_i32()));
     let results = req
         .Types
         .into_iter()
-        .map(|bt| ButtonEnableResult {
-            Type: Some(bt),
-            Enabled: true,
+        .map(|bt| {
+            let en = is_btn_enabled(state, &eval_ctx, bt.to_i32());
+            ButtonEnableResult {
+                Type: Some(bt),
+                Enabled: en,
+            }
         })
         .collect();
     Ok(BtnStateResponse {
         ErrorCode: Some(ErrorCode::Success),
         Type: req.Type,
-        Enabled: true,
+        Enabled: single_enabled,
         Result: results,
     })
 }
@@ -1223,20 +1316,41 @@ pub fn handle_cd_key_verify_request(
             ErrorCode: Some(ErrorCode::ErrCdKeyLength),
         });
     }
-    let valid = raw.eq_ignore_ascii_case("WUTHERINGGIFT")
-        || raw.eq_ignore_ascii_case("SOLARIS3811")
-        || raw.eq_ignore_ascii_case("WW3811");
-    if !valid {
+    let normalized = raw.to_ascii_uppercase();
+    static CDKEY_DROPS: OnceLock<HashMap<String, i32>> = OnceLock::new();
+    let table_keys = CDKEY_DROPS.get_or_init(|| {
+        let mut out = HashMap::new();
+        for name in ["CdKey", "GiftCode"] {
+            for row in state.assets.read_raw_json_array(name) {
+                if let Some(code) = row
+                    .get("Code")
+                    .or_else(|| row.get("CdKey"))
+                    .or_else(|| row.get("Key"))
+                    .and_then(Value::as_str)
+                {
+                    let drop_id = row
+                        .get("DropId")
+                        .or_else(|| row.get("RewardId"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0) as i32;
+                    out.insert(code.trim().to_ascii_uppercase(), drop_id);
+                }
+            }
+        }
+        out
+    });
+    let table_drop = table_keys.get(&normalized).copied();
+    let builtin_valid = matches!(
+        normalized.as_str(),
+        "WUTHERINGGIFT" | "SOLARIS3811" | "WW3811"
+    );
+    if table_drop.is_none() && !builtin_valid {
         return Ok(CdKeyVerifyResponse {
             ErrorCode: Some(ErrorCode::ErrCdKeyNotFound),
         });
     }
-    if state
-        .player_components
-        .progress
-        .info
-        .has_claimed_cdkey(&raw)
-    {
+    let prog = &state.player_components.progress.info;
+    if prog.has_claimed_cdkey(&normalized) || prog.has_claimed_cdkey(&raw) {
         return Ok(CdKeyVerifyResponse {
             ErrorCode: Some(ErrorCode::ErrCdKeyEachPlayerMaxCount),
         });
@@ -1245,34 +1359,44 @@ pub fn handle_cd_key_verify_request(
         .player_components
         .progress
         .info
-        .claim_cdkey(&raw);
+        .claim_cdkey(&normalized);
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
-    let mut rctx = state.reward_context();
-    reward::grant_items(
-        &mut rctx,
-        0,
-        true,
-        &[
-            RewardItem {
-                item_id: 3,
-                count: 300,
-            },
-            RewardItem {
-                item_id: 50002,
-                count: 2,
-            },
-            RewardItem {
-                item_id: 2,
-                count: 50000,
-            },
-        ],
-        2,
-    )
-    .map_err(|e| e.to_string())?;
+    let drop_id = table_drop.unwrap_or(0);
+    let mut granted = false;
+    if drop_id > 0 {
+        let mut rctx = state.reward_context();
+        let res = reward::grant_drop_package_popup(&mut rctx, drop_id, 2)
+            .map_err(|e| e.to_string())?;
+        granted = res.granted_count > 0;
+    }
+    if !granted {
+        let mut rctx = state.reward_context();
+        reward::grant_items(
+            &mut rctx,
+            0,
+            true,
+            &[
+                RewardItem {
+                    item_id: 3,
+                    count: 300,
+                },
+                RewardItem {
+                    item_id: 50002,
+                    count: 2,
+                },
+                RewardItem {
+                    item_id: 2,
+                    count: 50000,
+                },
+            ],
+            2,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(CdKeyVerifyResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1302,6 +1426,7 @@ pub fn handle_drown_end_teleport_request(
     _req: DrownEndTeleportRequest,
 ) -> Result<DrownEndTeleportResponse, String> {
     let mut events = EventQueue::new();
+    let mut teleport_target: Option<(i32, [f32; 3], [f32; 3])> = None;
     if let Some(scene) = state.scene.as_mut() {
         role_helper::revive_and_heal_formation(
             &mut state.conn,
@@ -1309,6 +1434,57 @@ pub fn handle_drown_end_teleport_request(
             &mut state.player_components.role,
             &mut events,
             &state.fs,
+        );
+        let inst_id = scene.instance_id;
+        let map_id = state.assets.resolve_map_config_id(inst_id);
+        let fallback_rot = scene
+            .instance
+            .players
+            .first()
+            .map_or([0.0, 0.0, 0.0], |p| p.rotation);
+        let pos_opt = if scene.has_quest_move_loc
+            && scene.last_quest_move_loc.iter().all(|v| v.is_finite())
+        {
+            Some(scene.last_quest_move_loc)
+        } else if let Some(inst) = state.assets.tables.instance_dungeon.get_data_by_id(&inst_id)
+            && inst.BornPosition.iter().any(|&v| v != 0)
+        {
+            Some([
+                inst.BornPosition[0] as f32,
+                inst.BornPosition[1] as f32,
+                inst.BornPosition[2] as f32,
+            ])
+        } else {
+            scene
+                .instance
+                .players
+                .first()
+                .map(|p| p.location)
+                .filter(|loc| loc.iter().all(|v| v.is_finite()))
+        };
+        if let Some(pos) = pos_opt
+            && map_id > 0
+        {
+            teleport_target = Some((map_id, pos, fallback_rot));
+        }
+    }
+    if let Some((map_id, pos, _rot)) = teleport_target {
+        {
+            let mut qctx = state.quest_context(&mut events);
+            let _ = quest_actions::update_player_scene_state(&mut qctx, pos, None);
+        }
+        let _ = state.conn.push_msg(
+            TeleportNotify::MSG_ID,
+            &TeleportNotify {
+                MapId: map_id,
+                Pos: Some(Vector {
+                    X: pos[0],
+                    Y: pos[1],
+                    Z: pos[2],
+                }),
+                Reason: Some(TeleportReason::Drown),
+                ..Default::default()
+            },
         );
     }
     drain_event_queue_best_effort(&mut events, state);

@@ -10,9 +10,9 @@ use sonoro_proto::enums::{
     BtType, ErrorCode, GameCtxType, RbGridDirection, RollBlockGameActionType,
 };
 use sonoro_proto::pb::{
-    ActionNotify, BehaviorTreeCtxPb, BtVarUpdateNotify, EntityAddNotify, EntityRemoveInfo,
-    EntityRemoveNotify, GameCtxPb, GameCtxPbCtxInfoOneof, RbBlockComponentPb,
-    RbBlockComponentPbTypeOneof, RbBlockIdlePbState, RbBlockMovementPbAction,
+    ActionNotify, BehaviorTreeCtxPb, BtVarUpdateNotify, CombatReceiveData, CombatReceivePackNotify,
+    EntityAddNotify, EntityRemoveInfo, EntityRemoveNotify, GameCtxPb, GameCtxPbCtxInfoOneof,
+    RbBlockComponentPb, RbBlockComponentPbTypeOneof, RbBlockIdlePbState, RbBlockMovementPbAction,
     RbBlockMovementPbActionTypeOneof, RbBlockMovingPbState, RbBlockPbState,
     RbBlockPbStateStateOneof, RbBlockStateChangeNotify, RbBreakableObstaclePbType,
     RbDefaultBlockPbType, RbFloorComponentPb, RbGridPosition, RbInput, RbItemComponentPb,
@@ -24,14 +24,14 @@ use sonoro_proto::pb::{
 };
 
 use crate::component::entity::{
-    ConfigComponent, ConfigType, EntityComponentStorage, EntityType, PositionComponent,
+    ConfigComponent, ConfigType, EntityComponentStorage, EntityState, EntityType, PositionComponent,
 };
 use crate::helpers::level_play;
 use crate::helpers::quest_actions;
 use crate::helpers::quest_engine::{self, QuestEventKind};
-use crate::helpers::quest_types::{QuestContext, json_i64, json_int, json_str};
+use crate::helpers::quest_types::{QuestContext, json_i64, json_int, json_str, resolve_var_name};
 use crate::helpers::reward;
-use crate::scene::Scene;
+use crate::scene::{Scene, StateTagUpdate};
 use crate::sink::PushSink;
 
 const DEFAULT_CELL_LEN: f32 = 100.0;
@@ -694,6 +694,8 @@ fn populate_board_entities<S: PushSink + ?Sized>(
             {
                 let cfg_id = storage.config.config_id;
                 let occ_pb = vec![RbGridPosition { X: x, Y: y }];
+                let is_quantum = item.Type == "QuantumObstacle";
+                let q_active = item.InitActive.unwrap_or(true);
                 let (oneof, is_obs) = if item.Type == "LaserEmitter" {
                     let dir = dir_from_str(item.Direction.as_deref());
                     let pts = build_laser_points(session, &level_owned, (x, y), dir, height);
@@ -711,8 +713,6 @@ fn populate_board_entities<S: PushSink + ?Sized>(
                     )
                 } else {
                     let key = item.Key.unwrap_or(0);
-                    let is_quantum = item.Type == "QuantumObstacle";
-                    let q_active = item.InitActive.unwrap_or(true);
                     let link_points = trigger_world_pos
                         .get(&key)
                         .map(|&tp| vec![pb_vec(tp)])
@@ -742,6 +742,29 @@ fn populate_board_entities<S: PushSink + ?Sized>(
                         GamePlayIncId: session.inc_id,
                         OccupiedCellPositions: occ_pb,
                     });
+                    if is_obs && is_quantum {
+                        ent.config.state = if q_active {
+                            EntityState::Default
+                        } else {
+                            EntityState::Sleep
+                        };
+                        ent.visible = q_active;
+                        ent.actor_visible = q_active;
+                    }
+                }
+                if is_obs && is_quantum {
+                    let state_name = if q_active {
+                        "关卡.Common.状态.激活"
+                    } else {
+                        "关卡.Common.状态.休眠"
+                    };
+                    let _ = scene.update_entity_state_tag(
+                        &assets.tables.gameplay_tag_remap,
+                        net_id,
+                        state_name,
+                    );
+                }
+                if let Some(ent) = scene.entity(net_id) {
                     add_pbs.push(ent.to_proto(assets, now_ms));
                 }
                 let _ = is_obs;
@@ -800,9 +823,10 @@ fn update_bt_int_var<S: PushSink + ?Sized>(
     let Some(vref) = cond_json.get(var_ref_key).and_then(Value::as_object) else {
         return;
     };
-    let Some(vname) = json_str(vref.get("Name")) else {
+    let Some(vname) = resolve_var_name(vref) else {
         return;
     };
+    let vsrc = json_str(vref.get("Source")).unwrap_or("Self");
     let prefix = if bt_type == BtType::BtTypeLevelPlay {
         "actor_var"
     } else {
@@ -811,7 +835,35 @@ fn update_bt_int_var<S: PushSink + ?Sized>(
     ctx.quest_comp
         .info
         .set_var_int(&format!("{prefix}:{owner_id}:{vname}"), val);
-    ctx.quest_comp.info.set_var_int(vname, val);
+    if vsrc == "Global" {
+        ctx.quest_comp.info.set_var_int(vname, val);
+        if let Some(pc) = ctx.progress_comp.as_deref_mut() {
+            pc.info.set_key_int(&format!("var:{vname}"), i64::from(val));
+        }
+    } else if vsrc == "Other" {
+        if let Some(ref_type) = json_str(vref.get("RefType"))
+            && let Some(ref_id) = json_int(vref.get("RefId"))
+            && !ref_type.is_empty()
+            && ref_id != 0
+        {
+            ctx.quest_comp
+                .info
+                .set_var_int(&format!("{ref_type}:{ref_id}:{vname}"), val);
+        }
+        ctx.quest_comp.info.set_var_int(vname, val);
+    } else {
+        if owner_id > 0 {
+            if bt_type == BtType::BtTypeLevelPlay {
+                ctx.quest_comp
+                    .info
+                    .set_var_int(&format!("LpSelf:{owner_id}:{vname}"), val);
+            }
+            ctx.quest_comp
+                .info
+                .set_var_int(&format!("Self:{owner_id}:{vname}"), val);
+        }
+        ctx.quest_comp.info.set_var_int(vname, val);
+    }
     if let Some(pc) = ctx.progress_comp.as_deref_mut() {
         pc.info
             .set_key_int(&format!("actor_var:{owner_id}:{vname}"), i64::from(val));
@@ -819,7 +871,7 @@ fn update_bt_int_var<S: PushSink + ?Sized>(
     ctx.sink.push(
         BtVarUpdateNotify::MSG_ID,
         &BtVarUpdateNotify {
-            TreeIncId: i64::from(owner_id),
+            TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id),
             VarName: vname.as_bytes().to_vec(),
             VarDefine: Some(VarDefinePb {
                 VarType: 1,
@@ -858,7 +910,7 @@ fn push_roll_block_actions<S: PushSink + ?Sized>(
                 CtxInfo: Some(GameCtxPbCtxInfoOneof::RollBlockGamePlayAction(
                     RollBlockGamePlayActionCtxPb {
                         BehaviorTreeCtx: Some(BehaviorTreeCtxPb {
-                            IncId: i64::from(owner_id),
+                            IncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id),
                             BtType: Some(bt_type),
                             BtId: owner_id,
                             NodeId: node_id,
@@ -1283,6 +1335,8 @@ pub fn handle_movement_finish<S: PushSink + ?Sized>(
             inputs: Vec<RbInput>,
             item_updates: Vec<(i64, RbItemComponentPb)>,
             removed_entities: Vec<i64>,
+            state_tag_updates: Vec<(i64, StateTagUpdate)>,
+            combat_pack: Vec<CombatReceiveData>,
         },
     }
 
@@ -1389,9 +1443,16 @@ pub fn handle_movement_finish<S: PushSink + ?Sized>(
                 }
             }
             // QuantumObstacle toggle
+            let mut quantum_toggled = Vec::new();
             for obs in &mut session.obstacles {
-                if obs.is_quantum {
+                if obs.is_quantum && !obs.broken {
                     obs.quantum_active = !obs.quantum_active;
+                    quantum_toggled.push((
+                        obs.net_id,
+                        obs.pos,
+                        obs.quantum_active,
+                        obs.link_points.clone(),
+                    ));
                 }
             }
             for nid in &removed_entities {
@@ -1440,21 +1501,57 @@ pub fn handle_movement_finish<S: PushSink + ?Sized>(
                 }
             } else {
                 let mut item_updates = Vec::new();
+                let mut state_tag_updates = Vec::new();
+                let mut combat_pack = Vec::new();
+                for (nid, pos, active, link_points) in quantum_toggled {
+                    let comp = RbItemComponentPb {
+                        Type: Some(RbItemComponentPbTypeOneof::BreakableObstacleType(
+                            RbBreakableObstaclePbType {
+                                LinkPoints: link_points,
+                            },
+                        )),
+                        GamePlayIncId: session.inc_id,
+                        OccupiedCellPositions: vec![RbGridPosition { X: pos.0, Y: pos.1 }],
+                    };
+                    if let Some(ent) = scene.entity_mut(nid) {
+                        ent.world_item.rb_item = Some(comp.clone());
+                        ent.config.state = if active {
+                            EntityState::Default
+                        } else {
+                            EntityState::Sleep
+                        };
+                    }
+                    let state_name = if active {
+                        "关卡.Common.状态.激活"
+                    } else {
+                        "关卡.Common.状态.休眠"
+                    };
+                    if let Some(upd) = scene.update_entity_state_tag(
+                        &ctx.assets.tables.gameplay_tag_remap,
+                        nid,
+                        state_name,
+                    ) {
+                        state_tag_updates.push((nid, upd));
+                    }
+                    let _ = scene.set_entity_visibility(nid, active, &mut combat_pack);
+                    item_updates.push((nid, comp));
+                }
                 for l in &session.lasers {
                     let pts = build_laser_points(&session, &level_owned, l.pos, l.dir, l.height);
-                    item_updates.push((
-                        l.net_id,
-                        RbItemComponentPb {
-                            Type: Some(RbItemComponentPbTypeOneof::RbLaserEmitterType(
-                                RbLaserEmitterPbType { LaserPoints: pts },
-                            )),
-                            GamePlayIncId: session.inc_id,
-                            OccupiedCellPositions: vec![RbGridPosition {
-                                X: l.pos.0,
-                                Y: l.pos.1,
-                            }],
-                        },
-                    ));
+                    let comp = RbItemComponentPb {
+                        Type: Some(RbItemComponentPbTypeOneof::RbLaserEmitterType(
+                            RbLaserEmitterPbType { LaserPoints: pts },
+                        )),
+                        GamePlayIncId: session.inc_id,
+                        OccupiedCellPositions: vec![RbGridPosition {
+                            X: l.pos.0,
+                            Y: l.pos.1,
+                        }],
+                    };
+                    if let Some(ent) = scene.entity_mut(l.net_id) {
+                        ent.world_item.rb_item = Some(comp.clone());
+                    }
+                    item_updates.push((l.net_id, comp));
                 }
                 let inputs = compute_available_inputs(&session, ctx.assets);
                 scene.roll_block_sessions.insert(inc_id, session);
@@ -1465,6 +1562,8 @@ pub fn handle_movement_finish<S: PushSink + ?Sized>(
                     inputs,
                     item_updates,
                     removed_entities,
+                    state_tag_updates,
+                    combat_pack,
                 }
             }
         }
@@ -1562,6 +1661,8 @@ pub fn handle_movement_finish<S: PushSink + ?Sized>(
             inputs,
             item_updates,
             removed_entities,
+            state_tag_updates,
+            combat_pack,
         } => {
             if !removed_entities.is_empty() {
                 ctx.sink.push(
@@ -1576,6 +1677,29 @@ pub fn handle_movement_finish<S: PushSink + ?Sized>(
                             .collect(),
                         IsRemove: true,
                     },
+                );
+            }
+            if !state_tag_updates.is_empty() {
+                if let Some(sc) = ctx.scene.as_deref() {
+                    for (nid, upd) in state_tag_updates {
+                        quest_actions::emit_entity_state_tag_update_checked(
+                            sc,
+                            Some(ctx.assets),
+                            ctx.sink,
+                            nid,
+                            upd,
+                        );
+                    }
+                } else {
+                    for (nid, upd) in state_tag_updates {
+                        quest_actions::emit_entity_state_tag_update(ctx.sink, nid, upd);
+                    }
+                }
+            }
+            if !combat_pack.is_empty() {
+                ctx.sink.push(
+                    CombatReceivePackNotify::MSG_ID,
+                    &CombatReceivePackNotify { Data: combat_pack },
                 );
             }
             for (eid, comp) in item_updates {

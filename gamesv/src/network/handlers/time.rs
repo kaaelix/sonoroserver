@@ -1,8 +1,9 @@
+use sonoro_gamesv_logic::fsm::types::wake_reason;
 use sonoro_gamesv_logic::scene::now_millis;
 use sonoro_proto::enums::ErrorCode;
 use sonoro_proto::pb::{
-    AiControlSwitchRequest, AiControlSwitchResponse, TimeCheckRequest, TimeCheckResponse,
-    TimeStopPush,
+    AiControlSwitch, AiControlSwitchNotify, AiControlSwitchRequest, AiControlSwitchResponse,
+    TimeCheckRequest, TimeCheckResponse, TimeStopPush,
 };
 
 use super::State;
@@ -39,7 +40,7 @@ pub fn handle_time_check_request(
 }
 
 pub fn handle_ai_control_switch_request(
-    _state: &mut State,
+    state: &mut State,
     req: AiControlSwitchRequest,
 ) -> Result<AiControlSwitchResponse, String> {
     if req.EntityId <= 0 {
@@ -47,6 +48,26 @@ pub fn handle_ai_control_switch_request(
             ErrorCode: Some(ErrorCode::RequestParamError),
         });
     }
+    let player_id = state.player_id;
+    if let Some(scene) = state.scene.as_mut() {
+        let Some(entity) = scene.entity_mut(req.EntityId) else {
+            return Ok(AiControlSwitchResponse {
+                ErrorCode: Some(ErrorCode::ErrSceneEntityNotExist),
+            });
+        };
+        entity.player_id = Some(player_id);
+        scene.mark_fsm_dirty(req.EntityId, wake_reason::INITIAL);
+    }
+    let _ = state.conn.push_msg(
+        AiControlSwitchNotify::MSG_ID,
+        &AiControlSwitchNotify {
+            AiControlSwitchInfos: vec![AiControlSwitch {
+                EntityId: req.EntityId,
+                AiInfo: None,
+                PlayerId: player_id,
+            }],
+        },
+    );
     Ok(AiControlSwitchResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

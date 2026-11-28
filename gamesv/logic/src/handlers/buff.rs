@@ -422,6 +422,7 @@ pub fn add_buff_to_entity<S: PushSink + ?Sized>(
         }
 
         if buff_data.DurationPolicy == DurationPolicy::Instant {
+            let entry_level = entry.level.max(1);
             notify_data.push(CombatReceiveData {
                 Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
                     CombatNotifyData {
@@ -430,6 +431,7 @@ pub fn add_buff_to_entity<S: PushSink + ?Sized>(
                             ApplyGameplayEffectNotify {
                                 Handle: -2,
                                 Id: buff_data.Id,
+                                Level: entry_level,
                                 EntityId: target.net_id,
                                 InstigatorId: instigator.net_id,
                                 IsActive: true,
@@ -439,12 +441,14 @@ pub fn add_buff_to_entity<S: PushSink + ?Sized>(
                     },
                 )),
             });
-            buff_helper::execute_buff_effects(
+            buff_helper::execute_buff_effects_with_assets_and_level(
                 &mut notify_data,
                 target.net_id,
                 instigator.net_id,
                 &buff_data,
                 scene,
+                assets,
+                entry_level,
             );
             continue;
         }
@@ -561,7 +565,9 @@ pub fn add_buff_to_entity<S: PushSink + ?Sized>(
             let disposition =
                 BuffTimerScheduler::application_disposition(&buff_data, false, was_active, entry.is_active);
             let mut next_buff = buff.clone();
-            next_buff.Level = if next_buff.Level > 0 {
+            next_buff.Level = if entry.level > 0 {
+                entry.level
+            } else if next_buff.Level > 0 {
                 next_buff.Level
             } else {
                 1
@@ -632,6 +638,7 @@ pub fn add_buff_to_entity<S: PushSink + ?Sized>(
                 target.net_id,
                 entry.is_active,
             );
+            new_buff.Level = entry.level.max(1);
             new_buff.StackCount = init_stacks;
             apply_buff_duration(&mut new_buff, &buff_data, entry.duration_seconds);
             let disposition =

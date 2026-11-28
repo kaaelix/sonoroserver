@@ -137,6 +137,7 @@ pub struct StateTagUpdate {
 
 #[derive(Debug, Clone)]
 pub struct ScenePendingFlow {
+    pub bt_type: BtType,
     pub quest_id: i32,
     pub node_id: i32,
     pub flow_list_name: String,
@@ -283,6 +284,7 @@ pub struct Scene {
     pub scene_loading_finished: bool,
     pub deferred_join_sync_pending: bool,
     pub login_world_synced: bool,
+    pub synced_world_instance_id: Option<i32>,
     pub deferred_spatial_spawns_at_ms: Option<i64>,
     pub deferred_join_flow: Option<DeferredJoinFlow>,
     pub next_entity_id: i64,
@@ -303,11 +305,13 @@ pub struct Scene {
     pub sent_lp_bt_trees: HashSet<i32>,
     pub suppressed_auto_enter_lps: HashSet<i32>,
     pub lp_repeater_cooldowns: HashMap<i64, i64>,
+    pub repeater_counts: HashMap<i64, i32>,
     pub last_ready_quest_list: Option<Vec<i32>>,
     pub session_destroyed_quests: HashSet<i32>,
     pub bt_timers: Vec<ActiveBtTimer>,
     pub bt_occupations: Vec<BtOccupation>,
     pub save_node_keys: Vec<u64>,
+    pub lp_save_node_keys: Vec<u64>,
     pub trial_role_ids: Vec<i32>,
     pub pending_killed_removals: Vec<KilledRemovalEntry>,
     pub dynamic_interact_options: Vec<DynamicInteractOption>,
@@ -317,6 +321,8 @@ pub struct Scene {
     pub auto_interact_states: HashMap<i64, bool>,
     pub async_flows: Vec<AsyncFlowEntry>,
     pub action_node_next_idx: HashMap<u64, usize>,
+    pub lp_action_node_next_idx: HashMap<u64, usize>,
+    pub lp_killed_entities: HashSet<u64>,
     pub last_server_rollback_quest_id: i32,
     pub last_server_rollback_ms: i64,
     pub summoned_entities: HashMap<String, Vec<i64>>,
@@ -390,6 +396,7 @@ impl Scene {
             scene_loading_finished: false,
             deferred_join_sync_pending: false,
             login_world_synced: false,
+            synced_world_instance_id: None,
             deferred_spatial_spawns_at_ms: None,
             deferred_join_flow: None,
             next_entity_id: 1,
@@ -408,11 +415,13 @@ impl Scene {
             sent_lp_bt_trees: HashSet::new(),
             suppressed_auto_enter_lps: HashSet::new(),
             lp_repeater_cooldowns: HashMap::new(),
+            repeater_counts: HashMap::new(),
             last_ready_quest_list: None,
             session_destroyed_quests: HashSet::new(),
             bt_timers: Vec::new(),
             bt_occupations: Vec::new(),
             save_node_keys: Vec::new(),
+            lp_save_node_keys: Vec::new(),
             trial_role_ids: Vec::new(),
             pending_killed_removals: Vec::new(),
             dynamic_interact_options: Vec::new(),
@@ -422,6 +431,8 @@ impl Scene {
             auto_interact_states: HashMap::new(),
             async_flows: Vec::new(),
             action_node_next_idx: HashMap::new(),
+            lp_action_node_next_idx: HashMap::new(),
+            lp_killed_entities: HashSet::new(),
             last_server_rollback_quest_id: 0,
             last_server_rollback_ms: 0,
             summoned_entities: HashMap::new(),
@@ -494,9 +505,32 @@ impl Scene {
         flow_id: i32,
         state_id: i32,
     ) {
+        self.set_active_flow_for_bt(
+            inc_id,
+            BtType::BtTypeQuest,
+            quest_id,
+            node_id,
+            flow_list_name,
+            flow_id,
+            state_id,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_active_flow_for_bt(
+        &mut self,
+        inc_id: i64,
+        bt_type: BtType,
+        quest_id: i32,
+        node_id: i32,
+        flow_list_name: &str,
+        flow_id: i32,
+        state_id: i32,
+    ) {
         let name = flow_list_name.to_string();
         self.clear_active_flow();
         self.active_flow_inc_id = inc_id;
+        self.active_flow_bt_type = bt_type;
         self.active_flow_quest_id = quest_id;
         self.active_flow_node_id = node_id;
         self.active_flow_list_name = name;
@@ -505,12 +539,20 @@ impl Scene {
         for entry in &mut self.pending_deferred_actions {
             if entry.wait_due_ms.is_none()
                 && entry.flow_inc_id.is_none()
+                && entry.bt_type == bt_type
                 && entry.quest_id == quest_id
                 && entry.node_id == node_id
             {
                 entry.flow_inc_id = Some(inc_id);
             }
         }
+    }
+
+    pub fn is_flow_active_for_node(&self, bt_type: BtType, owner_id: i32, node_id: i32) -> bool {
+        self.active_flow_inc_id != 0
+            && self.active_flow_bt_type == bt_type
+            && self.active_flow_quest_id == owner_id
+            && self.active_flow_node_id == node_id
     }
 
     pub fn clear_active_flow(&mut self) {
@@ -581,17 +623,91 @@ impl Scene {
         Some(self.async_flows.swap_remove(pos))
     }
 
-    pub fn clear_action_node_progress_for_owner(&mut self, owner_id: i32) {
+    fn action_node_progress_map(&self, bt_type: BtType) -> &HashMap<u64, usize> {
+        if bt_type == BtType::BtTypeLevelPlay {
+            &self.lp_action_node_next_idx
+        } else {
+            &self.action_node_next_idx
+        }
+    }
+
+    fn action_node_progress_map_mut(&mut self, bt_type: BtType) -> &mut HashMap<u64, usize> {
+        if bt_type == BtType::BtTypeLevelPlay {
+            &mut self.lp_action_node_next_idx
+        } else {
+            &mut self.action_node_next_idx
+        }
+    }
+
+    pub fn get_action_node_next_idx(&self, bt_type: BtType, owner_id: i32, node_id: i32) -> Option<usize> {
+        let k = save_node_key(owner_id, node_id);
+        self.action_node_progress_map(bt_type).get(&k).copied()
+    }
+
+    pub fn set_action_node_next_idx(&mut self, bt_type: BtType, owner_id: i32, node_id: i32, idx: usize) {
+        let k = save_node_key(owner_id, node_id);
+        self.action_node_progress_map_mut(bt_type).insert(k, idx);
+    }
+
+    pub fn remove_action_node_next_idx(&mut self, bt_type: BtType, owner_id: i32, node_id: i32) {
+        let k = save_node_key(owner_id, node_id);
+        self.action_node_progress_map_mut(bt_type).remove(&k);
+    }
+
+    pub fn paused_action_node_ids_for_bt(&self, bt_type: BtType, owner_id: i32) -> Vec<i32> {
         let prefix = ((owner_id as u32) as u64) << 32;
         let mask = 0xFFFF_FFFF_0000_0000u64;
-        self.action_node_next_idx
+        self.action_node_progress_map(bt_type)
+            .keys()
+            .filter_map(|&k| ((k & mask) == prefix).then_some((k & 0xFFFF_FFFF) as i32))
+            .collect()
+    }
+
+    pub fn has_any_action_node_progress_for_bt(&self, bt_type: BtType, owner_id: i32) -> bool {
+        let prefix = ((owner_id as u32) as u64) << 32;
+        let mask = 0xFFFF_FFFF_0000_0000u64;
+        self.action_node_progress_map(bt_type)
+            .keys()
+            .any(|&k| (k & mask) == prefix)
+    }
+
+    pub fn clear_action_node_progress_for_bt(&mut self, bt_type: BtType, owner_id: i32) {
+        let prefix = ((owner_id as u32) as u64) << 32;
+        let mask = 0xFFFF_FFFF_0000_0000u64;
+        self.action_node_progress_map_mut(bt_type)
             .retain(|&k, _| (k & mask) != prefix);
     }
 
-    pub fn has_pending_flow_for_node(&self, quest_id: i32, node_id: i32) -> bool {
+    pub fn clear_action_node_progress_for_owner(&mut self, owner_id: i32) {
+        self.clear_action_node_progress_for_bt(BtType::BtTypeQuest, owner_id);
+    }
+
+    pub fn has_pending_flow_for_bt_node(&self, bt_type: BtType, quest_id: i32, node_id: i32) -> bool {
         self.pending_flows
             .iter()
-            .any(|q| q.quest_id == quest_id && q.node_id == node_id)
+            .any(|q| q.bt_type == bt_type && q.quest_id == quest_id && q.node_id == node_id)
+    }
+
+    pub fn has_pending_or_deferred_flow_for_bt_node(
+        &self,
+        bt_type: BtType,
+        quest_id: i32,
+        node_id: i32,
+    ) -> bool {
+        self.is_flow_active_for_node(bt_type, quest_id, node_id)
+            || self.has_pending_flow_for_bt_node(bt_type, quest_id, node_id)
+            || self.pending_deferred_actions.iter().any(|e| {
+                e.bt_type == bt_type
+                    && e.quest_id == quest_id
+                    && e.node_id == node_id
+                    && e.actions
+                        .iter()
+                        .any(crate::helpers::quest_engine::triggers::is_sync_play_flow_action)
+            })
+    }
+
+    pub fn has_pending_flow_for_node(&self, quest_id: i32, node_id: i32) -> bool {
+        self.has_pending_flow_for_bt_node(BtType::BtTypeQuest, quest_id, node_id)
     }
 
     pub fn enqueue_pending_flow(
@@ -602,7 +718,27 @@ impl Scene {
         flow_id: i32,
         state_id: i32,
     ) {
+        self.enqueue_pending_flow_with_bt(
+            BtType::BtTypeQuest,
+            quest_id,
+            node_id,
+            flow_list_name,
+            flow_id,
+            state_id,
+        );
+    }
+
+    pub fn enqueue_pending_flow_with_bt(
+        &mut self,
+        bt_type: BtType,
+        quest_id: i32,
+        node_id: i32,
+        flow_list_name: &str,
+        flow_id: i32,
+        state_id: i32,
+    ) {
         if self.active_flow_inc_id != 0
+            && self.active_flow_bt_type == bt_type
             && self.active_flow_quest_id == quest_id
             && self.active_flow_node_id == node_id
             && self.active_flow_id == flow_id
@@ -612,7 +748,8 @@ impl Scene {
             return;
         }
         if self.pending_flows.iter().any(|q| {
-            q.quest_id == quest_id
+            q.bt_type == bt_type
+                && q.quest_id == quest_id
                 && q.node_id == node_id
                 && q.flow_id == flow_id
                 && q.state_id == state_id
@@ -621,6 +758,7 @@ impl Scene {
             return;
         }
         self.pending_flows.push(ScenePendingFlow {
+            bt_type,
             quest_id,
             node_id,
             flow_list_name: flow_list_name.to_string(),
@@ -734,9 +872,13 @@ impl Scene {
             .min()
     }
 
-    pub fn clear_deferred_actions_for_owner(&mut self, owner_id: i32) {
+    pub fn clear_deferred_actions_for_bt(&mut self, bt_type: BtType, owner_id: i32) {
         self.pending_deferred_actions
-            .retain(|e| e.quest_id != owner_id);
+            .retain(|e| !(e.bt_type == bt_type && e.quest_id == owner_id));
+    }
+
+    pub fn clear_deferred_actions_for_owner(&mut self, owner_id: i32) {
+        self.clear_deferred_actions_for_bt(BtType::BtTypeQuest, owner_id);
     }
 
     pub fn set_deferred_join_flow(
@@ -797,10 +939,7 @@ impl Scene {
             ctx.context_id = id;
         }
         if let Some(fsm) = &mut storage.fsm {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-            fsm.init_runtime(now_ms)?;
+            fsm.init_runtime(now_millis())?;
         }
         let has_fsm = storage.fsm.is_some();
         let index = self.entities.len();
@@ -1154,7 +1293,8 @@ impl Scene {
     }
 
     pub fn next_deferred_spatial_spawns_delay_ms(&self, now_ms: i64) -> Option<i64> {
-        self.deferred_spatial_spawns_at_ms.map(|due| due - now_ms)
+        self.deferred_spatial_spawns_at_ms
+            .map(|due| (due - now_ms).max(0))
     }
 
     pub fn take_due_deferred_spatial_spawns(&mut self, now_ms: i64) -> bool {
@@ -1463,8 +1603,49 @@ impl Scene {
         self.bt_timers.clear();
     }
 
+    pub fn remove_bt_timers_for_bt(&mut self, bt_type: BtType, owner_id: i32) {
+        let want_lp = bt_type == BtType::BtTypeLevelPlay;
+        self.bt_timers.retain(|t| {
+            if t.owner_id != owner_id {
+                return true;
+            }
+            if t.inc_id == 0 {
+                return false;
+            }
+            let (is_lp, _) = crate::helpers::quest_types::decode_tree_inc_id(t.inc_id);
+            is_lp != want_lp
+        });
+    }
+
+    pub fn clear_repeater_state_for_bt(&mut self, bt_type: BtType, owner_id: i32) {
+        let tree_key_hi = if bt_type == BtType::BtTypeLevelPlay {
+            owner_id
+        } else {
+            -owner_id
+        };
+        self.lp_repeater_cooldowns
+            .retain(|&k, _| ((k >> 32) as i32) != tree_key_hi);
+        self.repeater_counts
+            .retain(|&k, _| ((k >> 32) as i32) != tree_key_hi);
+    }
+
+    pub fn find_bt_timer_node_id(&self, owner_id: i32, inc_id: i64, timer_type: &str) -> Option<i32> {
+        self.bt_timers
+            .iter()
+            .find(|t| {
+                t.owner_id == owner_id
+                    && (inc_id == 0 || t.inc_id == inc_id)
+                    && (timer_type.is_empty() || t.timer_type == timer_type)
+            })
+            .map(|t| t.node_id)
+    }
+
     pub fn remove_bt_timers_for_owner(&mut self, owner_id: i32) {
         self.bt_timers.retain(|t| t.owner_id != owner_id);
+    }
+
+    pub fn remove_bt_timers_for_bt_owner(&mut self, bt_type: BtType, owner_id: i32) {
+        self.remove_bt_timers_for_bt(bt_type, owner_id);
     }
 
     pub fn next_quest_wake_delay_ms(&self, now_ms: i64) -> Option<i64> {
@@ -1483,6 +1664,10 @@ impl Scene {
                 .min(),
             self.lp_fail_timers.next_wake_delay_ms(now_ms),
             self.next_deferred_wait_delay_ms(now_ms),
+            self.lp_repeater_cooldowns
+                .values()
+                .map(|&ready_ms| (ready_ms - now_ms).max(0))
+                .min(),
         ]
         .into_iter()
         .flatten()
@@ -1550,9 +1735,19 @@ impl Scene {
         owner_id: i32,
         inc_id: i64,
     ) -> Option<&BtOccupation> {
+        self.find_occupation_conflict_for_bt(resource_name, BtType::BtTypeQuest, owner_id, inc_id)
+    }
+
+    pub fn find_occupation_conflict_for_bt(
+        &self,
+        resource_name: &str,
+        bt_type: BtType,
+        owner_id: i32,
+        inc_id: i64,
+    ) -> Option<&BtOccupation> {
         self.bt_occupations.iter().find(|occ| {
             occ.resource_name == resource_name
-                && !(occ.owner_id == owner_id && occ.inc_id == inc_id)
+                && !(occ.bt_type == bt_type && occ.owner_id == owner_id && occ.inc_id == inc_id)
         })
     }
 
@@ -1589,28 +1784,87 @@ impl Scene {
             .retain(|o| !(o.owner_id == owner_id && o.inc_id == inc_id));
     }
 
-    pub fn release_occupations_for_node(&mut self, owner_id: i32, node_id: i32) {
+    pub fn release_occupations_for_tree_bt(&mut self, bt_type: BtType, owner_id: i32, inc_id: i64) {
+        self.bt_occupations.retain(|o| {
+            !(o.bt_type == bt_type && o.owner_id == owner_id && (inc_id == 0 || o.inc_id == inc_id))
+        });
+    }
+
+    pub fn release_occupations_for_node_bt(&mut self, bt_type: BtType, owner_id: i32, node_id: i32) {
         self.bt_occupations
-            .retain(|o| !(o.owner_id == owner_id && o.node_id == node_id));
+            .retain(|o| !(o.bt_type == bt_type && o.owner_id == owner_id && o.node_id == node_id));
     }
 
-    pub fn has_save_node_entered(&self, owner_id: i32, node_id: i32) -> bool {
+    pub fn release_occupations_for_node(&mut self, owner_id: i32, node_id: i32) {
+        self.release_occupations_for_node_bt(BtType::BtTypeQuest, owner_id, node_id);
+    }
+
+    fn save_nodes_vec(&self, bt_type: BtType) -> &Vec<u64> {
+        if bt_type == BtType::BtTypeLevelPlay {
+            &self.lp_save_node_keys
+        } else {
+            &self.save_node_keys
+        }
+    }
+
+    fn save_nodes_vec_mut(&mut self, bt_type: BtType) -> &mut Vec<u64> {
+        if bt_type == BtType::BtTypeLevelPlay {
+            &mut self.lp_save_node_keys
+        } else {
+            &mut self.save_node_keys
+        }
+    }
+
+    pub fn has_save_node_entered_for_bt(&self, bt_type: BtType, owner_id: i32, node_id: i32) -> bool {
         let k = save_node_key(owner_id, node_id);
-        self.save_node_keys.contains(&k)
+        self.save_nodes_vec(bt_type).contains(&k)
     }
 
-    pub fn mark_save_node_entered(&mut self, owner_id: i32, node_id: i32) -> bool {
-        if self.has_save_node_entered(owner_id, node_id) {
+    pub fn mark_save_node_entered_for_bt(&mut self, bt_type: BtType, owner_id: i32, node_id: i32) -> bool {
+        if self.has_save_node_entered_for_bt(bt_type, owner_id, node_id) {
             return false;
         }
-        self.save_node_keys.push(save_node_key(owner_id, node_id));
+        self.save_nodes_vec_mut(bt_type).push(save_node_key(owner_id, node_id));
         true
     }
 
-    pub fn clear_save_nodes_for_owner(&mut self, owner_id: i32) {
+    pub fn clear_save_nodes_for_bt(&mut self, bt_type: BtType, owner_id: i32) {
         let prefix = ((owner_id as u32) as u64) << 32;
         let mask = 0xFFFF_FFFF_0000_0000u64;
-        self.save_node_keys.retain(|&k| (k & mask) != prefix);
+        self.save_nodes_vec_mut(bt_type).retain(|&k| (k & mask) != prefix);
+    }
+
+    pub fn has_save_node_entered(&self, owner_id: i32, node_id: i32) -> bool {
+        self.has_save_node_entered_for_bt(BtType::BtTypeQuest, owner_id, node_id)
+    }
+
+    pub fn mark_save_node_entered(&mut self, owner_id: i32, node_id: i32) -> bool {
+        self.mark_save_node_entered_for_bt(BtType::BtTypeQuest, owner_id, node_id)
+    }
+
+    pub fn clear_save_nodes_for_owner(&mut self, owner_id: i32) {
+        self.clear_save_nodes_for_bt(BtType::BtTypeQuest, owner_id);
+    }
+
+    pub fn record_lp_killed_entity(&mut self, lp_id: i32, entity_cfg_id: i32) {
+        if lp_id > 0 && entity_cfg_id > 0 {
+            self.lp_killed_entities.insert(save_node_key(lp_id, entity_cfg_id));
+        }
+    }
+
+    pub fn has_lp_killed_entity(&self, lp_id: i32, entity_cfg_id: i32) -> bool {
+        lp_id > 0
+            && entity_cfg_id > 0
+            && self.lp_killed_entities.contains(&save_node_key(lp_id, entity_cfg_id))
+    }
+
+    pub fn clear_lp_killed_entities(&mut self, lp_id: i32) {
+        if lp_id <= 0 {
+            return;
+        }
+        let prefix = ((lp_id as u32) as u64) << 32;
+        let mask = 0xFFFF_FFFF_0000_0000u64;
+        self.lp_killed_entities.retain(|&k| (k & mask) != prefix);
     }
 
     pub fn set_entity_position(

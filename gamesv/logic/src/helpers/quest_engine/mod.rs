@@ -31,8 +31,9 @@ use crate::sink::PushSink;
 
 pub use events::*;
 pub use tree::{
-    StepResult, check_node_occupation_and_save_pub, eval_quest_failed_condition_pub, now_ms_pub,
-    parse_timer_delay_ms_pub, step_pending_control_nodes,
+    StepResult, check_node_occupation_and_save_pub, eval_quest_failed_condition_for_bt_pub,
+    eval_quest_failed_condition_pub, now_ms_pub, parse_timer_delay_ms_pub,
+    step_pending_control_nodes,
 };
 pub use triggers::{
     eval_child_condition_auto, eval_inline_condition, get_child_condition_pub,
@@ -66,7 +67,7 @@ pub fn action_callbacks<S: PushSink + ?Sized>() -> ActionCallbacks<'static, S> {
             if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(ctx) {
                 crate::helpers::level_play::on_level_play_enabled(&mut lp_ctx, lp_id, enabled)?;
             }
-            if enabled && tree::recheck_pending_conditions(ctx)? {
+            if tree::recheck_pending_conditions(ctx)? {
                 tree::finalize_progression(ctx)?;
             }
             Ok(())
@@ -76,7 +77,7 @@ pub fn action_callbacks<S: PushSink + ?Sized>() -> ActionCallbacks<'static, S> {
         on_destroy_quest: Some(destroy_quest),
         on_finish_condition: Some(|ctx, owner_id, node_id| {
             if owner_id > 0 && node_id > 0 {
-                let _ = events::on_submit_node(ctx, owner_id, i64::from(owner_id), node_id)?;
+                events::on_server_finish_condition(ctx, owner_id, node_id)?;
             }
             Ok(())
         }),
@@ -106,9 +107,19 @@ fn discard_save_block_progress_on_login<S: PushSink + ?Sized>(
         else {
             continue;
         };
-        let discard = save_block::plan_login_discard(&nodes, &active_nodes, &finished_nodes);
+        let paused_nodes = ctx
+            .scene
+            .as_deref()
+            .map(|s| s.paused_action_node_ids_for_bt(BtType::BtTypeQuest, quest_id))
+            .unwrap_or_default();
+        let discard = save_block::plan_login_discard_with_extra(
+            &nodes,
+            &active_nodes,
+            &finished_nodes,
+            &paused_nodes,
+        );
         if discard.is_empty() {
-            if active_nodes.is_empty() && !nodes.is_empty() {
+            if active_nodes.is_empty() && paused_nodes.is_empty() && !nodes.is_empty() {
                 ctx.quest_comp.login_restore.reenter_quests.push(quest_id);
                 tracing::info!(
                     target: "quest_engine",
@@ -116,6 +127,13 @@ fn discard_save_block_progress_on_login<S: PushSink + ?Sized>(
                 );
             }
             continue;
+        }
+        if let Some(scene) = ctx.scene.as_deref_mut() {
+            for &nid in &paused_nodes {
+                if discard.reenter.contains(&nid) {
+                    scene.remove_action_node_next_idx(BtType::BtTypeQuest, quest_id, nid);
+                }
+            }
         }
 
         if let Some(aq) = ctx.quest_comp.info.find_active_quest_mut(quest_id) {
@@ -253,6 +271,7 @@ pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>) -> io:
     ensure_active_quest_targets_spawned(ctx);
     if let Some(scene) = ctx.scene.as_deref_mut() {
         scene.login_world_synced = true;
+        scene.synced_world_instance_id = Some(scene.instance_id);
     }
     ctx.quest_comp.save(ctx.fs)?;
     Ok(())
@@ -270,6 +289,27 @@ pub fn resync_on_reconnect<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>) 
         .as_deref()
         .is_some_and(|s| s.scene_loading_finished);
     if client_loaded {
+        let missing_active: Vec<i32> = ctx
+            .quest_comp
+            .info
+            .active_quests
+            .iter()
+            .filter(|aq| aq.active_nodes.is_empty())
+            .map(|aq| aq.quest_id)
+            .filter(|qid| {
+                !ctx.quest_comp.login_restore.reenter_quests.contains(qid)
+                    && ctx
+                        .assets
+                        .quest_nodes
+                        .get_owner_nodes(*qid)
+                        .is_ok_and(|ns| !ns.is_empty())
+            })
+            .collect();
+        ctx.quest_comp
+            .login_restore
+            .reenter_quests
+            .extend(missing_active);
+        reenter_save_blocks_after_login(ctx)?;
         ensure_active_quest_targets_spawned(ctx);
     }
     let aq_snap: Vec<(i32, Vec<i32>)> = ctx
@@ -545,9 +585,20 @@ pub fn interrupt_active_flow_for_quest<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
     quest_id: i32,
 ) -> Option<i64> {
+    interrupt_active_flow_for_bt(ctx, BtType::BtTypeQuest, quest_id)
+}
+
+pub fn interrupt_active_flow_for_bt<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    bt_type: BtType,
+    owner_id: i32,
+) -> Option<i64> {
     let (ended_inc, flow_name, flow_id, state_id, clear_black_screen) = {
         let scene = ctx.scene.as_deref_mut()?;
-        if scene.active_flow_inc_id == 0 || scene.active_flow_quest_id != quest_id {
+        if scene.active_flow_inc_id == 0
+            || scene.active_flow_bt_type != bt_type
+            || scene.active_flow_quest_id != owner_id
+        {
             return None;
         }
         let ended_inc = scene.active_flow_inc_id;
@@ -997,10 +1048,14 @@ pub fn destroy_quest<S: PushSink + ?Sized>(
         scene.session_destroyed_quests.insert(quest_id);
         scene.quest_timers.cancel_quest(quest_id);
         scene.fail_timers.cancel_quest(quest_id);
-        scene.release_occupations_for_tree(quest_id, i64::from(quest_id));
-        scene.clear_save_nodes_for_owner(quest_id);
-        scene.clear_action_node_progress_for_owner(quest_id);
-        scene.clear_deferred_actions_for_owner(quest_id);
+        scene.release_occupations_for_tree_bt(
+            BtType::BtTypeQuest,
+            quest_id,
+            i64::from(quest_id),
+        );
+        scene.clear_save_nodes_for_bt(BtType::BtTypeQuest, quest_id);
+        scene.clear_action_node_progress_for_bt(BtType::BtTypeQuest, quest_id);
+        scene.clear_deferred_actions_for_bt(BtType::BtTypeQuest, quest_id);
         interrupt_active_flow_for_quest(ctx, quest_id);
     }
     crate::helpers::alert::auto_disable_for_quest(ctx, quest_id)?;
@@ -1743,7 +1798,8 @@ pub fn gm_skip_quest<S: PushSink + ?Sized>(
 
     if let Some(scene) = ctx.scene.as_deref_mut() {
         scene.release_occupations_for_tree(quest_id, i64::from(quest_id));
-        if scene.active_flow_inc_id != 0 && scene.active_flow_quest_id == quest_id {
+        if scene.is_flow_active_for_node(BtType::BtTypeQuest, quest_id, scene.active_flow_node_id)
+        {
             scene.clear_active_flow();
         }
     }
@@ -1964,25 +2020,43 @@ pub fn leave_inst<S: PushSink + ?Sized>(
 }
 
 pub fn restart_flow<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>, flow_inc_id: i64) {
-    let Some((flow_name, cur_inc_id, qid, node_id, flow_id, state_id)) =
+    let Some((flow_name, cur_inc_id, bt_type, qid, node_id, flow_id, state_id, is_async)) =
         ctx.scene.as_deref().and_then(|scene| {
-            if scene.active_flow_list_name.is_empty() {
-                return None;
-            }
-            if flow_inc_id != 0
-                && scene.active_flow_inc_id != 0
-                && scene.active_flow_inc_id != flow_inc_id
+            if !scene.active_flow_list_name.is_empty()
+                && (flow_inc_id == 0
+                    || scene.active_flow_inc_id == 0
+                    || scene.active_flow_inc_id == flow_inc_id)
             {
-                return None;
+                Some((
+                    scene.active_flow_list_name.clone(),
+                    scene.active_flow_inc_id,
+                    scene.active_flow_bt_type,
+                    scene.active_flow_quest_id,
+                    scene.active_flow_node_id,
+                    scene.active_flow_id,
+                    scene.active_flow_state_id,
+                    false,
+                ))
+            } else if flow_inc_id != 0 {
+                scene
+                    .async_flows
+                    .iter()
+                    .find(|af| af.inc_id == flow_inc_id)
+                    .map(|af| {
+                        (
+                            af.flow_list_name.clone(),
+                            af.inc_id,
+                            af.bt_type,
+                            af.quest_id,
+                            af.node_id,
+                            af.flow_id,
+                            af.state_id,
+                            true,
+                        )
+                    })
+            } else {
+                None
             }
-            Some((
-                scene.active_flow_list_name.clone(),
-                scene.active_flow_inc_id,
-                scene.active_flow_quest_id,
-                scene.active_flow_node_id,
-                scene.active_flow_id,
-                scene.active_flow_state_id,
-            ))
         })
     else {
         return;
@@ -1994,7 +2068,11 @@ pub fn restart_flow<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>, flow_in
     } else {
         ctx.quest_comp.info.alloc_flow_inc_id()
     };
-    let bt_inc_id = if qid != 0 { i64::from(qid) } else { inc_id };
+    let bt_inc_id = if qid > 0 {
+        crate::helpers::quest_types::bt_tree_inc_id(bt_type, qid)
+    } else {
+        inc_id
+    };
     ctx.sink.push(
         FlowStartNotify::MSG_ID,
         &FlowStartNotify {
@@ -2002,11 +2080,12 @@ pub fn restart_flow<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>, flow_in
             FlowListName: flow_name.into_bytes(),
             FlowId: flow_id,
             StateId: state_id,
+            aAsync: is_async,
             GameCtx: Some(GameCtxPb {
                 CtxType: Some(sonoro_proto::enums::GameCtxType::BehaviorTree),
                 CtxInfo: Some(GameCtxPbCtxInfoOneof::BehaviorTree(BehaviorTreeCtxPb {
                     IncId: bt_inc_id,
-                    BtType: Some(BtType::BtTypeQuest),
+                    BtType: Some(bt_type),
                     BtId: qid,
                     NodeId: node_id,
                 })),

@@ -33,8 +33,8 @@ use sonoro_proto::pb::{
     MotorFightRefreshNextWaveGroupResponse, MotorFightResult, MotorFightResultBase,
     MotorFightSelectBuffGateRequest, MotorFightSelectBuffGateResponse,
     MotorFightSelectCollectionRequest, MotorFightSelectCollectionResponse, MotorFightSettleRequest,
-    MotorFightSettleResponse, MotorFightTalentUpRequest, MotorFightTalentUpResponse,
-    MotorInfoRequest, MotorInfoResponse, MotorIsEnablePush, MotorLevelOneKeyRewardRequest,
+    MotorFightSettleResponse, MotorFightTalentPb, MotorFightTalentTreeUpdateNotify,
+    MotorFightTalentUpRequest, MotorFightTalentUpResponse, MotorInfoRequest, MotorInfoResponse, MotorIsEnablePush, MotorLevelOneKeyRewardRequest,
     MotorLevelOneKeyRewardResponse, MotorLinkTaskRequest, MotorLinkTaskResponse,
     MotorLockedTechUpdateNotify, MotorOnlineProgressReportPush, MotorOutlookCreatePresetRequest,
     MotorOutlookCreatePresetResponse, MotorOutlookDeletePresetRequest,
@@ -1736,13 +1736,22 @@ pub fn handle_motor_fight_enter_sub_level_request(
     state: &mut State,
     req: MotorFightEnterSubLevelRequest,
 ) -> Result<MotorFightEnterSubLevelResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        "motor:fight_sub_lv",
-        i64::from(req.SubLevelIndex),
-    )
-    .map_err(|e| e.to_string())?;
+    {
+        let info = &mut state.player_components.progress.info;
+        let is_first_sub_level = req.SubLevelIndex <= 0 || req.SubLevelIndex % 100 == 1;
+        if is_first_sub_level || info.get_key_int("motor:fight_run_active") == 0 {
+            info.set_key_int("motor_fight:run_kills", 0);
+            info.set_key_int("motor_fight:run_score", 0);
+            info.set_key_int("motor_fight:run_deaths", 0);
+            info.set_key_int("motor:fight_run_active", 1);
+        }
+        info.set_key_int("motor:fight_sub_lv", i64::from(req.SubLevelIndex));
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     Ok(MotorFightEnterSubLevelResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -1755,10 +1764,15 @@ pub fn handle_motor_fight_kill_request(
     if req.IsKilled {
         let info = &mut state.player_components.progress.info;
         info.add_key_int("motor_fight:kills", 1);
-        info.add_key_int(
-            "motor_fight:best_score",
+        info.add_key_int("motor_fight:run_kills", 1);
+        let run_score = info.add_key_int(
+            "motor_fight:run_score",
             if req.IsBoss { 500 } else { 100 },
         );
+        let prev_best = info.get_key_int("motor_fight:best_score");
+        if run_score > prev_best {
+            info.set_key_int("motor_fight:best_score", run_score);
+        }
         state
             .player_components
             .progress
@@ -1831,11 +1845,9 @@ pub fn handle_motor_fight_player_dead_request(
     state: &mut State,
     _req: MotorFightPlayerDeadRequest,
 ) -> Result<MotorFightPlayerDeadResponse, String> {
-    state
-        .player_components
-        .progress
-        .info
-        .add_key_int("motor:fight_deaths", 1);
+    let info = &mut state.player_components.progress.info;
+    info.add_key_int("motor:fight_deaths", 1);
+    info.add_key_int("motor_fight:run_deaths", 1);
     state
         .player_components
         .progress
@@ -2008,26 +2020,90 @@ pub fn handle_motor_fight_select_collection_request(
     })
 }
 
+fn motor_fight_talent_config(
+    assets: &Assets,
+    talent_id: i32,
+) -> Option<(i32, i32, &'static [i32])> {
+    static TALENTS: OnceLock<(i32, Vec<(i32, i32, Vec<i32>)>)> = OnceLock::new();
+    let (item_id, entries) = TALENTS.get_or_init(|| {
+        let activity_rows = assets.read_raw_json_array("MotorFightActivity");
+        let talent_item_id = activity_rows
+            .first()
+            .and_then(|r| r.get("TalentTreeItemId"))
+            .and_then(serde_json::Value::as_i64)
+            .map(|v| v as i32)
+            .filter(|&id| id > 0)
+            .unwrap_or(80_800_001);
+        let mut parsed = Vec::new();
+        for row in &assets.read_raw_json_array("MotorFightTalent") {
+                let id = row
+                    .get("Id")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0) as i32;
+                if id <= 0 {
+                    continue;
+                }
+                let consume = row
+                    .get("Consume")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0)
+                    .max(0) as i32;
+                let pre = row
+                    .get("PreNode")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_i64().map(|x| x as i32))
+                            .filter(|&pid| pid > 0)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            parsed.push((id, consume, pre));
+        }
+        (talent_item_id, parsed)
+    });
+    entries
+        .iter()
+        .find(|(id, _, _)| *id == talent_id)
+        .map(|(_, consume, pre)| (*item_id, *consume, pre.as_slice()))
+}
+
 pub fn handle_motor_fight_settle_request(
     state: &mut State,
     _req: MotorFightSettleRequest,
 ) -> Result<MotorFightSettleResponse, String> {
     let pc = &mut state.player_components.progress;
     let sub_lv = pc.info.get_key_int("motor:fight_sub_lv").max(1) as i32;
-    let kills = pc.info.get_key_int("motor_fight:kills").max(0) as i32;
-    let score = pc.info.get_key_int("motor_fight:best_score");
-    let is_first_clear = pc.info.mark_claim(&format!("motor_fight:clear:{sub_lv}"));
+    let main_lv = if sub_lv >= 100_000 { sub_lv / 100 } else { sub_lv };
+    let kills = pc.info.get_key_int("motor_fight:run_kills").max(0) as i32;
+    let score = pc.info.get_key_int("motor_fight:run_score").max(0);
+    let win = pc.info.get_key_int("motor_fight:run_deaths") == 0;
+    let is_first_clear = win && pc.info.mark_claim(&format!("motor_fight:clear:{sub_lv}"));
     let best_key = format!("motor_fight:best:{sub_lv}");
-    let prev_best = pc.info.get_key_int(&best_key);
-    let is_best = score > prev_best;
+    let mf_best_key = format!("mf:best:{main_lv}");
+    let prev_best = pc
+        .info
+        .get_key_int(&best_key)
+        .max(pc.info.get_key_int(&mf_best_key));
+    let is_best = win && score > prev_best;
     if is_best {
         pc.info.set_key_int(&best_key, score);
+        pc.info.set_key_int(&mf_best_key, score);
     }
-    pc.info.add_key_int("motor_fight:pass", 1);
+    let global_best = pc.info.get_key_int("motor_fight:best_score");
+    if win && score > global_best {
+        pc.info.set_key_int("motor_fight:best_score", score);
+    }
+    if win {
+        pc.info.add_key_int("motor_fight:pass", 1);
+    }
+    pc.info.set_key_int("motor:fight_run_active", 0);
+    pc.info.set_key_int("motor_fight:run_kills", 0);
+    pc.info.set_key_int("motor_fight:run_score", 0);
+    pc.info.set_key_int("motor_fight:run_deaths", 0);
     pc.save(&state.fs).map_err(|e| e.to_string())?;
 
     if is_first_clear {
-        let main_lv = if sub_lv >= 100_000 { sub_lv / 100 } else { sub_lv };
         let mut rctx = state.reward_context();
         reward::grant_table_reward(
             &mut rctx,
@@ -2044,13 +2120,13 @@ pub fn handle_motor_fight_settle_request(
 
     Ok(MotorFightSettleResponse {
         ErrCode: Some(ErrorCode::Success),
-        Win: true,
+        Win: win,
         Result: Some(MotorFightResult {
             IsFirstClear: is_first_clear,
             IsBestScore: is_best,
             ResultCommon: Some(MotorFightResultBase {
                 LevelId: sub_lv,
-                TotalScore: score.max(0) as i32,
+                TotalScore: score as i32,
                 KillMonsterCount: kills,
                 ..Default::default()
             }),
@@ -2063,16 +2139,66 @@ pub fn handle_motor_fight_talent_up_request(
     state: &mut State,
     req: MotorFightTalentUpRequest,
 ) -> Result<MotorFightTalentUpResponse, String> {
-    state
-        .player_components
-        .progress
-        .info
-        .add_key_int(&format!("motor:fight_tal:{}", req.TalentId), 1);
+    let Some((cost_item_id, consume_count, pre_nodes)) =
+        motor_fight_talent_config(&state.assets, req.TalentId)
+    else {
+        return Ok(MotorFightTalentUpResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    };
+    {
+        let info = &state.player_components.progress.info;
+        let already_unlocked = info.get_key_int(&format!("mf:talent:{}", req.TalentId)) > 0
+            || info.get_key_int(&format!("motor:fight_tal:{}", req.TalentId)) >= 1;
+        let pre_ok = pre_nodes.iter().all(|pid| {
+            info.get_key_int(&format!("mf:talent:{pid}")) > 0
+                || info.get_key_int(&format!("motor:fight_tal:{pid}")) > 0
+        });
+        if already_unlocked || !pre_ok {
+            return Ok(MotorFightTalentUpResponse {
+                ErrorCode: Some(ErrorCode::RequestParamError),
+            });
+        }
+    }
+    if consume_count > 0 && cost_item_id > 0 {
+        let ok = consume::consume_costs(
+            &mut state.conn,
+            &state.fs,
+            &mut state.player_components.basic,
+            &mut state.player_components.inventory,
+            &[CostItem {
+                id: cost_item_id,
+                count: consume_count,
+            }],
+        )
+        .map_err(|e| e.to_string())?;
+        if !ok {
+            return Ok(MotorFightTalentUpResponse {
+                ErrorCode: Some(ErrorCode::ErrItemNotEnough),
+            });
+        }
+    }
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int(&format!("mf:talent:{}", req.TalentId), 1);
+        info.set_key_int(&format!("mf:talent_use:{}", req.TalentId), 1);
+        info.set_key_int(&format!("motor:fight_tal:{}", req.TalentId), 1);
+    }
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
+    let _ = state.conn.push_msg(
+        MotorFightTalentTreeUpdateNotify::MSG_ID,
+        &MotorFightTalentTreeUpdateNotify {
+            Talent: vec![MotorFightTalentPb {
+                Id: req.TalentId,
+                Unlock: true,
+                InUse: true,
+            }],
+        },
+    );
     Ok(MotorFightTalentUpResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

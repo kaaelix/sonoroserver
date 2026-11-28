@@ -428,11 +428,10 @@ pub fn create_role_entity(
     let ornament_born_buff_ids =
         cosmetics::build_ornament_born_buff_ids_for_ids(assets, &ornament_ids);
 
-    let formation_idx = usize::try_from(scene.formation_info.cur_formation)
+    let is_cur_role = usize::try_from(scene.formation_info.cur_formation)
         .ok()
-        .filter(|&i| i < scene.formation_info.formations.len())
-        .unwrap_or(0);
-    let is_cur_role = scene.formation_info.formations[formation_idx].cur_role == role;
+        .and_then(|idx| scene.formation_info.formations.get(idx))
+        .is_some_and(|f| f.cur_role == role);
 
     let be_hit_entry = assets
         .tables
@@ -693,9 +692,7 @@ pub fn create_role_entity(
     if let Some(passive) = storage.passive_ga_skill.as_mut() {
         passive.skill_component_pb = passive_skills;
     }
-    if is_cur_role {
-        storage.visible = true;
-    }
+    storage.visible = is_cur_role;
     let _ = storage.save(fs, player_id, scene.instance_id);
     Ok(entity)
 }

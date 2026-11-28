@@ -160,9 +160,25 @@ fn handle_combat_push(
             fsm::handle_an_start_push(common.as_ref(), p);
         }
         CombatPushDataMessageOneof::MontagePlayPush(p) => {
+            if let Some(eid) = common.as_ref().map(|c| c.EntityId).filter(|&id| id != 0) {
+                let mname = if p.Name.is_empty() {
+                    format!("hash:{}", p.Path)
+                } else {
+                    String::from_utf8_lossy(&p.Name).into_owned()
+                };
+                fsm::apply_montage_to_entity_fsm(state, events, eid, &mname, pack);
+            }
             fsm::handle_montage_play_push(common.as_ref(), p);
         }
         CombatPushDataMessageOneof::FsmPlayMontagePush(p) => {
+            if let Some(eid) = common.as_ref().map(|c| c.EntityId).filter(|&id| id != 0) {
+                let mname = if p.MontageName.is_empty() {
+                    format!("hash:{}", p.MontagePathHash)
+                } else {
+                    String::from_utf8_lossy(&p.MontageName).into_owned()
+                };
+                fsm::apply_montage_to_entity_fsm(state, events, eid, &mname, pack);
+            }
             fsm::handle_fsm_play_montage_push(common.as_ref(), p);
         }
         CombatPushDataMessageOneof::FsmConditionPassPush(p) => {
@@ -323,9 +339,14 @@ fn handle_combat_request_inner(
         Req::ChangeSummonEntityStateRequest(r) => Resp::ChangeSummonEntityStateResponse(
             combat_envelope_handlers::handle_change_summon_entity_state_request(state, r),
         ),
-        Req::GameplayCueRequest(r) => {
-            Resp::GameplayCueResponse(combat_envelope_handlers::handle_gameplay_cue_request(r))
-        }
+        Req::GameplayCueRequest(r) => Resp::GameplayCueResponse(
+            combat_envelope_handlers::handle_gameplay_cue_request_with_state(
+                state,
+                common.clone(),
+                pack,
+                r,
+            ),
+        ),
         Req::CaughtRequest(r) => {
             Resp::CaughtResponse(combat_envelope_handlers::handle_caught_request(r))
         }
@@ -347,9 +368,13 @@ fn handle_combat_request_inner(
         Req::EntityStaticHookMoveRequest(r) => Resp::EntityStaticHookMoveResponse(
             combat_envelope_handlers::handle_entity_static_hook_move_request(r),
         ),
-        Req::AiBlackboardsRequest(r) => {
-            Resp::AiBlackboardsResponse(combat_envelope_handlers::handle_ai_blackboards_request(r))
-        }
+        Req::AiBlackboardsRequest(r) => Resp::AiBlackboardsResponse(
+            combat_envelope_handlers::handle_ai_blackboards_request_with_state(
+                state,
+                common.as_ref(),
+                r,
+            ),
+        ),
         Req::AiBlackboardCdRequest(r) => Resp::AiBlackboardCdResponse(
             combat_envelope_handlers::handle_ai_blackboard_cd_request(r),
         ),
@@ -388,9 +413,15 @@ fn handle_combat_request_inner(
                 combat_envelope_handlers::handle_ts_anim_stop_request(r),
             )
         }
-        Req::RoleTagChangeRequest(r) => {
-            Resp::RoleTagChangeResponse(combat_envelope_handlers::handle_role_tag_change_request(r))
-        }
+        Req::RoleTagChangeRequest(r) => Resp::RoleTagChangeResponse(
+            combat_envelope_handlers::handle_role_tag_change_request_with_state(
+                state,
+                events,
+                common.as_ref(),
+                pack,
+                r,
+            ),
+        ),
         Req::CreateBulletRequest(r) => {
             Resp::CreateBulletResponse(combat_envelope_handlers::handle_create_bullet_request(r))
         }
@@ -401,7 +432,9 @@ fn handle_combat_request_inner(
             Resp::ANStartResponse(combat_envelope_handlers::handle_an_start_request(r))
         }
         Req::ClientCurrentRoleReportRequest(r) => Resp::ClientCurrentRoleReportResponse(
-            combat_envelope_handlers::handle_client_current_role_report_request(r),
+            combat_envelope_handlers::handle_client_current_role_report_request_with_state(
+                state, r,
+            ),
         ),
         Req::GaSwitchCommonEnemyProCampRequest(r) => Resp::GaSwitchCommonEnemyProCampResponse(
             combat_envelope_handlers::handle_ga_switch_enemy_camp_request(r),
@@ -452,6 +485,9 @@ fn handle_combat_request_inner(
             buff::handle_passive_skill_remove_request(state, common.as_ref(), pack, r),
         ),
         Req::HitRequest(r) => {
+            if let Some(eid) = common.as_ref().map(|c| c.EntityId).filter(|&id| id != 0) {
+                fsm::apply_hit_to_entity_fsm(state, events, eid, pack, r.HitInfo.as_ref());
+            }
             Resp::HitResponse(fsm::handle_hit_request(common.as_ref(), pack, r))
         }
         Req::HitEndRequest(r) => {
@@ -497,6 +533,16 @@ fn handle_combat_request_inner(
             ))
         }
         Req::FsmPlayMontageRequest(r) => {
+            if let Some(eid) = common.as_ref().map(|c| c.EntityId).filter(|&id| id != 0)
+                && (!r.MontageName.is_empty() || r.MontagePathHash != 0)
+            {
+                let mname = if r.MontageName.is_empty() {
+                    format!("hash:{}", r.MontagePathHash)
+                } else {
+                    String::from_utf8_lossy(&r.MontageName).into_owned()
+                };
+                fsm::apply_montage_to_entity_fsm(state, events, eid, &mname, pack);
+            }
             Resp::FsmPlayMontageResponse(fsm::handle_fsm_play_montage_request(common.as_ref(), r))
         }
         Req::AiHateRequest(r) => Resp::AiHateResponse(fsm::handle_ai_hate_request(

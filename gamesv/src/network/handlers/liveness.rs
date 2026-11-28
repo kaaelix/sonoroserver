@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
+use sonoro_gamesv_data::tables::liveness_task::LivenessTask as LivenessTaskCfg;
 use sonoro_gamesv_fs::progress_info::ProgressInfo;
-use sonoro_gamesv_logic::helpers::{craft, energy, reward};
+use sonoro_gamesv_logic::helpers::{condition, craft, energy, reward};
 use sonoro_proto::enums::ErrorCode;
 use sonoro_proto::pb::{
     LivenessCountUpdateNotify, LivenessInfo, LivenessRequest, LivenessResponse, LivenessTakeRequest,
@@ -10,8 +11,32 @@ use sonoro_proto::pb::{
 
 use super::State;
 
+fn evaluate_liveness_task(
+    state: &State,
+    eval_ctx: &condition::EvalContext<'_>,
+    row: &LivenessTaskCfg,
+) -> (i32, i32, bool, bool) {
+    let progress = &state.player_components.progress.info;
+    let condition_ok = row.UnlockCondition <= 0
+        || condition::eval_condition_or_group(eval_ctx, row.UnlockCondition);
+    let taken = progress.liveness.taken_tasks.contains(&row.TaskId);
+    let recorded = ProgressInfo::get_id_count(&progress.liveness.task_progress, row.TaskId);
+    let target = 1;
+    // TaskId 101 is the daily login task; an active session completes it automatically once unlocked.
+    let current = if taken {
+        recorded.max(target)
+    } else if row.TaskId == 101 && condition_ok {
+        recorded.max(target)
+    } else {
+        recorded.max(0)
+    };
+    let is_finished = condition_ok && current >= target;
+    (current, target, is_finished, condition_ok)
+}
+
 pub fn build_liveness_info_pb(state: &State, now_sec: i64) -> LivenessInfo {
     let progress = &state.player_components.progress.info;
+    let eval_ctx = state.eval_context();
     let tasks = state
         .assets
         .tables
@@ -20,14 +45,14 @@ pub fn build_liveness_info_pb(state: &State, now_sec: i64) -> LivenessInfo {
         .iter()
         .map(|row| {
             let taken = progress.liveness.taken_tasks.contains(&row.TaskId);
-            let cur = ProgressInfo::get_id_count(&progress.liveness.task_progress, row.TaskId).max(1);
+            let (cur, target, is_finished, cond_ok) = evaluate_liveness_task(state, &eval_ctx, row);
             LivenessTask {
                 Id: row.TaskId,
                 Current: cur,
-                Target: 1,
-                IsFinished: true,
+                Target: target,
+                IsFinished: is_finished,
                 IsTaken: taken,
-                ConditionFinishState: true,
+                ConditionFinishState: cond_ok,
             }
         })
         .collect();
@@ -132,6 +157,14 @@ pub fn handle_liveness_task_take_request(
             .taken_tasks
             .contains(&tid)
         {
+            continue;
+        }
+        let is_finished = {
+            let eval_ctx = state.eval_context();
+            let (_, _, finished, _) = evaluate_liveness_task(state, &eval_ctx, &task);
+            finished
+        };
+        if !is_finished {
             continue;
         }
         ProgressInfo::append_unique_id(

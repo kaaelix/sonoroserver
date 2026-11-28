@@ -154,6 +154,7 @@ fn round_trip(
     msg_id: u16,
     payload: &[u8],
     request_sent: &mut bool,
+    response_started: &mut bool,
 ) -> io::Result<LogicResponse> {
     let mut frame = Vec::with_capacity(11 + payload.len());
     frame.extend_from_slice(&player_id.to_le_bytes());
@@ -165,7 +166,11 @@ fn round_trip(
     stream.flush()?;
     *request_sent = true;
 
-    let resp_msg_id = read_u16_le(stream)?;
+    let mut resp_id_buf = [0u8; 2];
+    stream.read_exact(&mut resp_id_buf[..1])?;
+    *response_started = true;
+    stream.read_exact(&mut resp_id_buf[1..])?;
+    let resp_msg_id = u16::from_le_bytes(resp_id_buf);
     let resp_len = read_u32_le(stream)? as usize;
     let mut resp_bytes = vec![0u8; resp_len];
     if resp_len > 0 {
@@ -210,23 +215,95 @@ fn round_trip(
     })
 }
 
-fn pop_pooled_stream() -> Option<BridgeStream> {
-    STREAM_POOL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .pop()
+fn pop_pooled_from(pool: &Mutex<Vec<BridgeStream>>) -> Option<BridgeStream> {
+    pool.lock().unwrap_or_else(|e| e.into_inner()).pop()
 }
 
-fn push_pooled_stream(stream: BridgeStream) {
-    let mut pool = STREAM_POOL.lock().unwrap_or_else(|e| e.into_inner());
-    if pool.len() < MAX_POOLED_STREAMS {
-        pool.push(stream);
+fn push_pooled_to(pool: &Mutex<Vec<BridgeStream>>, stream: BridgeStream) {
+    let mut guard = pool.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.len() < MAX_POOLED_STREAMS {
+        guard.push(stream);
     }
 }
 
 fn in_process_enabled() -> bool {
     static IN_PROCESS_ENABLED: OnceLock<bool> = OnceLock::new();
     *IN_PROCESS_ENABLED.get_or_init(|| env::var_os("AKI_LOGIC_FORCE_IPC").is_none())
+}
+
+fn call_ipc_with(
+    pool: &Mutex<Vec<BridgeStream>>,
+    connect: impl Fn() -> io::Result<BridgeStream>,
+    player_id: i32,
+    flags: u8,
+    msg_id: u16,
+    payload: &[u8],
+) -> io::Result<LogicResponse> {
+    while let Some(mut stream) = pop_pooled_from(pool) {
+        let mut request_sent = false;
+        let mut response_started = false;
+        match round_trip(
+            &mut stream,
+            player_id,
+            flags,
+            msg_id,
+            payload,
+            &mut request_sent,
+            &mut response_started,
+        ) {
+            Ok(resp) => {
+                push_pooled_to(pool, stream);
+                return Ok(resp);
+            }
+            Err(err) => {
+                if err.kind() == io::ErrorKind::Unsupported {
+                    if msg_id != 0 {
+                        unsupported_lut()[msg_id as usize].store(true, Ordering::Relaxed);
+                    }
+                    push_pooled_to(pool, stream);
+                    return Err(err);
+                }
+                let retryable_idle_disconnect = !response_started
+                    && (!request_sent
+                        || matches!(
+                            err.kind(),
+                            io::ErrorKind::UnexpectedEof
+                                | io::ErrorKind::ConnectionReset
+                                | io::ErrorKind::BrokenPipe
+                        ));
+                if !retryable_idle_disconnect {
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    let mut fresh = connect()?;
+    let mut request_sent = false;
+    let mut response_started = false;
+    match round_trip(
+        &mut fresh,
+        player_id,
+        flags,
+        msg_id,
+        payload,
+        &mut request_sent,
+        &mut response_started,
+    ) {
+        Ok(resp) => {
+            push_pooled_to(pool, fresh);
+            Ok(resp)
+        }
+        Err(err) => {
+            if err.kind() == io::ErrorKind::Unsupported {
+                if msg_id != 0 {
+                    unsupported_lut()[msg_id as usize].store(true, Ordering::Relaxed);
+                }
+                push_pooled_to(pool, fresh);
+            }
+            Err(err)
+        }
+    }
 }
 
 pub fn call_player(
@@ -242,7 +319,7 @@ pub fn call_player(
         ));
     }
 
-    if msg_id != 0 && in_process_enabled() {
+    if in_process_enabled() {
         return match sonoro_aki_logic::dispatch_in_process(player_id, msg_id, payload) {
             Some(res) => Ok(LogicResponse {
                 msg_id: res.resp_msg_id,
@@ -262,7 +339,9 @@ pub fn call_player(
                     .collect(),
             }),
             None => {
-                unsupported_lut()[msg_id as usize].store(true, Ordering::Relaxed);
+                if msg_id != 0 {
+                    unsupported_lut()[msg_id as usize].store(true, Ordering::Relaxed);
+                }
                 Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "unhandled by logic service",
@@ -271,51 +350,7 @@ pub fn call_player(
         };
     }
 
-    let mut request_sent = false;
-    if let Some(mut stream) = pop_pooled_stream() {
-        match round_trip(&mut stream, player_id, flags, msg_id, payload, &mut request_sent) {
-            Ok(resp) => {
-                push_pooled_stream(stream);
-                return Ok(resp);
-            }
-            Err(err) => {
-                if err.kind() == io::ErrorKind::Unsupported {
-                    if msg_id != 0 {
-                        unsupported_lut()[msg_id as usize].store(true, Ordering::Relaxed);
-                    }
-                    push_pooled_stream(stream);
-                    return Err(err);
-                }
-                if request_sent {
-                    return Err(err);
-                }
-            }
-        }
-    }
-
-    let mut fresh = connect_stream()?;
-    match round_trip(
-        &mut fresh,
-        player_id,
-        flags,
-        msg_id,
-        payload,
-        &mut request_sent,
-    ) {
-        Ok(resp) => {
-            push_pooled_stream(fresh);
-            Ok(resp)
-        }
-        Err(err) => {
-            if err.kind() == io::ErrorKind::Unsupported {
-                if msg_id != 0 {
-                    unsupported_lut()[msg_id as usize].store(true, Ordering::Relaxed);
-                }
-                push_pooled_stream(fresh);
-            }
-            Err(err)
-        }
-    }
+    call_ipc_with(&STREAM_POOL, connect_stream, player_id, flags, msg_id, payload)
 }
 
 pub fn warm_up_in_process() {
@@ -326,4 +361,48 @@ pub fn warm_up_in_process() {
 
 pub fn ping() -> bool {
     call_player(0, 0, 0, &[]).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn pooled_stream_eof_retries_with_fresh_connection() {
+        let stale_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let stale_addr = stale_listener.local_addr().unwrap();
+        let stale_client = TcpStream::connect(stale_addr).unwrap();
+        let (stale_srv, _) = stale_listener.accept().unwrap();
+        drop(stale_srv);
+
+        let live_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let live_addr = live_listener.local_addr().unwrap();
+        let srv_thread = std::thread::spawn(move || {
+            let (mut conn, _) = live_listener.accept().unwrap();
+            let mut hdr = [0u8; 11];
+            conn.read_exact(&mut hdr).unwrap();
+            // resp_msg_id=0, resp_len=1, body=[1], push_count=0, grant_count=0
+            conn.write_all(&[0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0]).unwrap();
+            conn.flush().unwrap();
+        });
+
+        let pool = Mutex::new(vec![BridgeStream::Tcp(stale_client)]);
+        let resp = call_ipc_with(
+            &pool,
+            || {
+                let s = TcpStream::connect(live_addr)?;
+                s.set_read_timeout(Some(Duration::from_secs(2)))?;
+                Ok(BridgeStream::Tcp(s))
+            },
+            0,
+            0,
+            0,
+            &[],
+        )
+        .expect("should reconnect on stale pooled EOF");
+        assert_eq!(resp.msg_id, 0);
+        assert_eq!(resp.payload, vec![1]);
+        srv_thread.join().unwrap();
+    }
 }

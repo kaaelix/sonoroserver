@@ -2,16 +2,18 @@ use std::convert::Infallible;
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, RawQuery, State as AxumState};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-use rusqlite::Connection as SqliteConnection;
+use rusqlite::{Connection as SqliteConnection, OpenFlags};
 use serde::{Deserialize, Serialize};
+use sonoro_common::fs::FileSystem;
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_logic::commands;
 use sonoro_gamesv_logic::commands::{attribute, cheat, js_patches, progression};
@@ -264,11 +266,21 @@ async fn handle_state(
     };
     let is_admin = is_valid_admin(req_admin);
 
-    if !is_admin && !is_authorized_for_player(role_id, req_sign, req_admin) {
-        return json_resp(
-            StatusCode::UNAUTHORIZED,
-            r#"{"ok":false,"online":false,"auth_required":true,"online_players":[],"message":"Access denied. Open the GM panel from in-game Announcements or enter your UID and Access Key."}"#.to_string(),
-        );
+    if !is_admin {
+        let state_dir = app.session_manager.state_dir();
+        let fs_opt = app.session_manager.fs();
+        let sign_owned = req_sign.to_string();
+        let authorized = tokio::task::spawn_blocking(move || {
+            is_authorized_for_player(&state_dir, fs_opt.as_deref(), role_id, &sign_owned, "")
+        })
+        .await
+        .unwrap_or(false);
+        if !authorized {
+            return json_resp(
+                StatusCode::UNAUTHORIZED,
+                r#"{"ok":false,"online":false,"auth_required":true,"online_players":[],"message":"Access denied. Open the GM panel from in-game Announcements or enter your UID and Access Key."}"#.to_string(),
+            );
+        }
     }
 
     if role_id > 0 {
@@ -373,15 +385,32 @@ async fn handle_exec(
             r#"{"ok":false,"message":"Invalid target player ID"}"#.to_string(),
         );
     }
-    if !is_authorized_for_player(parsed.role_id, req_sign, req_admin) {
-        return json_resp(
-            StatusCode::UNAUTHORIZED,
-            r#"{"ok":false,"auth_required":true,"message":"Access denied. Invalid UID or Access Key."}"#.to_string(),
-        );
+    if !is_admin {
+        let state_dir = app.session_manager.state_dir();
+        let fs_opt = app.session_manager.fs();
+        let role_id = parsed.role_id;
+        let sign_owned = req_sign.to_string();
+        let authorized = tokio::task::spawn_blocking(move || {
+            is_authorized_for_player(&state_dir, fs_opt.as_deref(), role_id, &sign_owned, "")
+        })
+        .await
+        .unwrap_or(false);
+        if !authorized {
+            return json_resp(
+                StatusCode::UNAUTHORIZED,
+                r#"{"ok":false,"auth_required":true,"message":"Access denied. Invalid UID or Access Key."}"#.to_string(),
+            );
+        }
     }
 
     if action == GmAction::RotateGmKey {
-        match rotate_player_sign_token(parsed.role_id) {
+        let state_dir = app.session_manager.state_dir();
+        let role_id = parsed.role_id;
+        let rotate_res =
+            tokio::task::spawn_blocking(move || rotate_player_sign_token(&state_dir, role_id))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+        match rotate_res {
             Ok(new_key) => {
                 let json = serde_json::to_string(&RotateResp {
                     ok: true,
@@ -402,19 +431,52 @@ async fn handle_exec(
 
     if action == GmAction::ResetPlayer {
         let target_id = parsed.role_id;
-        if app.session_manager.kick_player(target_id) {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        app.session_manager.kick_player(target_id);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.session_manager.has_session(target_id) {
+            if Instant::now() >= deadline {
+                return json_resp(
+                    StatusCode::CONFLICT,
+                    r#"{"ok":false,"message":"Timed out waiting for active player session to close; please retry."}"#.to_string(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        if let Some(mut st) = app.session_manager.take_handoff(target_id) {
-            st.state.cleanup();
+
+        let sm = Arc::clone(&app.session_manager);
+        let state_dir = sm.state_dir();
+        let reset_res = tokio::task::spawn_blocking(move || {
+            if let Some(mut st) = sm.take_handoff(target_id) {
+                st.state.cleanup();
+            }
+            if let Some(fs) = sm.fs() {
+                fs.flush();
+                if let Err(err) = fs.delete_tree(&format!("player/{target_id}")) {
+                    tracing::warn!(
+                        target: "gm_http",
+                        "failed to delete player/{} via FileSystem: {}",
+                        target_id,
+                        err
+                    );
+                }
+                fs.flush();
+            } else {
+                let player_dir = state_dir.join("player").join(target_id.to_string());
+                if let Err(err) = fs::remove_dir_all(&player_dir)
+                    && err.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!("failed to delete {}: {}", player_dir.display(), err);
+                }
+            }
+            purge_player_sqlite(&state_dir.join("gamesv.db"), target_id);
+        })
+        .await;
+        if let Err(err) = reset_res {
+            return json_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"ok": false, "message": format!("Reset failed: {err}")}).to_string(),
+            );
         }
-        let player_dir = format!("state/player/{target_id}");
-        if let Err(err) = fs::remove_dir_all(&player_dir)
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!("failed to delete {}: {}", player_dir, err);
-        }
-        purge_player_sqlite(target_id);
         return json_resp(
             StatusCode::OK,
             format!(
@@ -430,7 +492,7 @@ async fn handle_exec(
         int_a: parsed.int_a,
         int_b: parsed.int_b,
         int_c: parsed.int_c,
-        flag: is_admin || parsed.flag,
+        flag: resolve_exec_job_flag(action, is_admin, parsed.flag),
         raw_cmd: parsed.raw_cmd,
         reply_tx: tx,
     };
@@ -515,6 +577,16 @@ fn is_valid_admin(key: &str) -> bool {
     timing_safe_equal(key.as_bytes(), admin_secret().as_bytes())
 }
 
+fn open_gm_sqlite(db_path: &Path, read_only: bool) -> Result<SqliteConnection, rusqlite::Error> {
+    let conn = if read_only {
+        SqliteConnection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?
+    } else {
+        SqliteConnection::open(db_path)?
+    };
+    conn.busy_timeout(Duration::from_millis(5000))?;
+    Ok(conn)
+}
+
 fn extract_sign_token_from_progress_info(content: &str) -> Option<String> {
     let marker = ".key = \"gm:sign_token\", .val = \"";
     let idx = content.find(marker)?;
@@ -524,11 +596,18 @@ fn extract_sign_token_from_progress_info(content: &str) -> Option<String> {
     (val.len() >= 16).then(|| val.to_string())
 }
 
-fn lookup_player_sign_token(target_id: i32) -> Option<String> {
+fn lookup_player_sign_token(
+    state_dir: &Path,
+    fs_opt: Option<&FileSystem>,
+    target_id: i32,
+) -> Option<String> {
     if target_id <= 0 {
         return None;
     }
-    if let Ok(conn) = SqliteConnection::open("state/gamesv.db") {
+    let db_path = state_dir.join("gamesv.db");
+    if db_path.exists()
+        && let Ok(conn) = open_gm_sqlite(&db_path, true)
+    {
         if let Ok(val) = conn.query_row(
             "SELECT val FROM player_kv WHERE player_id = ?1 AND ns = 'gm' AND k = 'sign_token' LIMIT 1",
             [target_id],
@@ -549,11 +628,20 @@ fn lookup_player_sign_token(target_id: i32) -> Option<String> {
         }
     }
 
-    let content = fs::read_to_string(format!("state/player/{target_id}/progress_info")).ok()?;
+    let rel = format!("player/{target_id}/progress_info");
+    if let Some(fs) = fs_opt
+        && let Ok(Some(bytes)) = fs.read_file(&rel)
+        && let Ok(text) = std::str::from_utf8(&bytes)
+        && let Some(val) = extract_sign_token_from_progress_info(text)
+    {
+        return Some(val);
+    }
+
+    let content = fs::read_to_string(state_dir.join(rel)).ok()?;
     extract_sign_token_from_progress_info(&content)
 }
 
-fn rotate_player_sign_token(target_id: i32) -> Result<String, String> {
+fn rotate_player_sign_token(state_dir: &Path, target_id: i32) -> Result<String, String> {
     let mut rand_bytes = [0u8; 12];
     getrandom::fill(&mut rand_bytes).map_err(|e| e.to_string())?;
     let mut token = String::with_capacity(24);
@@ -561,7 +649,19 @@ fn rotate_player_sign_token(target_id: i32) -> Result<String, String> {
         token.push_str(&format!("{b:02x}"));
     }
 
-    let conn = SqliteConnection::open("state/gamesv.db").map_err(|e| e.to_string())?;
+    let db_path = state_dir.join("gamesv.db");
+    let conn = open_gm_sqlite(&db_path, false).map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS player_kv (
+            player_id INTEGER NOT NULL,
+            ns TEXT NOT NULL,
+            k TEXT NOT NULL,
+            val TEXT NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (player_id, ns, k)
+        );",
+    )
+    .map_err(|e| e.to_string())?;
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0i64, |d| d.as_secs() as i64);
@@ -574,14 +674,20 @@ fn rotate_player_sign_token(target_id: i32) -> Result<String, String> {
     Ok(token)
 }
 
-fn is_authorized_for_player(target_id: i32, req_sign: &str, req_admin: &str) -> bool {
+fn is_authorized_for_player(
+    state_dir: &Path,
+    fs_opt: Option<&FileSystem>,
+    target_id: i32,
+    req_sign: &str,
+    req_admin: &str,
+) -> bool {
     if is_valid_admin(req_admin) {
         return true;
     }
     if target_id <= 0 || req_sign.len() < 16 {
         return false;
     }
-    let Some(expected) = lookup_player_sign_token(target_id) else {
+    let Some(expected) = lookup_player_sign_token(state_dir, fs_opt, target_id) else {
         return false;
     };
     timing_safe_equal(req_sign.as_bytes(), expected.as_bytes())
@@ -1199,13 +1305,29 @@ pub fn execute_session_job(state: &mut State, session_manager: &SessionManager, 
     }
 }
 
-fn purge_player_sqlite(target_id: i32) {
-    let Ok(conn) = SqliteConnection::open("state/gamesv.db") else {
-        tracing::warn!("failed to open state/gamesv.db for reset");
+fn purge_player_sqlite(db_path: &Path, target_id: i32) {
+    if !db_path.exists() {
         return;
+    }
+    let conn = match open_gm_sqlite(db_path, false) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                target: "gm_http",
+                "failed to open {} for reset: {}",
+                db_path.display(),
+                err
+            );
+            return;
+        }
     };
+    let in_tx = conn.execute_batch("BEGIN IMMEDIATE;").is_ok();
+    let exact = format!("player/{target_id}");
     let pattern = format!("player/{target_id}/%");
-    if let Err(err) = conn.execute("DELETE FROM state_files WHERE path LIKE ?1", [&pattern]) {
+    if let Err(err) = conn.execute(
+        "DELETE FROM state_files WHERE path = ?1 OR path LIKE ?2",
+        rusqlite::params![exact, pattern],
+    ) {
         tracing::warn!(
             target: "gm_http",
             "resetPlayer state_files delete failed for uid={}: {}",
@@ -1224,5 +1346,107 @@ fn purge_player_sqlite(target_id: i32) {
     ];
     for sql in tables {
         let _ = conn.execute(sql, [target_id]);
+    }
+    if in_tx {
+        let _ = conn.execute_batch("COMMIT;");
+    }
+}
+
+fn resolve_exec_job_flag(action: GmAction, is_admin: bool, parsed_flag: bool) -> bool {
+    if action == GmAction::GetState {
+        is_admin
+    } else {
+        parsed_flag
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::kcp_transport::ConnectionHandle;
+    use axum::http::HeaderMap;
+    use tokio::sync::Notify;
+
+    #[test]
+    fn non_admin_get_state_exec_cannot_forge_flag_for_online_players() {
+        assert!(!resolve_exec_job_flag(GmAction::GetState, false, true));
+        assert!(resolve_exec_job_flag(GmAction::GetState, true, false));
+        assert!(resolve_exec_job_flag(GmAction::QuestPick, false, true));
+
+        let tmp = std::env::temp_dir().join(format!("gm_http_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("player/10001")).unwrap();
+        fs::write(tmp.join("player/10001/basic_info"), b"dummy").unwrap();
+        let fs_root = Arc::new(FileSystem::open(&tmp).unwrap());
+        let sm = Arc::new(SessionManager::new());
+        sm.attach_fs(Arc::clone(&fs_root));
+
+        let token = rotate_player_sign_token(&tmp, 10001).unwrap();
+        assert_eq!(
+            lookup_player_sign_token(&tmp, Some(fs_root.as_ref()), 10001).as_deref(),
+            Some(token.as_str())
+        );
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let channels = ConnectionHandle::open(
+                1,
+                "127.0.0.1:9999".parse().unwrap(),
+                Arc::new(Notify::new()),
+            );
+            let handle = Arc::new(channels.handle);
+            let mut gm_rx = channels.gm_inbox_rx;
+            sm.acquire(&handle, 10001).await.unwrap();
+
+            let worker_sm = Arc::clone(&sm);
+            let worker_handle = Arc::clone(&handle);
+            let worker = tokio::spawn(async move {
+                if let Some(job) = gm_rx.recv().await {
+                    assert_eq!(job.action, GmAction::GetState);
+                    assert!(!job.flag, "non-admin get_state must not set flag=true");
+                    job.succeed_and_signal(r#"{"online":true,"online_players":[]}"#.to_string());
+                }
+                // Wait for kick during reset_player below, then release session cleanly.
+                while worker_handle.close_reason() == crate::network::CloseReason::Active {
+                    let notified = worker_handle.closed_notify.notified();
+                    if worker_handle.close_reason() != crate::network::CloseReason::Active {
+                        break;
+                    }
+                    notified.await;
+                }
+                worker_sm.release(&worker_handle, 10001);
+            });
+
+            let app = AppState {
+                assets: Arc::new(Assets::default()),
+                session_manager: Arc::clone(&sm),
+            };
+            let body = serde_json::json!({
+                "action": "get_state",
+                "role_id": 10001,
+                "flag": true,
+                "sign": token,
+            })
+            .to_string();
+            let resp = handle_exec(AxumState(app.clone()), HeaderMap::new(), body).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+
+            let reset_body = serde_json::json!({
+                "action": "reset_player",
+                "role_id": 10001,
+                "sign": token,
+            })
+            .to_string();
+            let reset_resp = handle_exec(AxumState(app), HeaderMap::new(), reset_body).await;
+            assert_eq!(reset_resp.status(), StatusCode::OK);
+            worker.await.unwrap();
+        });
+
+        assert!(!tmp.join("player/10001").exists());
+        assert!(lookup_player_sign_token(&tmp, Some(fs_root.as_ref()), 10001).is_none());
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

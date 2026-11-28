@@ -4,6 +4,7 @@ use sonoro_gamesv_logic::component::entity::small::EntityType;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::events::{BuffAdditionEntry, Event};
 use sonoro_gamesv_logic::fsm::types::wake_reason;
+use sonoro_gamesv_logic::scene::now_millis;
 use sonoro_gamesv_logic::helpers::{
     attributes::{self, AttributeChangeType, AttributeValueType},
     consume::{self, CostItem},
@@ -40,7 +41,8 @@ use sonoro_proto::pb::{
     EntityStaticHookMoveResponse, ExecuteQtePush, ExecuteQteRequest, ExecuteQteResponse,
     ExitViewDirectionPush, ExploreSkillActionRequest, ExploreSkillActionResponse,
     FragileChangeRequest, FragileChangeResponse, FsmConditionPassPush, FsmStateBehaviorRequest,
-    FsmStateBehaviorResponse, GameplayCuePush, GameplayTagPush, GmEntityFsmGroupInfoRequest,
+    FsmStateBehaviorResponse, GameplayCueNotify, GameplayCuePush, GameplayTagPush,
+    GmEntityFsmGroupInfoRequest,
     GmEntityFsmGroupInfoResponse, GmEntityFsmMachineInfo, GmEntityFsmStateInfo, HitEndPush,
     HitRequest, HitResponse, InterruptSkillInDelayPush, LogicStateInitPush, MaterialPush,
     ModifyBulletParamsPush, MonsterBoomPush, MonsterDrownPush, NewLinkBurstPush,
@@ -50,7 +52,8 @@ use sonoro_proto::pb::{
     QuickHackSkillRequest, QuickHackSkillResponse, RTimeStopAnimPush, RTimeStopInstPush,
     RTimeStopPush, RefreshBuffDurationPush, RemoveBuffByIdS2cResponsePush,
     RemoveBuffS2cResponsePush, RemoveGameplayEffectPush, RoleGoDownPush, RoleSkinTrialUiEndPush,
-    RoleTrialSceneRollbackPush, RoleTrialUiEndPush, SecFBRoundEndFlowReportRequest,
+    RoleTagChangePush, RoleTrialSceneRollbackPush, RoleTrialUiEndPush,
+    SecFBRoundEndFlowReportRequest,
     SecFBRoundEndFlowReportResponse, SecFBRoundStartFlowRequest, SecFBRoundStartFlowResponse,
     SecRoleFightFlowRequest, SecRoleFightFlowResponse, SecWorldInfoFlowRequest,
     SecWorldInfoFlowResponse, SecWorldSEndFlowRequest, SecWorldSEndFlowResponse,
@@ -299,11 +302,115 @@ pub fn handle_hit_request(
     ))
 }
 
-fn common_from_id(id: i64) -> Option<CombatCommon> {
-    (id != 0).then(|| CombatCommon {
-        EntityId: id,
+fn common_for_eid(entity_id: i64) -> Option<CombatCommon> {
+    (entity_id != 0).then(|| CombatCommon {
+        EntityId: entity_id,
         ..Default::default()
     })
+}
+
+fn resolve_active_role_common(state: &State) -> Option<CombatCommon> {
+    let eid = state
+        .scene
+        .as_ref()
+        .map(|s| s.current_role_entity_id())
+        .unwrap_or(0);
+    common_for_eid(eid)
+}
+
+fn resolve_active_or_entity_common(state: &State, candidate_eid: i64) -> Option<CombatCommon> {
+    let scene = state.scene.as_ref()?;
+    let eid = if candidate_eid != 0 && scene.net_id_map.contains_key(&candidate_eid) {
+        candidate_eid
+    } else {
+        scene.current_role_entity_id()
+    };
+    common_for_eid(eid)
+}
+
+fn resolve_buff_handle_common(
+    state: &State,
+    handle_id: i32,
+    fallback_eid: i64,
+) -> Option<CombatCommon> {
+    let scene = state.scene.as_ref()?;
+    if handle_id != 0
+        && let Some(ent) = scene.entities.iter().find(|e| {
+            e.buffs
+                .as_ref()
+                .is_some_and(|b| b.find_by_handle(handle_id).is_some())
+        })
+    {
+        return common_for_eid(ent.net_id);
+    }
+    resolve_active_or_entity_common(state, fallback_eid)
+}
+
+fn resolve_buff_owner_common(
+    state: &State,
+    buff_id: i64,
+    fallback_eid: i64,
+) -> Option<CombatCommon> {
+    let scene = state.scene.as_ref()?;
+    if buff_id != 0 {
+        let cur = scene.current_role_entity_id();
+        if cur != 0
+            && scene.entity(cur).is_some_and(|e| {
+                e.buffs
+                    .as_ref()
+                    .is_some_and(|b| b.get_by_buff_id(buff_id).is_some())
+            })
+        {
+            return common_for_eid(cur);
+        }
+        if let Some(ent) = scene.entities.iter().find(|e| {
+            e.buffs
+                .as_ref()
+                .is_some_and(|b| b.get_by_buff_id(buff_id).is_some())
+        }) {
+            return common_for_eid(ent.net_id);
+        }
+    }
+    resolve_active_or_entity_common(state, fallback_eid)
+}
+
+fn resolve_refresh_buffs_common(state: &State, buff_ids: &[i64]) -> Option<CombatCommon> {
+    let scene = state.scene.as_ref()?;
+    if !buff_ids.is_empty() {
+        let cur = scene.current_role_entity_id();
+        let has_any = |e: &sonoro_gamesv_logic::component::entity::EntityComponentStorage| {
+            e.buffs
+                .as_ref()
+                .is_some_and(|b| buff_ids.iter().any(|&bid| b.get_by_buff_id(bid).is_some()))
+        };
+        if cur != 0 && scene.entity(cur).is_some_and(has_any) {
+            return common_for_eid(cur);
+        }
+        if let Some(ent) = scene.entities.iter().find(|e| has_any(e)) {
+            return common_for_eid(ent.net_id);
+        }
+    }
+    resolve_active_role_common(state)
+}
+
+fn resolve_fsm_owner_common(state: &State, fsm_id: i32) -> Option<CombatCommon> {
+    let scene = state.scene.as_ref()?;
+    if fsm_id != 0 {
+        let has_fsm = |e: &sonoro_gamesv_logic::component::entity::EntityComponentStorage| {
+            e.fsm.as_ref().is_some_and(|f| {
+                f.graph.find_node(fsm_id).is_some()
+                    || f.runtime_nodes.iter().any(|n| n.fsm_id == fsm_id)
+            })
+        };
+        let cur = scene.current_role_entity_id();
+        if cur != 0 && scene.entity(cur).is_some_and(has_fsm) {
+            return common_for_eid(cur);
+        }
+        if let Some(ent) = scene.entities.iter().find(|e| has_fsm(e)) {
+            return common_for_eid(ent.net_id);
+        }
+    }
+    resolve_active_role_common(state)
 }
 
 pub fn handle_order_apply_buff_request(
@@ -311,7 +418,7 @@ pub fn handle_order_apply_buff_request(
     events: &mut EventQueue,
     req: OrderApplyBuffRequest,
 ) -> Result<OrderApplyBuffResponse, String> {
-    let common = common_from_id(req.Id);
+    let common = resolve_active_or_entity_common(state, req.InstigatorId);
     Ok(forward_combat_req(
         state,
         events,
@@ -329,7 +436,7 @@ pub fn handle_order_remove_buff_request(
     events: &mut EventQueue,
     req: OrderRemoveBuffRequest,
 ) -> Result<OrderRemoveBuffResponse, String> {
-    let common = common_from_id(req.Id);
+    let common = resolve_buff_owner_common(state, req.Id, req.InstigatorId);
     Ok(forward_combat_req(
         state,
         events,
@@ -347,10 +454,11 @@ pub fn handle_order_remove_buff_by_tags_request(
     events: &mut EventQueue,
     req: OrderRemoveBuffByTagsRequest,
 ) -> Result<OrderRemoveBuffByTagsResponse, String> {
+    let common = resolve_active_or_entity_common(state, req.InstigatorId);
     Ok(forward_combat_req(
         state,
         events,
-        None,
+        common,
         CombatRequestDataMessageOneof::OrderRemoveBuffByTagsRequest(req),
         |r| match r {
             CombatResponseDataMessageOneof::OrderRemoveBuffByTagsResponse(v) => Some(v),
@@ -429,10 +537,11 @@ pub fn handle_change_state_request(
     events: &mut EventQueue,
     req: ChangeStateRequest,
 ) -> Result<ChangeStateResponse, String> {
+    let common = resolve_fsm_owner_common(state, req.FsmId);
     Ok(forward_combat_req(
         state,
         events,
-        None,
+        common,
         CombatRequestDataMessageOneof::ChangeStateRequest(req),
         |r| match r {
             CombatResponseDataMessageOneof::ChangeStateResponse(v) => Some(v),
@@ -483,20 +592,9 @@ pub fn handle_change_summon_entity_state_request(
     state: &mut State,
     req: ChangeSummonEntityStateRequest,
 ) -> Result<ChangeSummonEntityStateResponse, String> {
-    if req.SummonEntityId != 0 {
-        state.player_components.progress.info.set_key_int(
-            &format!("summon_state:{}", req.SummonEntityId),
-            i64::from(req.TagId),
-        );
-        state
-            .player_components
-            .progress
-            .save(&state.fs)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(ChangeSummonEntityStateResponse {
-        ErrorCode: Some(ErrorCode::Success),
-    })
+    Ok(
+        super::combat_envelope_handlers::handle_change_summon_entity_state_request(state, req),
+    )
 }
 
 macro_rules! fwd_push {
@@ -518,26 +616,17 @@ macro_rules! fwd_push_common {
     };
 }
 
-macro_rules! fwd_push_id {
-    ($fn_name:ident, $push_ty:ty, $variant:ident) => {
-        pub fn $fn_name(state: &mut State, events: &mut EventQueue, msg: $push_ty) -> Result<(), String> {
-            let common = common_from_id(msg.Id);
-            forward_combat_push(state, events, common, CombatPushDataMessageOneof::$variant(msg));
-            Ok(())
-        }
-    };
-}
-
 fwd_push!(handle_an_start_push, ANStartPush, ANStartPush);
 pub fn handle_activate_buff_push(
     state: &mut State,
     events: &mut EventQueue,
     msg: ActivateBuffPush,
 ) -> Result<(), String> {
+    let common = resolve_buff_handle_common(state, msg.Handle, 0);
     forward_combat_push(
         state,
         events,
-        None,
+        common,
         CombatPushDataMessageOneof::ActiveBuffPush(ActiveBuffPush {
             Handle: msg.Handle,
             On: msg.On,
@@ -545,20 +634,100 @@ pub fn handle_activate_buff_push(
     );
     Ok(())
 }
-fwd_push!(handle_animation_gameplay_tag_push, AnimationGameplayTagPush, AnimationGameplayTagPush);
+pub fn handle_animation_gameplay_tag_push(
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: AnimationGameplayTagPush,
+) -> Result<(), String> {
+    let common = resolve_active_role_common(state);
+    forward_combat_push(
+        state,
+        events,
+        common,
+        CombatPushDataMessageOneof::AnimationGameplayTagPush(msg),
+    );
+    Ok(())
+}
 fwd_push_common!(handle_animation_state_changed_push, AnimationStateChangedPush, AnimationStateChangedPush);
 fwd_push_common!(handle_animation_state_init_push, AnimationStateInitPush, AnimationStateInitPush);
 fwd_push!(handle_apply_buff_s2c_response_push, ApplyBuffS2cResponsePush, ApplyBuffS2cResponsePush);
-fwd_push_id!(handle_apply_gameplay_effect_push, ApplyGameplayEffectPush, ApplyGameplayEffectPush);
+pub fn handle_apply_gameplay_effect_push(
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: ApplyGameplayEffectPush,
+) -> Result<(), String> {
+    let common = resolve_active_or_entity_common(state, msg.InstigatorId);
+    forward_combat_push(
+        state,
+        events,
+        common,
+        CombatPushDataMessageOneof::ApplyGameplayEffectPush(msg),
+    );
+    Ok(())
+}
 fwd_push!(handle_buff_effect_execute_push, BuffEffectExecutePush, BuffEffectExecutePush);
 fwd_push!(handle_buff_effect_push, BuffEffectPush, BuffEffectPush);
-fwd_push!(handle_buff_stack_count_push, BuffStackCountPush, BuffStackCountPush);
+pub fn handle_buff_stack_count_push(
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: BuffStackCountPush,
+) -> Result<(), String> {
+    let common = resolve_buff_handle_common(state, msg.HandleId, msg.InstigatorId);
+    forward_combat_push(
+        state,
+        events,
+        common,
+        CombatPushDataMessageOneof::BuffStackCountPush(msg),
+    );
+    Ok(())
+}
 fwd_push!(handle_bullet_pattern_push, BulletPatternPush, BulletPatternPush);
 fwd_push!(handle_client_current_role_report_push, ClientCurrentRoleReportPush, ClientCurrentRoleReportPush);
 fwd_push!(handle_dodge_info_push, DodgeInfoPush, DodgeInfoPush);
 fwd_push_common!(handle_end_skill_push, EndSkillPush, EndSkillPush);
-fwd_push!(handle_fsm_condition_pass_push, FsmConditionPassPush, FsmConditionPassPush);
-fwd_push!(handle_gameplay_cue_push, GameplayCuePush, GameplayCuePush);
+pub fn handle_fsm_condition_pass_push(
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: FsmConditionPassPush,
+) -> Result<(), String> {
+    let common = resolve_fsm_owner_common(state, msg.FsmId);
+    forward_combat_push(
+        state,
+        events,
+        common,
+        CombatPushDataMessageOneof::FsmConditionPassPush(msg),
+    );
+    Ok(())
+}
+pub fn handle_gameplay_cue_push(
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: GameplayCuePush,
+) -> Result<(), String> {
+    let common = resolve_active_role_common(state);
+    if msg.GameplayCueId != 0 {
+        let mut pack = Vec::new();
+        super::combat::push_combat_notify(
+            &mut pack,
+            common.clone(),
+            CombatNotifyDataMessageOneof::GameplayCueNotify(GameplayCueNotify {
+                GameplayCueId: msg.GameplayCueId,
+            }),
+        );
+        broadcast_combat_pack(state, &pack);
+        let _ = state.conn.push_msg(
+            CombatReceivePackNotify::MSG_ID,
+            &CombatReceivePackNotify { Data: pack },
+        );
+    }
+    forward_combat_push(
+        state,
+        events,
+        common,
+        CombatPushDataMessageOneof::GameplayCuePush(msg),
+    );
+    Ok(())
+}
 fwd_push_common!(handle_hit_end_push, HitEndPush, HitEndPush);
 fwd_push!(handle_interrupt_skill_in_delay_push, InterruptSkillInDelayPush, InterruptSkillInDelayPush);
 pub fn handle_logic_state_init_push(
@@ -586,7 +755,20 @@ fwd_push!(handle_passive_skill_remove_push, PassiveSkillRemovePush, PassiveSkill
 fwd_push!(handle_quick_hack_open_push, QuickHackOpenPush, QuickHackOpenPush);
 fwd_push!(handle_quick_hack_ram_verify_push, QuickHackRamVerifyPush, QuickHackRamVerifyPush);
 fwd_push!(handle_r_time_stop_push, RTimeStopPush, RTimeStopPush);
-fwd_push!(handle_refresh_buff_duration_push, RefreshBuffDurationPush, RefreshBuffDurationPush);
+pub fn handle_refresh_buff_duration_push(
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: RefreshBuffDurationPush,
+) -> Result<(), String> {
+    let common = resolve_refresh_buffs_common(state, &msg.BuffIds);
+    forward_combat_push(
+        state,
+        events,
+        common,
+        CombatPushDataMessageOneof::RefreshBuffDurationPush(msg),
+    );
+    Ok(())
+}
 fwd_push!(handle_remove_buff_by_id_s2c_response_push, RemoveBuffByIdS2cResponsePush, RemoveBuffByIdS2cResponsePush);
 fwd_push!(handle_remove_buff_s2c_response_push, RemoveBuffS2cResponsePush, RemoveBuffS2cResponsePush);
 pub fn handle_remove_gameplay_effect_push(
@@ -610,7 +792,20 @@ fwd_push!(handle_role_go_down_push, RoleGoDownPush, RoleGoDownPush);
 fwd_push!(handle_switch_logic_state_push, SwitchLogicStatePush, SwitchLogicStatePush);
 fwd_push!(handle_tough_calc_extra_ratio_change_push, ToughCalcExtraRatioChangePush, ToughCalcExtraRatioChangePush);
 fwd_push!(handle_use_skill_fail_push, UseSkillFailPush, UseSkillFailPush);
-fwd_push!(handle_change_state_confirm_push, ChangeStateConfirmPush, ChangeStateConfirmPush);
+pub fn handle_change_state_confirm_push(
+    state: &mut State,
+    events: &mut EventQueue,
+    msg: ChangeStateConfirmPush,
+) -> Result<(), String> {
+    let common = resolve_fsm_owner_common(state, msg.FsmId);
+    forward_combat_push(
+        state,
+        events,
+        common,
+        CombatPushDataMessageOneof::ChangeStateConfirmPush(msg),
+    );
+    Ok(())
+}
 pub fn handle_actor_visible_push(
     state: &mut State,
     events: &mut EventQueue,
@@ -722,13 +917,14 @@ pub fn handle_gameplay_tag_push(
     events: &mut EventQueue,
     msg: GameplayTagPush,
 ) -> Result<(), String> {
+    let common = resolve_active_role_common(state);
     forward_combat_push(
         state,
         events,
-        None,
-        CombatPushDataMessageOneof::AnimationGameplayTagPush(AnimationGameplayTagPush {
-            AddTagIds: msg.TagId,
-            RemoveTagIds: msg.TagCount <= 0,
+        common,
+        CombatPushDataMessageOneof::RoleTagChangePush(RoleTagChangePush {
+            TagId: msg.TagId,
+            TagCount: msg.TagCount,
         }),
     );
     Ok(())
@@ -758,10 +954,11 @@ pub fn handle_ai_blackboards_push(
     events: &mut EventQueue,
     msg: AiBlackboardsPush,
 ) -> Result<(), String> {
+    let common = resolve_active_role_common(state);
     forward_combat_push(
         state,
         events,
-        None,
+        common,
         CombatPushDataMessageOneof::AiBlackboardsPush(msg),
     );
     Ok(())
@@ -810,10 +1007,20 @@ pub fn handle_role_trial_scene_rollback_push(
 }
 
 pub fn handle_slow_time_push(
-    _state: &mut State,
+    state: &mut State,
     _events: &mut EventQueue,
-    _msg: SlowTimePush,
+    msg: SlowTimePush,
 ) -> Result<(), String> {
+    if let Some(scene) = state.scene.as_mut() {
+        let dilation = if !msg.Flag {
+            1.0
+        } else if msg.Dilation > 0.0 && msg.Dilation.is_finite() {
+            f64::from(msg.Dilation)
+        } else {
+            0.0
+        };
+        scene.scene_time.set_dilation(now_millis(), dilation);
+    }
     Ok(())
 }
 
@@ -851,27 +1058,27 @@ fn push_execute_qte_notify(
     up_entity_id: i64,
     fnv_hash: i32,
 ) {
-    let _ = state.conn.push_msg(
-        CombatReceivePackNotify::MSG_ID,
-        &CombatReceivePackNotify {
-            Data: vec![CombatReceiveData {
-                Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
-                    CombatNotifyData {
-                        CombatCommon: Some(CombatCommon {
-                            EntityId: up_entity_id,
-                            ..Default::default()
-                        }),
-                        Message: Some(CombatNotifyDataMessageOneof::ExecuteQteNotify(
-                            sonoro_proto::pb::ExecuteQteNotify {
-                                DownEntityId: down_entity_id,
-                                UpEntityId: up_entity_id,
-                                FnvHash: fnv_hash,
-                            },
-                        )),
+    let data = vec![CombatReceiveData {
+        Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
+            CombatNotifyData {
+                CombatCommon: Some(CombatCommon {
+                    EntityId: up_entity_id,
+                    ..Default::default()
+                }),
+                Message: Some(CombatNotifyDataMessageOneof::ExecuteQteNotify(
+                    sonoro_proto::pb::ExecuteQteNotify {
+                        DownEntityId: down_entity_id,
+                        UpEntityId: up_entity_id,
+                        FnvHash: fnv_hash,
                     },
                 )),
-            }],
-        },
+            },
+        )),
+    }];
+    broadcast_combat_pack(state, &data);
+    let _ = state.conn.push_msg(
+        CombatReceivePackNotify::MSG_ID,
+        &CombatReceivePackNotify { Data: data },
     );
 }
 

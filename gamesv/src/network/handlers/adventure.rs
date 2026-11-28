@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_fs::special_item_incr::TRIAL_INCR_MIN;
@@ -6,7 +6,7 @@ use sonoro_gamesv_logic::component::player::{
     PlayerBasicComponent, PlayerEchoComponent, PlayerMapComponent, PlayerProgressComponent,
     PlayerQuestComponent, PlayerRoleComponent, PlayerWeaponComponent,
 };
-use sonoro_gamesv_logic::helpers::{calabash, quest_engine, reward};
+use sonoro_gamesv_logic::helpers::{calabash, condition, quest_engine, reward};
 use sonoro_proto::enums::{AdventreTaskState, DetectionType, ErrorCode, SlientFirstAwardState};
 use sonoro_proto::pb::{
     AddChapterResultRequest, AddChapterResultResponse, AdventreTask, AdventureDetectionConfig,
@@ -226,6 +226,63 @@ fn has_completed_mark_relative(snap: &AdventureSnapshot<'_>, mark_id: i32) -> bo
             .info
             .completed_level_plays
             .contains(&mark.RelativeId)
+}
+
+fn has_silent_area_done(
+    snap: &AdventureSnapshot<'_>,
+    sd: &sonoro_gamesv_data::tables::silent_area_detection::SilentAreaDetection,
+) -> bool {
+    has_completed_mark_relative(snap, sd.MarkId)
+        || sd
+            .LevelPlayList
+            .iter()
+            .any(|lp| snap.quest_comp.info.completed_level_plays.contains(lp))
+        || (sd.DungeonId > 0
+            && snap
+                .quest_comp
+                .info
+                .completed_dungeons
+                .contains(&sd.DungeonId))
+}
+
+fn load_detection_gates(assets: &Assets, table_name: &str) -> HashMap<i32, (i32, i32)> {
+    let mut gates = HashMap::new();
+    for row in assets.raw_json_cached(table_name).iter() {
+        let Some(id) = row
+            .get("Id")
+            .and_then(|v| v.as_i64())
+            .and_then(|n| i32::try_from(n).ok())
+        else {
+            continue;
+        };
+        let lock_con = row
+            .get("LockCon")
+            .and_then(|v| v.as_i64())
+            .and_then(|n| i32::try_from(n).ok())
+            .unwrap_or(0);
+        let pre_open = row
+            .get("PreOpenId")
+            .and_then(|v| v.as_i64())
+            .and_then(|n| i32::try_from(n).ok())
+            .unwrap_or(0);
+        gates.insert(id, (lock_con, pre_open));
+    }
+    gates
+}
+
+fn is_detection_unlocked(
+    eval_ctx: &condition::EvalContext<'_>,
+    gates: &HashMap<i32, (i32, i32)>,
+    id: i32,
+    already_completed: bool,
+) -> bool {
+    if already_completed {
+        return true;
+    }
+    let (lock_con, pre_open) = gates.get(&id).copied().unwrap_or((0, 0));
+    let lock_ok = lock_con <= 0 || condition::eval_condition_or_group(eval_ctx, lock_con);
+    let pre_ok = pre_open <= 0 || condition::eval_condition_or_group(eval_ctx, pre_open);
+    lock_ok && pre_ok
 }
 
 fn count_tower_stars(snap: &AdventureSnapshot<'_>, min_difficulty: i32) -> i32 {
@@ -483,7 +540,11 @@ pub fn handle_adventure_manual_request(
     state: &mut State,
     _req: AdventureManualRequest,
 ) -> Result<AdventureManualResponse, String> {
+    let eval_ctx = state.eval_context();
     let snap = AdventureSnapshot::from_state(state);
+    let monster_gates = load_detection_gates(snap.assets, "MonsterDetection");
+    let dungeon_gates = load_detection_gates(snap.assets, "DungeonDetection");
+    let silent_gates = load_detection_gates(snap.assets, "SilentAreaDetection");
     let mut targets = Vec::new();
     let mut rewards = Vec::new();
     let mut monster_unlocks = Vec::new();
@@ -501,21 +562,38 @@ pub fn handle_adventure_manual_request(
     }
 
     for md in &snap.assets.tables.monster_detection.items {
-        monster_unlocks.push(md.Id);
+        let unlocked = is_detection_unlocked(&eval_ctx, &monster_gates, md.Id, false)
+            || (md.MonsterInfoId > 0
+                && snap
+                    .progress_comp
+                    .info
+                    .has_claim(&format!("det_unlock:{}", md.Id)));
+        if unlocked {
+            monster_unlocks.push(md.Id);
+        }
         targets.push(DetectionTarget {
             Id: md.Id,
             Type: Some(DetectionType::NormalMonster),
-            UnlockState: true,
+            UnlockState: unlocked,
             DetectionId: md.Id,
             ..Default::default()
         });
     }
     for dd in &snap.assets.tables.dungeon_detection.items {
-        dungeon_unlocks.push(dd.Id);
+        let completed = dd.DungeonId > 0
+            && snap
+                .quest_comp
+                .info
+                .completed_dungeons
+                .contains(&dd.DungeonId);
+        let unlocked = is_detection_unlocked(&eval_ctx, &dungeon_gates, dd.Id, completed);
+        if unlocked {
+            dungeon_unlocks.push(dd.Id);
+        }
         targets.push(DetectionTarget {
             Id: dd.DungeonId,
             Type: Some(DetectionType::Dungeon),
-            UnlockState: true,
+            UnlockState: unlocked,
             DetectionId: dd.Id,
             ..Default::default()
         });
@@ -526,11 +604,15 @@ pub fn handle_adventure_manual_request(
         });
     }
     for sd in &snap.assets.tables.silent_area_detection.items {
-        silent_unlocks.push(sd.Id);
+        let done = has_silent_area_done(&snap, sd);
+        let unlocked = is_detection_unlocked(&eval_ctx, &silent_gates, sd.Id, done);
+        if unlocked {
+            silent_unlocks.push(sd.Id);
+        }
         targets.push(DetectionTarget {
             Id: sd.Id,
             Type: Some(DetectionType::SilentArea),
-            UnlockState: true,
+            UnlockState: unlocked,
             DetectionId: sd.Id,
             ..Default::default()
         });
@@ -539,7 +621,6 @@ pub fn handle_adventure_manual_request(
             EffectBeginTime: sd.BeginTimeStamp,
             EffectEndTime: 0,
         });
-        let done = has_completed_mark_relative(&snap, sd.MarkId);
         silent_first_award.insert(
             sd.Id,
             if done {
@@ -584,13 +665,26 @@ pub fn handle_weekly_framework_info_request(
 ) -> Result<WeeklyFrameworkInfoResponse, String> {
     let now_ms = quest_engine::tree::now_ms_pub();
     let progress_comp = &state.player_components.progress;
-    let mut score_tasks: Vec<i32> = [1000, 2000, 3000, 4000, 5000, 6000]
-        .into_iter()
-        .filter(|tid| !progress_comp.info.has_claim(&format!("weekly_fw:{tid}")))
-        .collect();
-    if score_tasks.is_empty() {
-        score_tasks = vec![1000, 2000, 3000, 4000, 5000, 6000];
-    }
+    let rows = state.assets.reward_index.get_rows("WeeklyFrameAward");
+    let score_tasks: Vec<i32> = if rows.is_empty() {
+        [1000, 2000, 3000, 4000, 5000, 6000]
+            .into_iter()
+            .filter(|tid| !progress_comp.info.has_claim(&format!("weekly_fw:{tid}")))
+            .collect()
+    } else {
+        rows.iter()
+            .filter_map(|row| {
+                let id = row.key as i32;
+                let threshold = row.extra_int;
+                let claimed = progress_comp.info.has_claim(&format!("weekly_fw:{id}"))
+                    || (threshold > 0
+                        && progress_comp
+                            .info
+                            .has_claim(&format!("weekly_fw:{threshold}")));
+                (!claimed).then_some(if id > 0 { id } else { threshold })
+            })
+            .collect()
+    };
     Ok(WeeklyFrameworkInfoResponse {
         ErrorCode: Some(ErrorCode::Success),
         FrameworkInfo: Some(WeeklyFrameworkInfo {
@@ -605,18 +699,49 @@ pub fn handle_weekly_framework_info_request(
 }
 
 fn claim_single_adventure_task(state: &mut State, task_id: i32) -> Result<bool, String> {
+    if task_id <= 0 {
+        return Ok(false);
+    }
+    let v1_cfg = state
+        .assets
+        .tables
+        .adventure_task
+        .get_data_by_id(&task_id)
+        .map(|r| r.into_owned());
+    let is_v2 = v1_cfg.is_none()
+        && state
+            .assets
+            .raw_json_cached("AdventureTaskV2")
+            .iter()
+            .any(|row| row.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(task_id)));
+    if v1_cfg.is_none() && !is_v2 {
+        return Ok(false);
+    }
+
+    let is_completed = {
+        let snap = AdventureSnapshot::from_state(state);
+        if let Some(ref cfg) = v1_cfg {
+            let manual = build_manual_data(&snap);
+            manual.UnlockChapters.contains(&cfg.ChapterId)
+                && evaluate_task_progress(&snap, task_id) >= cfg.NeedProgress
+        } else {
+            evaluate_task_progress(&snap, task_id) >= 1
+                || snap
+                    .progress_comp
+                    .info
+                    .has_claim(&format!("adv_v2_done:{task_id}"))
+        }
+    };
+    if !is_completed {
+        return Ok(false);
+    }
+
     let k = format!("adv_task:{task_id}");
     if !state.player_components.progress.info.mark_claim(&k) {
         return Ok(false);
     }
 
-    if let Some(cfg) = state
-        .assets
-        .tables
-        .adventure_task
-        .get_data_by_id(&task_id)
-        .map(|r| r.into_owned())
-    {
+    if let Some(cfg) = v1_cfg {
         if cfg.DropIds > 0 {
             let mut rctx = state.reward_context();
             reward::grant_drop_package_popup(&mut rctx, cfg.DropIds, 19500)
@@ -697,6 +822,88 @@ pub fn handle_get_chapter_reward_request(
     req: GetChapterRewardRequest,
 ) -> Result<GetChapterRewardResponse, String> {
     let chap_id = req.Chapter;
+    let v1_chap = state
+        .assets
+        .tables
+        .adventure_task_chapter
+        .get_data_by_id(&chap_id)
+        .map(|r| r.into_owned());
+    let v2_unlock_need = if v1_chap.is_none() {
+        state
+            .assets
+            .raw_json_cached("AdventureTaskChapterV2")
+            .iter()
+            .find(|row| row.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(chap_id)))
+            .map(|row| {
+                row.get("RewardUnlockCount")
+                    .and_then(|v| v.as_i64())
+                    .and_then(|n| i32::try_from(n).ok())
+                    .unwrap_or(1)
+                    .max(1)
+            })
+    } else {
+        None
+    };
+
+    if v1_chap.is_none() && v2_unlock_need.is_none() {
+        return Ok(GetChapterRewardResponse {
+            Chapter: chap_id,
+            Code: Some(ErrorCode::RequestParamError),
+        });
+    }
+
+    let eligible = if let Some(ref cfg) = v1_chap {
+        let cond_ok = cfg.UnLockCondition <= 0
+            || condition::eval_condition_or_group(&state.eval_context(), cfg.UnLockCondition);
+        let snap = AdventureSnapshot::from_state(state);
+        let manual = build_manual_data(&snap);
+        let finished_count = snap
+            .assets
+            .tables
+            .adventure_task
+            .items
+            .iter()
+            .filter(|t| t.ChapterId == chap_id && evaluate_task_progress(&snap, t.Id) >= t.NeedProgress)
+            .count() as i32;
+        cond_ok
+            && manual.UnlockChapters.contains(&chap_id)
+            && finished_count >= cfg.RewardUnlockCount.max(1)
+    } else if let Some(need_count) = v2_unlock_need {
+        let snap = AdventureSnapshot::from_state(state);
+        let finished_count = snap
+            .assets
+            .raw_json_cached("AdventureTaskV2")
+            .iter()
+            .filter(|row| {
+                row.get("ChapterId").and_then(|v| v.as_i64()) == Some(i64::from(chap_id))
+                    && row
+                        .get("Id")
+                        .and_then(|v| v.as_i64())
+                        .and_then(|n| i32::try_from(n).ok())
+                        .is_some_and(|tid| {
+                            evaluate_task_progress(&snap, tid) >= 1
+                                || snap
+                                    .progress_comp
+                                    .info
+                                    .has_claim(&format!("adv_task:{tid}"))
+                                || snap
+                                    .progress_comp
+                                    .info
+                                    .has_claim(&format!("adv_v2_done:{tid}"))
+                        })
+            })
+            .count() as i32;
+        finished_count >= need_count
+    } else {
+        false
+    };
+    if !eligible {
+        return Ok(GetChapterRewardResponse {
+            Chapter: chap_id,
+            Code: Some(ErrorCode::RequestParamError),
+        });
+    }
+
     let k = format!("adv_chap:{chap_id}");
     if state.player_components.progress.info.mark_claim(&k) {
         state
@@ -704,13 +911,7 @@ pub fn handle_get_chapter_reward_request(
             .progress
             .save(&state.fs)
             .map_err(|e| e.to_string())?;
-        if let Some(cfg) = state
-            .assets
-            .tables
-            .adventure_task_chapter
-            .get_data_by_id(&chap_id)
-            .map(|r| r.into_owned())
-        {
+        if let Some(cfg) = v1_chap {
             if cfg.DropIds > 0 {
                 let mut rctx = state.reward_context();
                 reward::grant_drop_package_popup(&mut rctx, cfg.DropIds, 19500)
@@ -760,6 +961,12 @@ pub fn handle_chapter_result_reward_request(
     state: &mut State,
     req: ChapterResultRewardRequest,
 ) -> Result<ChapterResultRewardResponse, String> {
+    let unlock_key = format!("chap_res:{}:{}:{}", req.ActivityId, req.ChapterId, req.ResultId);
+    if !state.player_components.progress.info.has_claim(&unlock_key) {
+        return Ok(ChapterResultRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
     let k = format!(
         "chap_res_clm:{}:{}:{}",
         req.ActivityId, req.ChapterId, req.ResultId
@@ -798,6 +1005,28 @@ pub fn handle_received_silent_first_award_request(
     state: &mut State,
     req: ReceivedSilentFirstAwardRequest,
 ) -> Result<ReceivedSilentFirstAwardResponse, String> {
+    let Some(sd) = state
+        .assets
+        .tables
+        .silent_area_detection
+        .get_data_by_id(&req.Id)
+        .map(|s| s.into_owned())
+    else {
+        return Ok(ReceivedSilentFirstAwardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+            ..Default::default()
+        });
+    };
+    let is_done = {
+        let snap = AdventureSnapshot::from_state(state);
+        has_silent_area_done(&snap, &sd)
+    };
+    if !is_done {
+        return Ok(ReceivedSilentFirstAwardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+            ..Default::default()
+        });
+    }
     let k = format!("silent_first:{}", req.Id);
     let mut item_map = BTreeMap::new();
     if state.player_components.progress.info.mark_claim(&k) {
@@ -843,6 +1072,8 @@ pub fn handle_normal_monster_manual_info_request(
     state: &mut State,
     req: NormalMonsterManualInfoRequest,
 ) -> Result<NormalMonsterManualInfoResponse, String> {
+    let eval_ctx = state.eval_context();
+    let monster_gates = load_detection_gates(&state.assets, "MonsterDetection");
     let targets = state
         .assets
         .tables
@@ -850,12 +1081,21 @@ pub fn handle_normal_monster_manual_info_request(
         .items
         .iter()
         .filter(|md| req.DetectionId <= 0 || md.Id == req.DetectionId)
-        .map(|md| DetectionTarget {
-            Id: md.Id,
-            Type: Some(DetectionType::NormalMonster),
-            UnlockState: true,
-            DetectionId: md.Id,
-            ..Default::default()
+        .map(|md| {
+            let unlocked = is_detection_unlocked(&eval_ctx, &monster_gates, md.Id, false)
+                || (md.MonsterInfoId > 0
+                    && state
+                        .player_components
+                        .progress
+                        .info
+                        .has_claim(&format!("det_unlock:{}", md.Id)));
+            DetectionTarget {
+                Id: md.Id,
+                Type: Some(DetectionType::NormalMonster),
+                UnlockState: unlocked,
+                DetectionId: md.Id,
+                ..Default::default()
+            }
         })
         .collect();
     Ok(NormalMonsterManualInfoResponse {
@@ -868,9 +1108,50 @@ pub fn handle_weekly_framework_score_reward_request(
     state: &mut State,
     req: WeeklyFrameworkScoreRewardRequest,
 ) -> Result<WeeklyFrameworkScoreRewardResponse, String> {
+    let cur_score = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("weekly_fw:score")
+        .max(
+            state
+                .player_components
+                .progress
+                .info
+                .get_key_int("rogue_weekly:score"),
+        )
+        .max(
+            state
+                .player_components
+                .progress
+                .info
+                .get_key_int("rogue_weekly:total_score"),
+        );
+    let award_rows = state.assets.reward_index.get_rows("WeeklyFrameAward");
     let mut dirty = false;
     for tid in req.TaskIds {
-        let k = format!("weekly_fw:{tid}");
+        let Some(matched) = award_rows
+            .iter()
+            .find(|r| r.key == i64::from(tid) || i64::from(r.extra_int) == i64::from(tid))
+        else {
+            continue;
+        };
+        let row_id = matched.key as i32;
+        let need_score = matched.extra_int;
+        if need_score > 0 && cur_score < i64::from(need_score) {
+            continue;
+        }
+        let k = format!("weekly_fw:{row_id}");
+        if state.player_components.progress.info.has_claim(&k)
+            || (need_score > 0
+                && state
+                    .player_components
+                    .progress
+                    .info
+                    .has_claim(&format!("weekly_fw:{need_score}")))
+        {
+            continue;
+        }
         if !state.player_components.progress.info.mark_claim(&k) {
             continue;
         }
@@ -879,7 +1160,7 @@ pub fn handle_weekly_framework_score_reward_request(
         reward::grant_table_reward(
             &mut rctx,
             "WeeklyFrameAward",
-            i64::from(tid),
+            matched.key,
             false,
             true,
             19500,

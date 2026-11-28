@@ -1,8 +1,12 @@
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
+use serde_json::Value;
+use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::events::Event;
-use sonoro_gamesv_logic::helpers::{quest_actions, quest_engine, reward, role as role_helper};
+use sonoro_gamesv_logic::helpers::consume::CostItem;
+use sonoro_gamesv_logic::helpers::{consume, energy, quest_actions, quest_engine, reward, role as role_helper};
 use sonoro_proto::enums::{ErrorCode, TeleportReason};
 use sonoro_proto::pb::{
     ApplyRechallengeRequest, ApplyRechallengeResponse, ChangeDataLayerFinishRequest,
@@ -256,10 +260,92 @@ pub fn handle_level_play_open_request(
     })
 }
 
+#[derive(Clone)]
+struct ExchangeRewardEntry {
+    costs: Vec<CostItem>,
+    drops_by_world_level: BTreeMap<i32, i32>,
+}
+
+fn exchange_reward_entry(assets: &Assets, reward_id: i32) -> Option<ExchangeRewardEntry> {
+    if reward_id <= 0 {
+        return None;
+    }
+    static CACHE: OnceLock<std::collections::HashMap<i32, ExchangeRewardEntry>> = OnceLock::new();
+    let map = CACHE.get_or_init(|| {
+        let mut out = std::collections::HashMap::new();
+        for entry in assets.read_raw_json_array("ExchangeReward") {
+            let Some(obj) = entry.as_object() else {
+                continue;
+            };
+            let Some(id) = obj.get("Id").and_then(Value::as_i64).and_then(|v| i32::try_from(v).ok()) else {
+                continue;
+            };
+            let mut costs = Vec::new();
+            if let Some(cost_obj) = obj.get("Cost").and_then(Value::as_object) {
+                for (k, v) in cost_obj {
+                    if let (Ok(item_id), Some(cnt)) = (k.parse::<i32>(), v.as_i64())
+                        && item_id > 0
+                        && cnt > 0
+                    {
+                        costs.push(CostItem {
+                            id: item_id,
+                            count: cnt.clamp(0, i64::from(i32::MAX)) as i32,
+                        });
+                    }
+                }
+            }
+            let mut drops_by_world_level = BTreeMap::new();
+            if let Some(rew_obj) = obj.get("RewardId").and_then(Value::as_object) {
+                for (k, v) in rew_obj {
+                    if let (Ok(wl), Some(drop_id)) = (k.parse::<i32>(), v.as_i64())
+                        && drop_id > 0
+                    {
+                        drops_by_world_level
+                            .insert(wl, drop_id.clamp(0, i64::from(i32::MAX)) as i32);
+                    }
+                }
+            }
+            out.insert(
+                id,
+                ExchangeRewardEntry {
+                    costs,
+                    drops_by_world_level,
+                },
+            );
+        }
+        out
+    });
+    map.get(&reward_id).cloned()
+}
+
+fn resolve_exchange_drop_id(entry: &ExchangeRewardEntry, world_level: i32) -> i32 {
+    if let Some(&d) = entry.drops_by_world_level.get(&world_level) {
+        return d;
+    }
+    if let Some((_, &d)) = entry
+        .drops_by_world_level
+        .range(..=world_level)
+        .next_back()
+    {
+        return d;
+    }
+    entry
+        .drops_by_world_level
+        .values()
+        .next()
+        .copied()
+        .unwrap_or(0)
+}
+
 pub fn handle_level_play_reward_request(
     state: &mut State,
     req: LevelPlayRewardRequest,
 ) -> Result<LevelPlayRewardResponse, String> {
+    if req.ExchangeCount < 0 {
+        return Ok(LevelPlayRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
     let cnt = req.ExchangeCount.max(1);
     let mut resolved_cfg_id = req.EntityId;
     if let Some(scene) = state.scene.as_ref()
@@ -294,13 +380,6 @@ pub fn handle_level_play_reward_request(
         }
     }
 
-    let key = format!("lp:reward_cnt:{resolved_cfg_id}");
-    let total_reward_cnt = state
-        .player_components
-        .progress
-        .info
-        .add_key_int(&key, i64::from(cnt))
-        .clamp(0, i64::from(i32::MAX)) as i32;
     let claim_first = matched_lp_id > 0
         && state
             .player_components
@@ -308,6 +387,121 @@ pub fn handle_level_play_reward_request(
             .info
             .get_key_int(&format!("lp_reward_claimed:{matched_lp_id}"))
             == 0;
+    let ex_first = if claim_first && first_reward_id > 0 {
+        exchange_reward_entry(&state.assets, first_reward_id)
+    } else {
+        None
+    };
+    let ex_repeat = if reward_id > 0 {
+        exchange_reward_entry(&state.assets, reward_id)
+    } else {
+        None
+    };
+
+    let mut waveplate_cost = 0i32;
+    let mut item_costs: Vec<CostItem> = Vec::new();
+    if let Some(ref ex) = ex_first {
+        for c in &ex.costs {
+            if c.id == energy::TYPE_WAVEPLATE {
+                let Some(next_wp) = waveplate_cost.checked_add(c.count) else {
+                    return Ok(LevelPlayRewardResponse {
+                        ErrorCode: Some(ErrorCode::RequestParamError),
+                    });
+                };
+                waveplate_cost = next_wp;
+            } else {
+                item_costs.push(*c);
+            }
+        }
+    }
+    if let Some(ref ex) = ex_repeat {
+        for c in &ex.costs {
+            let Some(scaled) = c.count.checked_mul(cnt) else {
+                return Ok(LevelPlayRewardResponse {
+                    ErrorCode: Some(ErrorCode::RequestParamError),
+                });
+            };
+            if c.id == energy::TYPE_WAVEPLATE {
+                let Some(next_wp) = waveplate_cost.checked_add(scaled) else {
+                    return Ok(LevelPlayRewardResponse {
+                        ErrorCode: Some(ErrorCode::RequestParamError),
+                    });
+                };
+                waveplate_cost = next_wp;
+            } else {
+                item_costs.push(CostItem {
+                    id: c.id,
+                    count: scaled,
+                });
+            }
+        }
+    }
+
+    if waveplate_cost > 0 {
+        let now_sec = energy::now_seconds();
+        energy::sync_energy(&mut state.player_components.basic, now_sec);
+        if state.player_components.basic.info.energy_count < waveplate_cost {
+            return Ok(LevelPlayRewardResponse {
+                ErrorCode: Some(ErrorCode::ErrItemNotEnough),
+            });
+        }
+    }
+    if !item_costs.is_empty()
+        && !consume::has_costs(
+            &state.player_components.basic,
+            &state.player_components.inventory,
+            &item_costs,
+        )
+    {
+        return Ok(LevelPlayRewardResponse {
+            ErrorCode: Some(ErrorCode::ErrItemNotEnough),
+        });
+    }
+    if waveplate_cost > 0 {
+        let ok = energy::consume_waveplate(
+            &mut state.conn,
+            &state.fs,
+            &mut state.player_components.basic,
+            waveplate_cost,
+        )
+        .map_err(|e| e.to_string())?;
+        if !ok {
+            return Ok(LevelPlayRewardResponse {
+                ErrorCode: Some(ErrorCode::ErrItemNotEnough),
+            });
+        }
+    }
+    if !item_costs.is_empty() {
+        let ok = {
+            let State {
+                conn,
+                fs,
+                player_components,
+                ..
+            } = state;
+            consume::consume_costs(
+                conn,
+                fs,
+                &mut player_components.basic,
+                &mut player_components.inventory,
+                &item_costs,
+            )
+            .map_err(|e| e.to_string())?
+        };
+        if !ok {
+            return Ok(LevelPlayRewardResponse {
+                ErrorCode: Some(ErrorCode::ErrItemNotEnough),
+            });
+        }
+    }
+
+    let key = format!("lp:reward_cnt:{resolved_cfg_id}");
+    let total_reward_cnt = state
+        .player_components
+        .progress
+        .info
+        .add_key_int(&key, i64::from(cnt))
+        .clamp(0, i64::from(i32::MAX)) as i32;
     if matched_lp_id > 0 {
         state
             .player_components
@@ -321,19 +515,30 @@ pub fn handle_level_play_reward_request(
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
 
+    let world_level = state.player_components.basic.info.attributes.cur_world_level;
     let mut granted_any = false;
     if claim_first && first_reward_id > 0 {
+        let drop_id = ex_first
+            .as_ref()
+            .map(|e| resolve_exchange_drop_id(e, world_level))
+            .filter(|&d| d > 0)
+            .unwrap_or(first_reward_id);
         let mut rctx = state.reward_context();
-        let res = reward::grant_treasure_box_reward(&mut rctx, 0, first_reward_id, 15_008)
+        let res = reward::grant_treasure_box_reward(&mut rctx, 0, drop_id, 15_008)
             .map_err(|e| e.to_string())?;
         if res.granted_count > 0 {
             granted_any = true;
         }
     }
     if reward_id > 0 {
+        let drop_id = ex_repeat
+            .as_ref()
+            .map(|e| resolve_exchange_drop_id(e, world_level))
+            .filter(|&d| d > 0)
+            .unwrap_or(reward_id);
         for _ in 0..cnt {
             let mut rctx = state.reward_context();
-            let res = reward::grant_treasure_box_reward(&mut rctx, 0, reward_id, 15_008)
+            let res = reward::grant_treasure_box_reward(&mut rctx, 0, drop_id, 15_008)
                 .map_err(|e| e.to_string())?;
             if res.granted_count > 0 {
                 granted_any = true;
@@ -398,6 +603,64 @@ pub fn handle_level_play_reward_request(
     }
 
     if matched_lp_id > 0 {
+        let was_completed = state
+            .player_components
+            .quest
+            .info
+            .completed_level_plays
+            .contains(&matched_lp_id);
+        let was_entered = sonoro_gamesv_fs::quest_info::remove_int_value(
+            &mut state
+                .player_components
+                .quest
+                .info
+                .progress
+                .entered_level_plays,
+            matched_lp_id,
+        );
+        state
+            .player_components
+            .quest
+            .info
+            .mark_level_play_completed(matched_lp_id);
+        state
+            .player_components
+            .quest
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int(&format!("lp_state:{matched_lp_id}"), 3);
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+        if !was_completed {
+            if was_entered {
+                let _ = state.conn.push_msg(
+                    sonoro_proto::pb::LevelPlayFirstNotify::MSG_ID,
+                    &sonoro_proto::pb::LevelPlayFirstNotify { Id: matched_lp_id },
+                );
+            }
+            let _ = state.conn.push_msg(
+                sonoro_proto::pb::LevelPlayStateNotify::MSG_ID,
+                &sonoro_proto::pb::LevelPlayStateNotify {
+                    Id: matched_lp_id,
+                    State: 3,
+                    CompleteNumber: 1,
+                },
+            );
+            let mut q_events = EventQueue::new();
+            {
+                let mut qctx = state.quest_context(&mut q_events);
+                quest_engine::events::on_level_play_completed(&mut qctx, matched_lp_id)
+                    .map_err(|e| e.to_string())?;
+            }
+            super::drain_event_queue_best_effort(&mut q_events, state);
+        }
         let _ = state.conn.push_msg(
             LevelPlayInfoNotify::MSG_ID,
             &LevelPlayInfoNotify {

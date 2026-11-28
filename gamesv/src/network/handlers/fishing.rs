@@ -7,7 +7,7 @@ use sonoro_gamesv_fs::progress_info::{FishingCabinItem, ProgressInfo};
 use sonoro_gamesv_logic::event_queue::EventQueue;
 use sonoro_gamesv_logic::helpers::consume::CostItem;
 use sonoro_gamesv_logic::helpers::reward::RewardItem;
-use sonoro_gamesv_logic::helpers::{consume, pb_kv, quest_engine, reward};
+use sonoro_gamesv_logic::helpers::{condition, consume, pb_kv, quest_engine, reward};
 use sonoro_proto::enums::{CabinType, ErrorCode, FishCup, FishingItemRotate};
 use sonoro_proto::pb::{
     CabinInfo, FishingActivityLimitRewardRequest,
@@ -18,18 +18,18 @@ use sonoro_proto::pb::{
     FishingEntrustHandInRequest, FishingEntrustHandInResponse, FishingEntrustRefreshRequest,
     FishingEntrustRefreshResponse, FishingEntrustTraceRequest, FishingEntrustTraceResponse,
     FishingExitRequest, FishingExitResponse, FishingHandInRequest, FishingHandInResponse,
-    FishingIllustratedInfo, FishingIllustratedRewardRequest, FishingIllustratedRewardResponse,
-    FishingInfo, FishingInfoRequest, FishingInfoResponse, FishingItemInfo, FishingPointInfoRequest,
-    FishingPointInfoResponse, FishingQuickSellPreviewRequest, FishingQuickSellPreviewResponse,
-    FishingQuickSellRequest, FishingQuickSellResponse, FishingSailingRequest,
-    FishingSailingResponse, FishingSellPreviewRequest, FishingSellPreviewResponse,
-    FishingSellRequest, FishingSellResponse, FishingShipFixRequest, FishingShipFixResponse,
-    FishingShipInfo, FishingShipSkinChangeRequest, FishingShipSkinChangeResponse,
-    FishingSkillBaitRequest, FishingSkillBaitResponse, FishingSkillBombRequest,
-    FishingSkillBombResponse, FishingSkillTeleportRequest, FishingSkillTeleportResponse,
-    FishingTechInfo, FishingTechLevelUpRequest, FishingTechLevelUpResponse,
-    FishingTeleportToBoatRequest, FishingTeleportToBoatResponse, IntVector2D, OneFishCage,
-    OneFishPointInfo,
+    FishingIllustratedInfo, FishingIllustratedRewardInfo, FishingIllustratedRewardRequest,
+    FishingIllustratedRewardResponse, FishingInfo, FishingInfoRequest, FishingInfoResponse,
+    FishingItemInfo, FishingPointInfoRequest, FishingPointInfoResponse,
+    FishingQuickSellPreviewRequest, FishingQuickSellPreviewResponse, FishingQuickSellRequest,
+    FishingQuickSellResponse, FishingSailingRequest, FishingSailingResponse,
+    FishingSellPreviewRequest, FishingSellPreviewResponse, FishingSellRequest, FishingSellResponse,
+    FishingShipFixRequest, FishingShipFixResponse, FishingShipInfo, FishingShipSkinChangeRequest,
+    FishingShipSkinChangeResponse, FishingSkillBaitRequest, FishingSkillBaitResponse,
+    FishingSkillBombRequest, FishingSkillBombResponse, FishingSkillTeleportRequest,
+    FishingSkillTeleportResponse, FishingTechInfo, FishingTechLevelUpRequest,
+    FishingTechLevelUpResponse, FishingTeleportToBoatRequest, FishingTeleportToBoatResponse,
+    IntVector2D, OneFishCage, OneFishPointInfo, OneFishingIllustratedData,
 };
 use sonoro_proto::wire::PbEnum;
 
@@ -92,22 +92,92 @@ struct FishPick {
     size: i32,
 }
 
-fn fish_pick_from_item(assets: &Assets, item_id: i32) -> FishPick {
+fn fish_size_for_item(assets: &Assets, item_id: i32, seed: i64) -> i32 {
+    static SIZE_RANGES: OnceLock<std::collections::HashMap<i32, Vec<(i32, i32, i32)>>> =
+        OnceLock::new();
+    let map = SIZE_RANGES.get_or_init(|| {
+        let mut out = std::collections::HashMap::new();
+        for entry in assets.read_raw_json_array("FishingItem") {
+            let Some(obj) = entry.as_object() else {
+                continue;
+            };
+            let Some(id) = obj.get("Id").and_then(Value::as_i64).and_then(|v| i32::try_from(v).ok()) else {
+                continue;
+            };
+            let mut ranges = Vec::new();
+            if let Some(arr) = obj.get("SizeWeight").and_then(Value::as_array) {
+                for sw in arr {
+                    if let Some(ints) = sw.get("ArrayInt").and_then(Value::as_array)
+                        && ints.len() >= 2
+                        && let (Some(lo), Some(hi)) = (ints[0].as_i64(), ints[1].as_i64())
+                    {
+                        let w = ints.get(2).and_then(Value::as_i64).unwrap_or(1).max(1) as i32;
+                        ranges.push((lo.max(1) as i32, hi.max(lo).max(1) as i32, w));
+                    }
+                }
+            }
+            if !ranges.is_empty() {
+                out.insert(id, ranges);
+            }
+        }
+        out
+    });
+    let Some(ranges) = map.get(&item_id) else {
+        return 100;
+    };
+    let total_w: i64 = ranges.iter().map(|(_, _, w)| i64::from(*w)).sum();
+    let mut pick = if total_w > 0 {
+        seed.abs().rem_euclid(total_w)
+    } else {
+        0
+    };
+    let mut chosen = ranges[0];
+    for &(lo, hi, w) in ranges {
+        if pick < i64::from(w) {
+            chosen = (lo, hi, w);
+            break;
+        }
+        pick -= i64::from(w);
+    }
+    let span = i64::from(chosen.1 - chosen.0 + 1).max(1);
+    chosen.0 + (seed.abs().rem_euclid(span)) as i32
+}
+
+fn fish_pick_from_item(assets: &Assets, item_id: i32, seed: i64) -> FishPick {
+    let size = fish_size_for_item(assets, item_id, seed);
     if let Some(fi) = assets.tables.fishing_item.get_data_by_id(&item_id) {
         let price = fi.Price.first().copied().unwrap_or(100);
         FishPick {
             item_id: fi.Id,
             quality: fi.Quality,
             price,
-            size: 100,
+            size,
         }
     } else {
         FishPick {
             item_id,
             quality: 2,
             price: 100,
-            size: 100,
+            size,
         }
+    }
+}
+
+fn record_caught_fish(info: &mut ProgressInfo, item_id: i32, size: i32) {
+    if item_id <= 0 {
+        return;
+    }
+    let sz = i64::from(size.max(1));
+    let _ = info.mark_claim(&format!("fish:caught:{item_id}"));
+    let min_k = format!("fish:caught:{item_id}:min");
+    let max_k = format!("fish:caught:{item_id}:max");
+    let prev_min = info.get_key_int(&min_k);
+    if prev_min <= 0 || sz < prev_min {
+        info.set_key_int(&min_k, sz);
+    }
+    let prev_max = info.get_key_int(&max_k);
+    if sz > prev_max {
+        info.set_key_int(&max_k, sz);
     }
 }
 
@@ -135,22 +205,14 @@ fn pick_fish_for_point(assets: &Assets, entity_id: i64, seed: i64) -> FishPick {
             if let Some((k, _)) = rw.iter().nth(pick_idx)
                 && let Ok(item_id) = k.parse::<i32>()
             {
-                return fish_pick_from_item(assets, item_id);
+                return fish_pick_from_item(assets, item_id, seed);
             }
         }
         if let Some(si) = obj.get("ShowItem").and_then(Value::as_i64)
             && si > 0
         {
             let item_id = si.clamp(1, i64::from(i32::MAX)) as i32;
-            if let Some(fi) = assets.tables.fishing_item.get_data_by_id(&item_id) {
-                let price = fi.Price.first().copied().unwrap_or(100);
-                return FishPick {
-                    item_id: fi.Id,
-                    quality: fi.Quality,
-                    price,
-                    size: 100,
-                };
-            }
+            return fish_pick_from_item(assets, item_id, seed);
         }
         break;
     }
@@ -158,13 +220,7 @@ fn pick_fish_for_point(assets: &Assets, entity_id: i64, seed: i64) -> FishPick {
     if !items.is_empty() {
         let idx = seed.rem_euclid(items.len() as i64) as usize;
         let fi = &items[idx];
-        let price = fi.Price.first().copied().unwrap_or(100);
-        return FishPick {
-            item_id: fi.Id,
-            quality: fi.Quality,
-            price,
-            size: 100,
-        };
+        return fish_pick_from_item(assets, fi.Id, seed);
     }
     FishPick {
         item_id: 80121101,
@@ -453,13 +509,122 @@ pub fn handle_fishing_info_request(
         .map(cabin_item_to_pb)
         .collect();
 
+    let mut caught_sizes: BTreeMap<i32, (i32, i32)> = BTreeMap::new();
+    for rec in &pc.fishing.cabin_items {
+        if rec.item_id > 0 {
+            let sz = rec.size.max(1);
+            caught_sizes
+                .entry(rec.item_id)
+                .and_modify(|(mn, mx)| {
+                    *mn = (*mn).min(sz);
+                    *mx = (*mx).max(sz);
+                })
+                .or_insert((sz, sz));
+        }
+    }
+    for claim in &pc.dynamic.claims {
+        if let Some(rest) = claim.strip_prefix("fish:caught:")
+            && let Ok(item_id) = rest.parse::<i32>()
+            && item_id > 0
+        {
+            let min_sz = (pc.get_key_int(&format!("fish:caught:{item_id}:min")) as i32).max(1);
+            let max_sz = (pc.get_key_int(&format!("fish:caught:{item_id}:max")) as i32).max(min_sz);
+            caught_sizes
+                .entry(item_id)
+                .and_modify(|(mn, mx)| {
+                    *mn = (*mn).min(min_sz);
+                    *mx = (*mx).max(max_sz);
+                })
+                .or_insert((min_sz, max_sz));
+        }
+    }
+    let illustrated_list: Vec<OneFishingIllustratedData> = caught_sizes
+        .iter()
+        .map(|(&item_id, &(min_size, max_size))| OneFishingIllustratedData {
+            Id: item_id,
+            MaxSize: max_size,
+            MinSize: min_size,
+        })
+        .collect();
+    let caught_species = caught_sizes.len() as i32;
+
+    static ILL_REWARDS: OnceLock<Vec<(i32, i32)>> = OnceLock::new();
+    let ill_rows = ILL_REWARDS.get_or_init(|| {
+        let mut out = Vec::new();
+        for entry in state.assets.read_raw_json_array("FishingIllustratedReward") {
+            if let Some(id) = entry.get("Id").and_then(Value::as_i64).and_then(|v| i32::try_from(v).ok()) {
+                let cond_grp = entry.get("ConditionGroup").and_then(Value::as_i64).unwrap_or(0) as i32;
+                out.push((id, cond_grp));
+            }
+        }
+        out
+    });
+    let eval_ctx = state.eval_context();
+    let rewarded_id: Vec<FishingIllustratedRewardInfo> = ill_rows
+        .iter()
+        .map(|&(id, cond_grp)| {
+            let taken = state
+                .player_components
+                .progress
+                .info
+                .has_claim(&format!("fish:ill:{id}"));
+            let passed = taken
+                || (cond_grp > 0 && condition::eval_condition_or_group(&eval_ctx, cond_grp));
+            FishingIllustratedRewardInfo {
+                Id: id,
+                CurrentProgress: caught_species,
+                TargetProgress: id.max(1),
+                HasPassed: passed,
+                IsTaken: taken,
+            }
+        })
+        .collect();
+
+    static PORTS: OnceLock<Vec<(i32, i32)>> = OnceLock::new();
+    let port_rows = PORTS.get_or_init(|| {
+        let mut out = Vec::new();
+        for entry in state.assets.read_raw_json_array("FishingPort") {
+            if let Some(id) = entry.get("Id").and_then(Value::as_i64).and_then(|v| i32::try_from(v).ok()) {
+                let cond = entry.get("UnlockCondition").and_then(Value::as_i64).unwrap_or(0) as i32;
+                out.push((id, cond));
+            }
+        }
+        out
+    });
+    let cur_port = state.player_components.progress.info.get_key_int("fish:port").max(1) as i32;
+    let mut unlock_ports: Vec<i32> = port_rows
+        .iter()
+        .filter_map(|&(pid, cond)| {
+            let unlocked = pid == 1
+                || pid == cur_port
+                || state
+                    .player_components
+                    .progress
+                    .info
+                    .has_claim(&format!("fish:port_unl:{pid}"))
+                || (cond > 0 && condition::eval_condition_or_group(&eval_ctx, cond));
+            unlocked.then_some(pid)
+        })
+        .collect();
+    if unlock_ports.is_empty() {
+        unlock_ports.push(1);
+    }
+
+    let trace_entrust = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("fish:trace_entrust")
+        .max(0) as i32;
+    let pc = &state.player_components.progress.info;
+
     Ok(FishingInfoResponse {
         FishingInfo: Some(FishingInfo {
-            TraceEntrusts: pc.get_key_int("fish:trace_entrust").max(0) as i32,
+            TraceEntrusts: trace_entrust,
             FishingTech: techs,
             ShipInfo: Some(FishingShipInfo {
                 SkinId: eq_skin,
-                PortId: pc.get_key_int("fish:port").max(1) as i32,
+                PortId: cur_port,
                 IsInPort: pc.get_key_int("fish:sailing") == 0,
                 CabinInfo: Some(CabinInfo {
                     CabinShape: 700001,
@@ -469,8 +634,12 @@ pub fn handle_fishing_info_request(
                 }),
                 ..Default::default()
             }),
-            IllustratedInfo: Some(FishingIllustratedInfo::default()),
-            UnlockPortId: vec![1, 2, 3, 4],
+            IllustratedInfo: Some(FishingIllustratedInfo {
+                IllustratedList: illustrated_list,
+                RewardedId: rewarded_id,
+                UnlockDetections: Vec::new(),
+            }),
+            UnlockPortId: unlock_ports,
             UnlockSkins: unlock_skins,
             EntrustRefreshRatio: 100,
             ..Default::default()
@@ -588,9 +757,13 @@ pub fn handle_fishing_complete_request(
     req: FishingCompleteRequest,
 ) -> Result<FishingCompleteResponse, String> {
     let info = &mut state.player_components.progress.info;
+    if req.EntityId > 0 {
+        info.set_key_int("fish:cur_point", req.EntityId);
+    }
     let pt_cnt = info.add_key_int(&format!("fish:point_cnt:{}", req.EntityId), 1);
     let total_cnt = info.add_key_int("fish:catch_cnt", 1);
     let fish = pick_fish_for_point(&state.assets, req.EntityId, pt_cnt + total_cnt);
+    record_caught_fish(info, fish.item_id, fish.size);
     let incr = info.fishing.next_fish_incr_id;
     info.fishing.next_fish_incr_id += 1;
     let rec = FishingCabinItem {
@@ -678,16 +851,21 @@ pub fn handle_fishing_entrust_refresh_request(
         .progress
         .info
         .add_key_int("fish:entrust_refresh", 1);
-    state
-        .player_components
-        .progress
-        .save(&state.fs)
-        .map_err(|e| e.to_string())?;
     let out_id = if req.EntrustId > 0 {
         req.EntrustId
     } else {
         ((next_id - 1).rem_euclid(5) + 1) as i32
     };
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int("fish:cur_entrust", i64::from(out_id));
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     Ok(FishingEntrustRefreshResponse {
         ErrorCode: Some(ErrorCode::Success),
         EntrustId: out_id,
@@ -728,7 +906,35 @@ pub fn handle_fishing_hand_in_request(
     state: &mut State,
     req: FishingHandInRequest,
 ) -> Result<FishingHandInResponse, String> {
+    let mut consume_ids: Vec<i32> = req
+        .LeftFishingItems
+        .iter()
+        .chain(req.RightFishingItems.iter())
+        .map(|it| it.IncrId)
+        .filter(|&id| id > 0)
+        .collect();
+    if req.RemoveIncrId > 0 && !consume_ids.contains(&req.RemoveIncrId) {
+        consume_ids.push(req.RemoveIncrId);
+    }
+    if !consume_ids.is_empty() {
+        let cabin = &state.player_components.progress.info.fishing.cabin_items;
+        let all_owned = consume_ids
+            .iter()
+            .all(|&id| cabin.iter().any(|rec| rec.incr_id == id));
+        if !all_owned {
+            return Ok(FishingHandInResponse {
+                ErrorCode: Some(ErrorCode::ErrItemNotEnough),
+                HandInComplete: false,
+            });
+        }
+    }
+
     let info = &mut state.player_components.progress.info;
+    if !consume_ids.is_empty() {
+        info.fishing
+            .cabin_items
+            .retain(|rec| !consume_ids.contains(&rec.incr_id));
+    }
     info.add_key_int(&format!("fish:handin:{}", req.Id), 1);
     info.add_key_int("fish:sell_cnt", 1);
     state
@@ -736,7 +942,6 @@ pub fn handle_fishing_hand_in_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
-    let _ = (req.LeftFishingItems.len(), req.RightFishingItems.len());
     let mut rctx = state.reward_context();
     reward::grant_table_reward(
         &mut rctx,
@@ -759,6 +964,13 @@ pub fn handle_fishing_point_info_request(
     state: &mut State,
     req: FishingPointInfoRequest,
 ) -> Result<FishingPointInfoResponse, String> {
+    if req.Id > 0 {
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int("fish:cur_point", i64::from(req.Id));
+    }
     let used = state
         .player_components
         .progress
@@ -964,11 +1176,13 @@ pub fn handle_fishing_skill_bomb_request(
     }
     let info = &mut state.player_components.progress.info;
     info.add_key_int("fish:skill_use", 1);
+    let cur_point = info.get_key_int("fish:cur_point");
     let base_cnt = info.add_key_int("fish:catch_cnt", 2);
     let mut items = Vec::with_capacity(2);
     for i in 0..2 {
-        let fish = pick_fish_for_point(&state.assets, 0, base_cnt + i);
+        let fish = pick_fish_for_point(&state.assets, cur_point, base_cnt + i);
         let info = &mut state.player_components.progress.info;
+        record_caught_fish(info, fish.item_id, fish.size);
         let incr = info.fishing.next_fish_incr_id;
         info.fishing.next_fish_incr_id += 1;
         let rec = FishingCabinItem {
@@ -976,7 +1190,7 @@ pub fn handle_fishing_skill_bomb_request(
             id: 1,
             incr_id: incr,
             item_id: fish.item_id,
-            size: 12,
+            size: fish.size,
             quality: fish.quality,
             price: fish.price,
             ..Default::default()

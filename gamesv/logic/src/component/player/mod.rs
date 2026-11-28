@@ -119,6 +119,14 @@ impl PlayerInventoryComponent {
         }
         Ok(Self { player_id, info })
     }
+
+    pub fn save(&self, fs: &FileSystem) -> io::Result<()> {
+        comp_util::save_struct(
+            fs,
+            &self.info,
+            &format!("player/{}/{}", self.player_id, InventoryInfo::DATA_PATH),
+        )
+    }
 }
 
 #[derive(Debug, Default)]

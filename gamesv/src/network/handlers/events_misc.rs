@@ -12,7 +12,7 @@ use sonoro_gamesv_logic::helpers::reward::RewardItem;
 use sonoro_gamesv_logic::helpers::{condition, consume, energy, level_play, pb_kv, reward};
 use sonoro_proto::enums::{BathCameraType, ConsumptiveTaskType, ErrorCode, GiantEcoNetStatus};
 use sonoro_proto::pb::{
-    ActivityBuyItem, ActivityFirstReadRequest, ActivityFirstReadResponse,
+    ActivityFirstReadRequest, ActivityFirstReadResponse,
     ActivityPayShopBuyRequest, ActivityPayShopBuyResponse, ActivityPreOpenRequest,
     ActivityPreOpenResponse, ActivityResultRewardRequest, ActivityResultRewardResponse,
     AreaTerminalPinOperationRequest, AreaTerminalPinOperationResponse, ArtemisNodeUpdateRequest,
@@ -190,10 +190,99 @@ pub fn handle_activity_pay_shop_buy_request(
     state: &mut State,
     req: ActivityPayShopBuyRequest,
 ) -> Result<ActivityPayShopBuyResponse, String> {
-    let info = &mut state.player_components.progress.info;
-    let out: Vec<ActivityBuyItem> = req.BuyItems;
-    for bi in &out {
-        info.add_key_int(&format!("act_shop:{}", bi.Id), i64::from(bi.Count));
+    if req.BuyItems.is_empty()
+        || req
+            .BuyItems
+            .iter()
+            .any(|bi| bi.Id <= 0 || bi.Count <= 0)
+    {
+        return Ok(ActivityPayShopBuyResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+            BuyItems: Vec::new(),
+        });
+    }
+    let mut bought_out = Vec::with_capacity(req.BuyItems.len());
+    for bi in req.BuyItems {
+        let shop_entry = state
+            .assets
+            .tables
+            .shop_fixed
+            .get_data_by_id(&bi.Id)
+            .map(|cfg| (cfg.LimitNum, cfg.ItemId, cfg.ItemNum, cfg.Price.0.clone()));
+        if let Some((limit_num, item_id, item_num, price)) = shop_entry {
+            let prev = state
+                .player_components
+                .progress
+                .info
+                .get_key_int(&format!("act_shop:{}", bi.Id)) as i32;
+            if limit_num > 0 && prev.saturating_add(bi.Count) > limit_num {
+                return Ok(ActivityPayShopBuyResponse {
+                    ErrorCode: Some(ErrorCode::ErrItemCount),
+                    BuyItems: bought_out,
+                });
+            }
+            let mut costs = Vec::new();
+            for (cid, unit) in price {
+                if cid > 0 && unit > 0 {
+                    let Some(total) = unit.checked_mul(bi.Count) else {
+                        return Ok(ActivityPayShopBuyResponse {
+                            ErrorCode: Some(ErrorCode::RequestParamError),
+                            BuyItems: bought_out,
+                        });
+                    };
+                    costs.push(CostItem { id: cid, count: total });
+                }
+            }
+            let total_reward = match item_num.max(1).checked_mul(bi.Count) {
+                Some(v) => v,
+                None => {
+                    return Ok(ActivityPayShopBuyResponse {
+                        ErrorCode: Some(ErrorCode::RequestParamError),
+                        BuyItems: bought_out,
+                    });
+                }
+            };
+            if item_id > 0 {
+                let outcome = {
+                    let mut ctx = state.craft_context();
+                    sonoro_gamesv_logic::helpers::craft::consume_and_grant(
+                        &mut ctx,
+                        &costs,
+                        item_id,
+                        total_reward,
+                        2,
+                    )
+                    .map_err(|e| e.to_string())?
+                };
+                if !outcome.ok {
+                    return Ok(ActivityPayShopBuyResponse {
+                        ErrorCode: Some(outcome.err),
+                        BuyItems: bought_out,
+                    });
+                }
+            } else if !costs.is_empty() {
+                let ok = consume::consume_costs(
+                    &mut state.conn,
+                    &state.fs,
+                    &mut state.player_components.basic,
+                    &mut state.player_components.inventory,
+                    &costs,
+                )
+                .map_err(|e| e.to_string())?;
+                if !ok {
+                    return Ok(ActivityPayShopBuyResponse {
+                        ErrorCode: Some(ErrorCode::ErrItemNotEnough),
+                        BuyItems: bought_out,
+                    });
+                }
+            }
+        }
+        state
+            .player_components
+            .progress
+            .info
+            .add_key_int(&format!("act_shop:{}", bi.Id), i64::from(bi.Count));
+        bought_out.push(bi);
     }
     state
         .player_components
@@ -202,7 +291,7 @@ pub fn handle_activity_pay_shop_buy_request(
         .map_err(|e| e.to_string())?;
     Ok(ActivityPayShopBuyResponse {
         ErrorCode: Some(ErrorCode::Success),
-        BuyItems: out,
+        BuyItems: bought_out,
     })
 }
 
@@ -288,7 +377,7 @@ pub fn handle_daily_adventure_pt_reward_request(
     state: &mut State,
     req: DailyAdventurePtRewardRequest,
 ) -> Result<DailyAdventurePtRewardResponse, String> {
-    let _ = claim_one(state, "dadv_pt", "DailyAdventurePoint", req.Id)?;
+    let _ = claim_one(state, "daily_adv:pt", "DailyAdventurePoint", req.Id)?;
     Ok(DailyAdventurePtRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -298,7 +387,7 @@ pub fn handle_daily_adventure_task_reward_request(
     state: &mut State,
     req: DailyAdventureTaskRewardRequest,
 ) -> Result<DailyAdventureTaskRewardResponse, String> {
-    let _ = claim_one(state, "dadv_task", "DailyAdventureTask", req.Id)?;
+    let _ = claim_one(state, "daily_adv:task", "DailyAdventureTask", req.Id)?;
     Ok(DailyAdventureTaskRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -316,7 +405,7 @@ pub fn handle_run_turntable_activity_request(
         .add_key_int(&spin_key, 1);
     let round = (roll - 1).div_euclid(8) + 1;
     let rw_id = ((roll - 1).rem_euclid(8) + 1) as i32;
-    let rw_prefix = format!("turntable_rw:{}:{round}", req.ActivityId);
+    let rw_prefix = format!("turntable:rw:{}:{round}", req.ActivityId);
     let item_map = claim_one(state, &rw_prefix, "TurntableAwards", rw_id)?;
     Ok(RunTurntableActivityResponse {
         ErrorCode: Some(ErrorCode::Success),
@@ -418,7 +507,7 @@ pub fn handle_wu_wu_package_reward_request(
     state: &mut State,
     req: WuWuPackageRewardRequest,
 ) -> Result<WuWuPackageRewardResponse, String> {
-    let _ = claim_one(state, "wuwu_pkg", "WuWuTaskPackage", req.WrapId)?;
+    let _ = claim_one(state, "wuwu:pkg", "WuWuTaskPackage", req.WrapId)?;
     Ok(WuWuPackageRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -428,7 +517,7 @@ pub fn handle_wu_wu_task_reward_request(
     state: &mut State,
     req: WuWuTaskRewardRequest,
 ) -> Result<WuWuTaskRewardResponse, String> {
-    let _ = claim_id_list(state, "wuwu_task", "WuWuWeekTask", &req.Ids)?;
+    let _ = claim_id_list(state, "wuwu:task", "WuWuWeekTask", &req.Ids)?;
     Ok(WuWuTaskRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -525,8 +614,7 @@ pub fn handle_preheat_sign_reward_request(
     state: &mut State,
     req: PreheatSignRewardRequest,
 ) -> Result<PreheatSignRewardResponse, String> {
-    let key = format!("preheat:{}", req.PreheatNodeId);
-    let _ = claim_one(state, &key, "PreheatSign", req.PreheatNodeId)?;
+    let _ = claim_one(state, "preheat", "PreheatSign", req.PreheatNodeId)?;
     Ok(PreheatSignRewardResponse {
         Error: Some(ErrorCode::Success),
         PreheatSignSurveyInfo: Some(PreheatSignSurveyInfo {
@@ -586,7 +674,7 @@ pub fn handle_avignon_reward_request(
     state: &mut State,
     req: AvignonRewardRequest,
 ) -> Result<AvignonRewardResponse, String> {
-    let _ = claim_one(state, "avignon_rw", "Avignon", req.TaskId)?;
+    let _ = claim_one(state, "avignon:task", "Avignon", req.TaskId)?;
     Ok(AvignonRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -598,7 +686,7 @@ pub fn handle_black_coast_theme_active_reward_request(
 ) -> Result<BlackCoastThemeActiveRewardResponse, String> {
     let _ = claim_id_list(
         state,
-        "bc_act_rw",
+        "blackcoast:rw",
         "BlackCoastThemeRewardRe",
         &req.ActiveRewardIds,
     )?;
@@ -614,7 +702,7 @@ pub fn handle_black_coast_theme_task_reward_request(
 ) -> Result<BlackCoastThemeTaskRewardResponse, String> {
     let _ = claim_one(
         state,
-        "bc_task_rw",
+        "blackcoast:task",
         "BlackCoastThemeTaskRe",
         req.TaskId,
     )?;
@@ -748,11 +836,72 @@ pub fn handle_mul_cornice_meeting_reward_request(
     state: &mut State,
     req: MulCorniceMeetingRewardRequest,
 ) -> Result<MulCorniceMeetingRewardResponse, String> {
-    for entry in req.CorniceMeetingRewardScoreLists.values() {
-        let _ = claim_id_list(state, "cornice_rw", "CorniceMeeting", &entry.ScoreIndexes)?;
+    let challenges = state.assets.raw_json_cached("CorniceChallenge");
+    for (&cid, entry) in &req.CorniceMeetingRewardScoreLists {
+        let rw_prefix = format!("cornice:{cid}");
+        let row_rewards: Vec<i32> = challenges
+            .iter()
+            .filter_map(|v| v.as_object())
+            .find(|o| o.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(cid)))
+            .and_then(|o| o.get("RewardList").and_then(|v| v.as_array()))
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        item.as_object()
+                            .and_then(|m| m.get("Item2").and_then(|v| v.as_i64()))
+                            .map(|v| v as i32)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut new_indices = Vec::new();
+        for &idx in &entry.ScoreIndexes {
+            let key = format!("{rw_prefix}:{idx}");
+            if state.player_components.progress.info.mark_claim(&key) {
+                new_indices.push(idx);
+            }
+        }
+        if !new_indices.is_empty() {
+            let mut rctx = state.reward_context();
+            let mut granted = Vec::new();
+            for idx in new_indices {
+                if let Some(&drop_or_id) = usize::try_from(idx)
+                    .ok()
+                    .and_then(|i| row_rewards.get(i))
+                {
+                    let _ = reward::grant_table_reward(
+                        &mut rctx,
+                        "CorniceMeeting",
+                        i64::from(drop_or_id),
+                        true,
+                        true,
+                        19500,
+                        &[],
+                        Some(&mut granted),
+                    );
+                } else {
+                    let _ = reward::grant_table_reward(
+                        &mut rctx,
+                        "CorniceMeeting",
+                        i64::from(cid),
+                        true,
+                        true,
+                        19500,
+                        &[],
+                        Some(&mut granted),
+                    );
+                }
+            }
+            state
+                .player_components
+                .progress
+                .save(&state.fs)
+                .map_err(|e| e.to_string())?;
+        }
     }
     Ok(MulCorniceMeetingRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
+        CorniceMeetingRewardScoreLists: req.CorniceMeetingRewardScoreLists,
         ..Default::default()
     })
 }
@@ -803,12 +952,20 @@ pub fn handle_dark_coast_info_request(
 }
 
 pub fn handle_dragon_pool_conf_request(
-    _state: &mut State,
+    state: &mut State,
     req: DragonPoolConfRequest,
 ) -> Result<DragonPoolConfResponse, String> {
+    let drop_ids = state
+        .assets
+        .tables
+        .dragon_pool
+        .get_data_by_id(&req.DragonPoolId)
+        .map(|p| p.DropIds.clone())
+        .unwrap_or_default();
     Ok(DragonPoolConfResponse {
         DragonPoolConf: Some(DragonPoolConf {
             DragonPoolId: req.DragonPoolId,
+            DropIds: drop_ids,
             ..Default::default()
         }),
         ErrorCode: Some(ErrorCode::Success),
@@ -844,7 +1001,7 @@ pub fn handle_edge_runner_task_reward_request(
     state: &mut State,
     req: EdgeRunnerTaskRewardRequest,
 ) -> Result<EdgeRunnerTaskRewardResponse, String> {
-    let _ = claim_id_list(state, "er_task", "EdgeRunnerReward", &req.TaskIds)?;
+    let _ = claim_id_list(state, "edge:rw", "EdgeRunnerReward", &req.TaskIds)?;
     Ok(EdgeRunnerTaskRewardResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -921,7 +1078,7 @@ pub fn handle_gather_activity_reward_request(
     state: &mut State,
     req: GatherActivityRewardRequest,
 ) -> Result<GatherActivityRewardResponse, String> {
-    let _ = claim_one(state, "gather_rw", "GatherActivity", req.GatherTaskId)?;
+    let _ = claim_one(state, "gather", "GatherActivity", req.GatherTaskId)?;
     Ok(GatherActivityRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1185,7 +1342,7 @@ pub fn handle_giant_stable_value_activity_request(
     state: &mut State,
     req: GiantStableValueActivityRequest,
 ) -> Result<GiantStableValueActivityResponse, String> {
-    let _ = claim_id_list(state, "giant_sv", "GiantActivity", &req.RewardIds)?;
+    let _ = claim_id_list(state, "giant:rw", "GiantActivity", &req.RewardIds)?;
     Ok(GiantStableValueActivityResponse {
         ErrorCode: Some(ErrorCode::Success),
         GotRewardIds: req.RewardIds,
@@ -1219,7 +1376,7 @@ pub fn handle_linkage_reward_request(
     state: &mut State,
     req: LinkageRewardRequest,
 ) -> Result<LinkageRewardResponse, String> {
-    let _ = claim_one(state, "link_rw", "ActivityLinkage", req.ActivityPageId)?;
+    let _ = claim_one(state, "linkage:norm", "ActivityLinkage", req.ActivityPageId)?;
     Ok(LinkageRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1229,7 +1386,7 @@ pub fn handle_long_shan_score_reward_request(
     state: &mut State,
     req: LongShanScoreRewardRequest,
 ) -> Result<LongShanScoreRewardResponse, String> {
-    let _ = claim_id_list(state, "longshan_sc", "LongShanScoreReward", &req.Ids)?;
+    let _ = claim_id_list(state, "longshan:score", "LongShanScoreReward", &req.Ids)?;
     Ok(LongShanScoreRewardResponse {
         Error: Some(ErrorCode::Success),
         ScoreRewardedIds: req.Ids,
@@ -1240,7 +1397,7 @@ pub fn handle_long_shan_task_reward_request(
     state: &mut State,
     req: LongShanTaskRewardRequest,
 ) -> Result<LongShanTaskRewardResponse, String> {
-    let _ = claim_id_list(state, "longshan_task", "LongShanTask", &req.TaskIds)?;
+    let _ = claim_id_list(state, "longshan:task", "LongShanTask", &req.TaskIds)?;
     Ok(LongShanTaskRewardResponse {
         Error: Some(ErrorCode::Success),
     })
@@ -1265,7 +1422,7 @@ pub fn handle_moon_phase_reward_request(
     state: &mut State,
     _req: MoonPhaseRewardRequest,
 ) -> Result<MoonPhaseRewardResponse, String> {
-    let _ = claim_one(state, "moon_phase_rw", "MoonPhase", 1)?;
+    let _ = claim_one(state, "moon_phase", "MoonPhase", 1)?;
     Ok(MoonPhaseRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1296,7 +1453,7 @@ pub fn handle_qing_xiao_task_reward_request(
     state: &mut State,
     req: QingXiaoTaskRewardRequest,
 ) -> Result<QingXiaoTaskRewardResponse, String> {
-    let _ = claim_id_list(state, "qingxiao_rw", "QingXiao", &req.TaskIds)?;
+    let _ = claim_id_list(state, "qingxiao", "QingXiao", &req.TaskIds)?;
     Ok(QingXiaoTaskRewardResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -1336,7 +1493,7 @@ pub fn handle_time_point_activity_reward_request(
     state: &mut State,
     req: TimePointActivityRewardRequest,
 ) -> Result<TimePointActivityRewardResponse, String> {
-    let _ = claim_one(state, "tpa_rw", "TimePointReward", req.Id)?;
+    let _ = claim_one(state, "time_pt", "TimePointReward", req.Id)?;
     Ok(TimePointActivityRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1346,7 +1503,7 @@ pub fn handle_time_point_activity_batch_reward_request(
     state: &mut State,
     req: TimePointActivityBatchRewardRequest,
 ) -> Result<TimePointActivityBatchRewardResponse, String> {
-    let _ = claim_id_list(state, "tpa_brw", "TimePointReward", &req.Ids)?;
+    let _ = claim_id_list(state, "time_pt", "TimePointReward", &req.Ids)?;
     Ok(TimePointActivityBatchRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1356,7 +1513,7 @@ pub fn handle_trial_role_reward_request(
     state: &mut State,
     req: TrialRoleRewardRequest,
 ) -> Result<TrialRoleRewardResponse, String> {
-    let _ = claim_one(state, "trial_role_rw", "RoleTrial", req.RoleId)?;
+    let _ = claim_one(state, "role_trial", "RoleTrial", req.RoleId)?;
     Ok(TrialRoleRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1368,7 +1525,7 @@ pub fn handle_trial_role_skin_reward_request(
 ) -> Result<TrialRoleSkinRewardResponse, String> {
     let _ = claim_one(
         state,
-        "trial_skin_rw",
+        "skin_trial",
         "RoleSkinTrial",
         req.RoleSkinTrialInfoId,
     )?;
@@ -1856,7 +2013,7 @@ pub fn handle_farm_gold_level_play_repeated_request(
     state: &mut State,
     req: FarmGoldLevelPlayRepeatedRequest,
 ) -> Result<FarmGoldLevelPlayRepeatedResponse, String> {
-    let _ = claim_id_list(state, "fg_lp", "FarmGold", &req.InstIdList)?;
+    let _ = claim_id_list(state, "farmgold:lv", "FarmGold", &req.InstIdList)?;
     Ok(FarmGoldLevelPlayRepeatedResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1866,7 +2023,7 @@ pub fn handle_farm_gold_point_repeated_request(
     state: &mut State,
     req: FarmGoldPointRepeatedRequest,
 ) -> Result<FarmGoldPointRepeatedResponse, String> {
-    let _ = claim_id_list(state, "fg_pt", "FarmGold", &req.Ids)?;
+    let _ = claim_id_list(state, "farmgold:pt", "FarmGold", &req.Ids)?;
     Ok(FarmGoldPointRepeatedResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -2480,7 +2637,7 @@ pub fn handle_harvest_activity_level_request(
     state: &mut State,
     req: HarvestActivityLevelRequest,
 ) -> Result<HarvestActivityLevelResponse, String> {
-    let item_map = claim_one(state, "harv_lv", "RiskHarvestInst", req.InstId)?;
+    let item_map = claim_one(state, "harvest_lv", "RiskHarvestInst", req.InstId)?;
     Ok(HarvestActivityLevelResponse {
         ErrorCode: Some(ErrorCode::Success),
         ItemMap: item_map,
@@ -2491,7 +2648,7 @@ pub fn handle_harvest_activity_point_request(
     state: &mut State,
     req: HarvestActivityPointRequest,
 ) -> Result<HarvestActivityPointResponse, String> {
-    let item_map = claim_one(state, "harv_pt", "RiskHarvestScoreReward", req.Id)?;
+    let item_map = claim_one(state, "harvest_pt", "RiskHarvestScoreReward", req.Id)?;
     Ok(HarvestActivityPointResponse {
         ErrorCode: Some(ErrorCode::Success),
         ItemMap: item_map,
@@ -2556,31 +2713,46 @@ pub fn handle_invest_request(
         }
     }
     let gain = req.Amount * 2;
-    let info = &mut state.player_components.progress.info;
-    info.add_key_int(&format!("invest:{}", req.EntrustId), i64::from(gain));
-    info.add_key_int("trackmoon:gold", i64::from(gain));
+    let delta = (req.Amount / 10).max(10);
+    let mut role_settle = Vec::with_capacity(3);
+    let mut total_lvl = 0i32;
+    {
+        let info = &mut state.player_components.progress.info;
+        info.add_key_int(&format!("invest:{}", req.EntrustId), i64::from(gain));
+        info.add_key_int("trackmoon:gold", i64::from(gain));
+        for rid in 1..=3 {
+            let lvl = info
+                .get_key_int(&format!("trackmoon:role_lvl:{rid}"))
+                .max(1) as i32;
+            total_lvl += lvl;
+            let a_prev = info.get_key_int(&format!("trackmoon:role_a:{rid}")).max(0) as i32;
+            let b_prev = info.get_key_int(&format!("trackmoon:role_b:{rid}")).max(0) as i32;
+            let c_prev = info.get_key_int(&format!("trackmoon:role_c:{rid}")).max(0) as i32;
+            info.set_key_int(&format!("trackmoon:role_a:{rid}"), i64::from(a_prev + delta));
+            info.set_key_int(&format!("trackmoon:role_b:{rid}"), i64::from(b_prev + delta));
+            info.set_key_int(&format!("trackmoon:role_c:{rid}"), i64::from(c_prev + delta));
+            role_settle.push(RoleProperSettle {
+                RoleId: rid,
+                PropertyA: delta,
+                PropertyB: delta,
+                PropertyC: delta,
+                Level: lvl,
+            });
+        }
+    }
     state
         .player_components
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
-
-    let delta = (req.Amount / 10).max(10);
-    let role_settle = (1..=3)
-        .map(|rid| RoleProperSettle {
-            RoleId: rid,
-            PropertyA: delta,
-            PropertyB: delta,
-            PropertyC: delta,
-            Level: 1,
-        })
-        .collect();
+    let eval_level = ((req.Amount / 25) + (total_lvl / 3)).clamp(1, 5);
+    let heat = (req.Amount / 5).max(10);
     Ok(InvestResponse {
-        Heat: 10,
+        Heat: heat,
         RoleProperSettle: role_settle,
         Gold: gain,
         BaseGold: req.Amount,
-        EvaluationLevel: 3,
+        EvaluationLevel: eval_level,
         ErrorCode: Some(ErrorCode::Success),
         Success: true,
     })
@@ -2705,7 +2877,7 @@ pub fn handle_mow_tower_levels_reward_request(
     state: &mut State,
     req: MowTowerLevelsRewardRequest,
 ) -> Result<MowTowerLevelsRewardResponse, String> {
-    let _ = claim_one(state, "mow_rw", "MowTower", req.RewardId)?;
+    let _ = claim_one(state, "mow:clm", "MowTower", req.RewardId)?;
     Ok(MowTowerLevelsRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -2715,11 +2887,25 @@ pub fn handle_mow_tower_settlement_request(
     state: &mut State,
     _req: MowTowerSettlementRequest,
 ) -> Result<MowTowerSettlementResponse, String> {
-    state
-        .player_components
-        .progress
-        .info
-        .add_key_int("mow:settle_cnt", 1);
+    let info = &mut state.player_components.progress.info;
+    info.add_key_int("mow:settle_cnt", 1);
+    let level_id = info.get_key_int("mow:cur_level").max(1) as i32;
+    let first_kill = info
+        .get_key_int(&format!("mow:s1:{level_id}"))
+        .max(0) as i32;
+    let first_timer = info
+        .get_key_int(&format!("mow:t1:{level_id}"))
+        .max(0) as i32;
+    let second_kill = info
+        .get_key_int(&format!("mow:s2:{level_id}"))
+        .max(0) as i32;
+    let second_timer = info
+        .get_key_int(&format!("mow:t2:{level_id}"))
+        .max(0) as i32;
+    let total = first_kill + first_timer + second_kill + second_timer;
+    let high_key = format!("mow:high:{level_id}");
+    let high_score = (info.get_key_int(&high_key).max(0) as i32).max(total);
+    info.set_key_int(&high_key, i64::from(high_score));
     state
         .player_components
         .progress
@@ -2728,12 +2914,12 @@ pub fn handle_mow_tower_settlement_request(
     let _ = state.conn.push_msg(
         MowTowerResultNotify::MSG_ID,
         &MowTowerResultNotify {
-            LevelsId: 1,
-            FirstKilMonsterScore: 1000,
-            FirstTimerScore: 500,
-            SecondKilMonsterScore: 1000,
-            SecondTimerScore: 500,
-            HighScore: 3000,
+            LevelsId: level_id,
+            FirstKilMonsterScore: first_kill,
+            FirstTimerScore: first_timer,
+            SecondKilMonsterScore: second_kill,
+            SecondTimerScore: second_timer,
+            HighScore: high_score,
         },
     );
     Ok(MowTowerSettlementResponse {
@@ -2858,7 +3044,7 @@ pub fn handle_photo_fight_task_reward_request(
     state: &mut State,
     req: PhotoFightTaskRewardRequest,
 ) -> Result<PhotoFightTaskRewardResponse, String> {
-    let _ = claim_id_list(state, "pf_task", "PhotoFight", &req.TargetIds)?;
+    let _ = claim_id_list(state, "photofight", "PhotoFight", &req.TargetIds)?;
     let targets = req
         .TargetIds
         .into_iter()
@@ -3013,7 +3199,7 @@ pub fn handle_risk_harvest_inst_reward_request(
     state: &mut State,
     req: RiskHarvestInstRewardRequest,
 ) -> Result<RiskHarvestInstRewardResponse, String> {
-    let _ = claim_one(state, "rh_inst", "RiskHarvestInst", req.Id)?;
+    let _ = claim_one(state, "risk:inst", "RiskHarvestInst", req.Id)?;
     Ok(RiskHarvestInstRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -3023,7 +3209,7 @@ pub fn handle_risk_harvest_score_reward_request(
     state: &mut State,
     req: RiskHarvestScoreRewardRequest,
 ) -> Result<RiskHarvestScoreRewardResponse, String> {
-    let _ = claim_one(state, "rh_score", "RiskHarvestScoreReward", req.Id)?;
+    let _ = claim_one(state, "risk:score", "RiskHarvestScoreReward", req.Id)?;
     Ok(RiskHarvestScoreRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

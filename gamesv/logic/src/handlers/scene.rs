@@ -49,8 +49,8 @@ use crate::helpers::condition::EvalContext;
 use crate::helpers::level_play::{self, LevelPlayContext};
 use crate::helpers::quest_types::{ActivityNotifyFn, QuestContext};
 use crate::helpers::{
-    autopilot, condition, quest_actions, quest_engine, role as role_helper, spline_state,
-    trial_roles,
+    attributes, autopilot, condition, quest_actions, quest_engine, role as role_helper,
+    spline_state, trial_roles,
 };
 use crate::scene::{DeferredJoinFlow, Scene, now_millis};
 use crate::schedulers::{BuffTimerScheduler, DirtySaveQueue};
@@ -127,19 +127,35 @@ fn notify_transport_roadways<S: PushSink + ?Sized>(
     );
 }
 
-fn notify_infrastructure_road_data<S: PushSink + ?Sized>(sink: &mut S, assets: &Assets) {
+fn is_infr_road_completed(progress_info: &ProgressInfo, road_id: i32) -> bool {
+    let key = format!("infr:road:{road_id}");
+    progress_info.has_claim(&key) || opt_key_int(progress_info, &key).is_some_and(|v| v > 0)
+}
+
+fn notify_infrastructure_road_data<S: PushSink + ?Sized>(
+    sink: &mut S,
+    assets: &Assets,
+    progress_info: Option<&ProgressInfo>,
+) {
     let roads: Vec<InfrOneRoad> = assets
         .tables
         .infr_road_build
         .items
         .iter()
         .filter(|cfg| cfg.DungeonId == LAHAI_ROI_DUNGEON_ID)
-        .map(|cfg| InfrOneRoad {
-            RoadId: cfg.Id,
-            status: Some(InfrStatusPb::InfrStatusComplete),
-            CompleteTime: 0,
-            TotalGiftCount: 0,
-            LastGiftTime: 0,
+        .map(|cfg| {
+            let completed = progress_info.is_some_and(|p| is_infr_road_completed(p, cfg.Id));
+            InfrOneRoad {
+                RoadId: cfg.Id,
+                status: Some(if completed {
+                    InfrStatusPb::InfrStatusComplete
+                } else {
+                    InfrStatusPb::InfrStatusProgress
+                }),
+                CompleteTime: 0,
+                TotalGiftCount: 0,
+                LastGiftTime: 0,
+            }
         })
         .collect();
     sink.push(
@@ -147,6 +163,10 @@ fn notify_infrastructure_road_data<S: PushSink + ?Sized>(sink: &mut S, assets: &
         &InfrRoadUpdateNotify {
             RoadInfo: Some(InfrRoadPb {
                 Roads: roads,
+                ManualTraceRoad: progress_info
+                    .and_then(|p| opt_key_int(p, "infr:trace_road"))
+                    .unwrap_or(0)
+                    .max(0) as i32,
                 ..Default::default()
             }),
         },
@@ -367,12 +387,24 @@ fn apply_stored_world_entity_overrides(
                         fan_turns_val = Some(turns);
                     }
                     ExtraEntry::HookLockPoint(hlp) => {
+                        let is_disabled =
+                            opt_key_int(info, &format!("hook_point:disabled:{net_id}"))
+                                .or_else(|| {
+                                    opt_key_int(info, &format!("hook_point:disabled:{config_id}"))
+                                })
+                                == Some(1);
                         let is_active = opt_key_int(info, &format!("hook_point:active:{net_id}"))
                             .or_else(|| opt_key_int(info, &format!("hook_point:active:{config_id}")))
                             == Some(1);
                         let default_disabled =
                             hlp.DisableAtCreateStage.unwrap_or(false) || hlp.Disabled.unwrap_or(false);
-                        hook_disabled_val = Some(if is_active { false } else { default_disabled });
+                        hook_disabled_val = Some(if is_disabled {
+                            true
+                        } else if is_active {
+                            false
+                        } else {
+                            default_disabled
+                        });
                     }
                     ExtraEntry::SceneItemAttributeComponent(sa) => {
                         if let Some(ids) =
@@ -576,11 +608,15 @@ fn append_unique_i32(items: &mut Vec<i32>, value: i32) {
     }
 }
 
-fn append_completed_road_data_layers(scene_info: &mut SceneInformation, assets: &Assets) {
+fn append_completed_road_data_layers(
+    scene_info: &mut SceneInformation,
+    assets: &Assets,
+    progress_info: &ProgressInfo,
+) {
     let mut repaired_layers = Vec::new();
     let mut unrepaired_layers = Vec::new();
     for cfg in &assets.tables.infr_road_build.items {
-        if cfg.DungeonId != LAHAI_ROI_DUNGEON_ID {
+        if cfg.DungeonId != LAHAI_ROI_DUNGEON_ID || !is_infr_road_completed(progress_info, cfg.Id) {
             continue;
         }
         for &layer in &cfg.LoadDataLayers {
@@ -650,7 +686,11 @@ pub fn explore_skill_notify<S: PushSink + ?Sized>(scene: &Scene, sink: &mut S) {
             ExtraItemId: scene.explore_tools_info.function_extra_item_id,
             ExploreSkill: scene.explore_tools_info.active_function_skill,
         },
-        ExploreSkillRoulette::default(),
+        ExploreSkillRoulette {
+            SkillIds: roulette_skill_ids(&scene.explore_tools_info.trap_defense_roulette),
+            ExtraItemId: scene.explore_tools_info.trap_defense_extra_item_id,
+            ExploreSkill: scene.explore_tools_info.active_trap_defense_skill,
+        },
         ExploreSkillRoulette {
             SkillIds: roulette_skill_ids(&scene.explore_tools_info.motorcycle_roulette),
             ExtraItemId: scene.explore_tools_info.motorcycle_extra_item_id,
@@ -658,10 +698,16 @@ pub fn explore_skill_notify<S: PushSink + ?Sized>(scene: &Scene, sink: &mut S) {
         },
     ];
 
+    let active_explore = if scene.explore_tools_info.active_explore_skill > 0 {
+        scene.explore_tools_info.active_explore_skill
+    } else {
+        1001
+    };
+
     sink.push(
         ExploreToolAllNotify::MSG_ID,
         &ExploreToolAllNotify {
-            ExploreSkill: scene.explore_tools_info.active_explore_skill,
+            ExploreSkill: active_explore,
             SkillList: scene.explore_tools_info.unlocked_explore_skills.clone(),
             ..Default::default()
         },
@@ -674,7 +720,9 @@ pub fn explore_skill_notify<S: PushSink + ?Sized>(scene: &Scene, sink: &mut S) {
     );
     sink.push(
         VisionExploreSkillNotify::MSG_ID,
-        &VisionExploreSkillNotify { ExploreSkill: 1001 },
+        &VisionExploreSkillNotify {
+            ExploreSkill: active_explore,
+        },
     );
 }
 
@@ -1032,7 +1080,7 @@ pub fn notify_join_scene<S: PushSink + ?Sized>(
         }
     }
     if instance_dungeon.Id == LAHAI_ROI_DUNGEON_ID {
-        append_completed_road_data_layers(&mut scene_info, assets);
+        append_completed_road_data_layers(&mut scene_info, assets, &progress_comp.info);
     }
     scene_info.LoadedSubLevels = quest_comp
         .info
@@ -1432,6 +1480,111 @@ pub fn formation_update_notify<S: PushSink + ?Sized>(
     );
 }
 
+fn formation_property_defaults(assets: &Assets) -> &'static [(i32, i32, i32, i32)] {
+    static DEFAULTS: std::sync::OnceLock<Vec<(i32, i32, i32, i32)>> = std::sync::OnceLock::new();
+    DEFAULTS.get_or_init(|| {
+        let mut out = Vec::new();
+        let rows = assets.read_raw_json_array("FormationProperty");
+        for target_id in [1, 10, 14] {
+            if let Some(row) = rows
+                .iter()
+                .find(|r| r.get("Id").and_then(serde_json::Value::as_i64) == Some(i64::from(target_id)))
+            {
+                let init_val = row
+                    .get("InitValue")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0) as i32;
+                let init_max = row
+                    .get("InitMax")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(i64::from(init_val)) as i32;
+                let init_ratio = row
+                    .get("InitRecoveryRate")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0) as i32;
+                out.push((target_id, init_val, init_max, init_ratio));
+            }
+        }
+        if out.len() != 3 {
+            out = vec![
+                (1, 14000, 14000, 2400),
+                (10, 7000, 7000, 2400),
+                (14, 10000, 10000, 2000),
+            ];
+        }
+        out
+    })
+}
+
+fn build_formation_attr_notify(
+    assets: &Assets,
+    scene: Option<&Scene>,
+    role_comp: Option<&PlayerRoleComponent>,
+) -> FormationAttrNotify {
+    let active_role_attr = scene.and_then(|sc| {
+        let eid = sc.current_role_entity_id();
+        (eid != 0)
+            .then(|| sc.entity(eid).and_then(|s| s.attribute.as_ref()))
+            .flatten()
+    });
+    let fallback_role_bp = if active_role_attr.is_none() {
+        scene
+            .and_then(|sc| {
+                let idx = usize::try_from(sc.formation_info.cur_formation).ok()?;
+                let role_id = sc.formation_info.formations.get(idx)?.cur_role;
+                let ri = role_comp?.role_map.get(&role_id)?;
+                Some(role_id * 1000 + ri.level.max(1))
+            })
+            .and_then(|bp_id| assets.tables.base_property.get_data_by_id(&bp_id))
+    } else {
+        None
+    };
+
+    let attrs = formation_property_defaults(assets)
+        .iter()
+        .map(|&(attr_id, init_val, init_max, init_ratio)| {
+            if attr_id == 1 {
+                let role_max = active_role_attr
+                    .map(|a| attributes::get_attr_value(a, EAttributeType::StrengthMax))
+                    .or_else(|| fallback_role_bp.as_ref().map(|bp| bp.StrengthMax))
+                    .unwrap_or(0);
+                let role_cur = active_role_attr
+                    .map(|a| attributes::get_attr_value(a, EAttributeType::Strength))
+                    .unwrap_or(0);
+                let role_rec = active_role_attr
+                    .map(|a| attributes::get_attr_value(a, EAttributeType::StrengthRecover))
+                    .unwrap_or(0);
+                let max_val = role_max.max(init_max);
+                let cur_val = if role_cur > 0 {
+                    role_cur.min(max_val)
+                } else {
+                    init_val.min(max_val)
+                };
+                FormationAttr {
+                    AttrId: attr_id,
+                    Ratio: if role_rec > 0 { role_rec } else { init_ratio },
+                    BaseMaxValue: init_max,
+                    MaxValue: max_val,
+                    CurrentValue: cur_val,
+                }
+            } else {
+                FormationAttr {
+                    AttrId: attr_id,
+                    Ratio: init_ratio,
+                    BaseMaxValue: init_max,
+                    MaxValue: init_max,
+                    CurrentValue: init_val.min(init_max),
+                }
+            }
+        })
+        .collect();
+
+    FormationAttrNotify {
+        Duration: now_millis(),
+        FormationAttrs: attrs,
+    }
+}
+
 pub fn after_scene_join<S: PushSink + ?Sized>(
     pending_flow: Option<&PendingFlow>,
     events: &mut EventQueue,
@@ -1457,7 +1610,11 @@ pub fn after_scene_join<S: PushSink + ?Sized>(
     if let Some(scene) = qctx.scene.as_deref() {
         notify_transport_roadways(fs, scene, qctx.sink, qctx.assets);
     }
-    notify_infrastructure_road_data(qctx.sink, qctx.assets);
+    notify_infrastructure_road_data(
+        qctx.sink,
+        qctx.assets,
+        qctx.progress_comp.as_deref().map(|p| &p.info),
+    );
     quest_engine::triggers::push_ready_quest_list(qctx);
 
     let loading_finished = qctx
@@ -1528,32 +1685,7 @@ pub fn after_scene_join<S: PushSink + ?Sized>(
 
     qctx.sink.push(
         FormationAttrNotify::MSG_ID,
-        &FormationAttrNotify {
-            Duration: 1_534_854_458,
-            FormationAttrs: vec![
-                FormationAttr {
-                    AttrId: 1,
-                    Ratio: 2400,
-                    BaseMaxValue: 24000,
-                    MaxValue: 24000,
-                    CurrentValue: 22000,
-                },
-                FormationAttr {
-                    AttrId: 10,
-                    Ratio: 2400,
-                    BaseMaxValue: 7000,
-                    MaxValue: 15000,
-                    CurrentValue: 7000,
-                },
-                FormationAttr {
-                    AttrId: 14,
-                    Ratio: 0,
-                    BaseMaxValue: 10000,
-                    MaxValue: 10000,
-                    CurrentValue: 10000,
-                },
-            ],
-        },
+        &build_formation_attr_notify(qctx.assets, qctx.scene.as_deref(), qctx.role_comp.as_deref()),
     );
 
     if let Some(scene) = qctx.scene.as_deref_mut() {

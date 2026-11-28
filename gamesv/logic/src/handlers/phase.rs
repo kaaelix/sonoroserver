@@ -21,7 +21,10 @@ pub fn run_enter_game_phase(
     keep_team: bool,
     pending_flow: Option<PendingFlow>,
 ) {
-    let _ = (x, y, z, yaw, keep_team);
+    let has_pos =
+        x.is_finite() && y.is_finite() && z.is_finite() && (x != 0.0 || y != 0.0 || z != 0.0);
+    let has_yaw = yaw.is_finite() && yaw != 0.0;
+    let _ = keep_team;
     events.enqueue(Event::PushData {
         player_id,
         map_config_id,
@@ -32,8 +35,8 @@ pub fn run_enter_game_phase(
         player_id,
         map_config_id,
         instance_id,
-        location: None,
-        rotation: None,
+        location: has_pos.then_some([x, y, z]),
+        rotation: has_yaw.then_some([0.0, 0.0, yaw]),
         pending_flow,
     });
 }

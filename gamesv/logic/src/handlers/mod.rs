@@ -353,10 +353,7 @@ pub fn dispatch_event<S: PushSink + ?Sized>(
             }
         }
         Event::FsmWake { now_ms, .. } => {
-            let assets = rt.assets;
-            let fs = rt.fs;
             let buff_timers = &mut *rt.buff_timers;
-            let mut tmp_role_comp = std::mem::take(rt.role_comp);
             let mut qctx = QuestContext {
                 assets: rt.assets,
                 fs: rt.fs,
@@ -370,14 +367,13 @@ pub fn dispatch_event<S: PushSink + ?Sized>(
                 echo_comp: rt.echo_comp,
                 map_comp: rt.map_comp,
                 quest_comp: rt.quest_comp,
-                role_comp: None,
+                role_comp: Some(rt.role_comp),
                 guide_comp: Some(rt.guide_comp),
                 mail_comp: Some(rt.mail_comp),
                 progress_comp: Some(rt.progress_comp),
                 activity_notify: rt.activity_notify,
             };
-            fsm::handle_fsm_wake(now_ms, &mut qctx, assets, &mut tmp_role_comp, fs, buff_timers);
-            *rt.role_comp = tmp_role_comp;
+            fsm::handle_fsm_wake_qctx(now_ms, &mut qctx, buff_timers);
         }
         Event::FsmServerAction { entity, kind } => {
             if let Some(active_scene) = rt.scene.as_mut() {

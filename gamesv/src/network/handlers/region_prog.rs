@@ -160,7 +160,7 @@ pub fn handle_infr_fire_notice_request(
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
     let mut notices = Vec::new();
-    if state.player_components.progress.info.get_key_int("infr:lv") > 0 {
+    if state.player_components.progress.info.get_key_int("infr:lvl") > 0 {
         notices.push(InfrNotice::default());
     }
     Ok(InfrFireNoticeResponse { Notices: notices })
@@ -260,7 +260,7 @@ pub fn handle_infr_theme_activity_award_request(
     state: &mut State,
     req: InfrThemeActivityAwardRequest,
 ) -> Result<InfrThemeActivityAwardResponse, String> {
-    claim_ids(state, "infr:theme", "InfrActivityTask", &req.TaskId)?;
+    claim_ids(state, "infr:task", "InfrActivityTask", &req.TaskId)?;
     Ok(InfrThemeActivityAwardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -588,7 +588,7 @@ pub fn handle_track_moon_activity_reward_request(
 ) -> Result<TrackMoonActivityRewardResponse, String> {
     claim_ids(
         state,
-        "trackmoon:act",
+        "trackmoon:task",
         "TrackMoonActivityReward",
         &[req.Id],
     )?;
@@ -760,7 +760,7 @@ pub fn handle_track_moon_target_reward_request(
     state: &mut State,
     req: TrackMoonTargetRewardRequest,
 ) -> Result<TrackMoonTargetRewardResponse, String> {
-    claim_ids(state, "trackmoon:target", "TrackMoonTarget", &[req.Id])?;
+    claim_ids(state, "trackmoon:task", "TrackMoonTarget", &[req.Id])?;
     Ok(TrackMoonTargetRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1131,7 +1131,7 @@ pub fn handle_realm_between_task_reward_request(
     state: &mut State,
     req: RealmBetweenTaskRewardRequest,
 ) -> Result<RealmBetweenTaskRewardResponse, String> {
-    let claimed = claim_ids(state, "realmbetween:task", "RoadBookTask", &req.TaskIds)?;
+    let claimed = claim_ids(state, "realm:task", "RoadBookTask", &req.TaskIds)?;
     Ok(RealmBetweenTaskRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
         TaskIds: claimed,
@@ -1517,7 +1517,7 @@ pub fn handle_through_train_finish_view_request(
     pb_kv::persist_claim(
         &state.fs,
         &mut state.player_components.progress,
-        &format!("throughtrain:{}", req.ActivityId),
+        &format!("through_train:{}", req.ActivityId),
     )
     .map_err(|e| e.to_string())?;
     Ok(ThroughTrainFinishViewResponse {

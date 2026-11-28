@@ -887,7 +887,7 @@ fn audit_92b_level_play_145750001_and_quest_145000005_chain() {
             .player_components
             .quest
             .info
-            .get_var_int("Self:145750001:列车变量"),
+            .get_var_int("LpSelf:145750001:列车变量"),
         2
     );
     let aq_final = h

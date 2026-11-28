@@ -10,6 +10,8 @@ pub mod store_card;
 
 use std::collections::HashMap;
 
+use sonoro_proto::registry::msg_id;
+
 use crate::ipc::AkiResult;
 
 /// Function signature implemented by every IPC message handler.
@@ -30,6 +32,25 @@ pub fn build_handlers() -> HashMap<u16, HandlerFn> {
     // Delegate gameplay, shop, battle pass, cards, achievements, liveness, music,
     // and detection natively to gamesv so ZON/Scene state never split-brains.
     extra::register_all(&mut map);
+
+    // Mount non-conflicting handlers from dedicated modules absent in gamesv LUT.
+    map.insert(
+        msg_id::ACCESS_PATH_CONFIG_REQUEST,
+        settings_guide::handle_access_path_config,
+    );
+    map.insert(
+        msg_id::PHANTOM_MUSIC_INFO_REQUEST,
+        settings_guide::handle_phantom_music_info,
+    );
+    map.insert(
+        msg_id::PHANTOM_MUSIC_COLLECT_UPDATE_REQUEST,
+        settings_guide::handle_phantom_music_collect_update,
+    );
+    map.insert(
+        msg_id::ACHIEVEMENT_UPDATE_REQUEST,
+        achievement::handle_achievement_update_request,
+    );
+
     map
 }
 

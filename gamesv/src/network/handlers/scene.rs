@@ -263,15 +263,19 @@ pub fn handle_scene_loading_finish_request(
         let run_deferred = scene.deferred_join_sync_pending;
         scene.deferred_join_sync_pending = false;
         let already_login_synced = std::mem::take(&mut scene.login_world_synced);
+        let inst_id = scene.instance_id;
+        let already_instance_synced = scene.synced_world_instance_id == Some(inst_id);
         let player_loc = scene.instance.players.first().map(|p| p.location);
         if let Some(loc) = player_loc {
             scene.last_spatial_check_loc = loc;
         }
-        let inst_id = scene.instance_id;
         let deferred_flow = scene.deferred_join_flow.take();
 
         super::flow::clear_client_black_screen_if_idle(state);
-        if run_deferred && !already_login_synced {
+        if run_deferred && !already_login_synced && !already_instance_synced {
+            if let Some(sc) = state.scene.as_mut() {
+                sc.synced_world_instance_id = Some(inst_id);
+            }
             let mut qctx = state.quest_context(events);
             quest_actions::sync_world_state_on_join(&mut qctx).map_err(|e| e.to_string())?;
             if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx) {
@@ -443,10 +447,60 @@ pub fn handle_vehicle_request(
     })
 }
 
+fn resolve_active_vehicle_entity_id(state: &State) -> i64 {
+    let Some(scene) = state.scene.as_ref() else {
+        return 0;
+    };
+    if let Some(found) = scene.entities.iter().find(|e| {
+        e.vehicle.as_ref().is_some_and(|v| v.occupied)
+            && e.player_id.is_none_or(|pid| pid == state.player_id)
+    }) {
+        return found.net_id;
+    }
+    let cur_cfg = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("vehicle:cur");
+    i32::try_from(cur_cfg)
+        .ok()
+        .filter(|&cid| cid > 0)
+        .and_then(|cid| scene.find_entity_net_id_by_config_id(cid))
+        .unwrap_or(0)
+}
+
 pub fn handle_vehicle_finish_request(
-    _state: &mut State,
-    _req: VehicleFinishRequest,
+    state: &mut State,
+    req: VehicleFinishRequest,
 ) -> Result<VehicleFinishResponse, String> {
+    let target_id = if req.EntityId != 0 {
+        req.EntityId
+    } else {
+        resolve_active_vehicle_entity_id(state)
+    };
+    if target_id != 0
+        && let Some(scene) = state.scene.as_mut()
+        && let Some(&idx) = scene.net_id_map.get(&target_id)
+    {
+        if let Some(veh) = scene.entities[idx].vehicle.as_mut() {
+            veh.occupied = false;
+        }
+        scene
+            .save_entity_by_net_id(&state.fs, target_id)
+            .map_err(|e| e.to_string())?;
+    }
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int("vehicle:cur", 0);
+        info.set_key_int("vehicle:seat", -1);
+        info.set_key_int("vehicle:passenger_role", 0);
+        info.set_key_int("vehicle:passenger_seat", -1);
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     Ok(VehicleFinishResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -456,13 +510,33 @@ pub fn handle_vehicle_change_passenger_request(
     state: &mut State,
     req: VehicleChangePassengerRequest,
 ) -> Result<VehicleChangePassengerResponse, String> {
+    if req.RoleId <= 0 || !state.player_components.role.role_map.contains_key(&req.RoleId) {
+        return Ok(VehicleChangePassengerResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
+    let veh_entity_id = resolve_active_vehicle_entity_id(state);
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int("vehicle:passenger_role", i64::from(req.RoleId));
+        info.set_key_int("vehicle:passenger_seat", i64::from(req.SeatId));
+        info.set_key_int(
+            &format!("vehicle:seat_role:{}", req.SeatId),
+            i64::from(req.RoleId),
+        );
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     let _ = state.conn.push_msg(
         VehiclePassengerUpdateNotify::MSG_ID,
         &VehiclePassengerUpdateNotify {
             PlayerId: state.player_id,
             RoleId: req.RoleId,
+            EntityId: veh_entity_id,
             SeatId: req.SeatId,
-            ..Default::default()
         },
     );
     Ok(VehicleChangePassengerResponse {
@@ -474,13 +548,36 @@ pub fn handle_vehicle_remove_passenger_request(
     state: &mut State,
     req: VehicleRemovePassengerRequest,
 ) -> Result<VehicleRemovePassengerResponse, String> {
+    let veh_entity_id = resolve_active_vehicle_entity_id(state);
+    {
+        let info = &mut state.player_components.progress.info;
+        let cur_role = info.get_key_int("vehicle:passenger_role");
+        let cur_seat = info.get_key_int("vehicle:passenger_seat");
+        if req.RoleId == 0 || cur_role == i64::from(req.RoleId) {
+            info.set_key_int("vehicle:passenger_role", 0);
+            info.set_key_int("vehicle:passenger_seat", -1);
+            if cur_seat >= 0 {
+                info.set_key_int(&format!("vehicle:seat_role:{cur_seat}"), 0);
+            }
+        }
+        for kv in &mut info.dynamic.ints {
+            if kv.key.starts_with("vehicle:seat_role:") && kv.val == i64::from(req.RoleId) {
+                kv.val = 0;
+            }
+        }
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     let _ = state.conn.push_msg(
         VehiclePassengerUpdateNotify::MSG_ID,
         &VehiclePassengerUpdateNotify {
             PlayerId: state.player_id,
             RoleId: req.RoleId,
+            EntityId: veh_entity_id,
             SeatId: -1,
-            ..Default::default()
         },
     );
     Ok(VehicleRemovePassengerResponse {
@@ -1110,98 +1207,97 @@ pub fn handle_entity_dynamic_interact_request(
         opt.entity_net_id
     };
     let mut handled = false;
-    match opt.kind {
-        DynamicInteractKind::Flow => {
-            if !opt.flow_list_name.is_empty() && opt.flow_id > 0 {
-                quest_engine::triggers::start_flow_params(
-                    &mut qctx,
-                    opt.quest_id,
-                    opt.node_id,
-                    &opt.flow_list_name,
-                    opt.flow_id,
-                    opt.state_id,
-                    true,
-                )
-                .map_err(|e| e.to_string())?;
-                if let Some(sc) = qctx.scene.as_deref_mut()
-                    && sc.active_flow_inc_id != 0
-                    && sc.active_flow_quest_id == opt.quest_id
-                    && sc.active_flow_node_id == opt.node_id
+    if opt.bt_type == BtType::BtTypeLevelPlay {
+        handled = quest_engine::events::execute_level_play_dynamic_interact(
+            &mut qctx,
+            &opt,
+            target_entity_id,
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        match opt.kind {
+            DynamicInteractKind::Flow => {
+                if !opt.flow_list_name.is_empty() && opt.flow_id > 0 {
+                    quest_engine::triggers::start_flow_params_bt(
+                        &mut qctx,
+                        opt.quest_id,
+                        opt.node_id,
+                        opt.bt_type,
+                        &opt.flow_list_name,
+                        opt.flow_id,
+                        opt.state_id,
+                        true,
+                        false,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    if let Some(sc) = qctx.scene.as_deref_mut()
+                        && sc.is_flow_active_for_node(opt.bt_type, opt.quest_id, opt.node_id)
+                    {
+                        sc.active_flow_owner_entity_id = target_entity_id;
+                    }
+                    handled = true;
+                }
+            }
+            DynamicInteractKind::Actions => {
+                if let Ok(acts) = serde_json::from_str::<Vec<serde_json::Value>>(&opt.actions_json)
+                    && !acts.is_empty()
                 {
-                    sc.active_flow_owner_entity_id = target_entity_id;
+                    let prev_owner = if let Some(sc) = qctx.scene.as_deref_mut() {
+                        let prev = sc.active_flow_owner_entity_id;
+                        sc.active_flow_owner_entity_id = target_entity_id;
+                        prev
+                    } else {
+                        0
+                    };
+                    let mut cbs = quest_engine::action_callbacks();
+                    cbs.bt_type = opt.bt_type;
+                    let res = quest_actions::execute_action_list(
+                        &mut qctx,
+                        &mut cbs,
+                        opt.quest_id,
+                        opt.node_id,
+                        &acts,
+                    );
+                    if let Some(sc) = qctx.scene.as_deref_mut() {
+                        sc.active_flow_owner_entity_id = prev_owner;
+                    }
+                    res.map_err(|e| e.to_string())?;
+                    if let Some(sc) = qctx.scene.as_deref_mut()
+                        && sc.has_pending_or_deferred_flow_for_bt_node(
+                            opt.bt_type,
+                            opt.quest_id,
+                            opt.node_id,
+                        )
+                    {
+                        if sc.is_flow_active_for_node(opt.bt_type, opt.quest_id, opt.node_id) {
+                            sc.active_flow_owner_entity_id = target_entity_id;
+                        }
+                        handled = true;
+                    }
                 }
-                handled = true;
-            } else if opt.bt_type == BtType::BtTypeLevelPlay
-                && opt.quest_id > 0
-                && opt.node_id > 0
-                && let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx)
-                && level_play::on_dynamic_interact(
-                    &mut lp_ctx,
-                    opt.quest_id,
-                    opt.node_id,
-                    target_entity_id,
-                )
-                .map_err(|e| e.to_string())?
-            {
-                handled = true;
-            }
-        }
-        DynamicInteractKind::Actions => {
-            if let Ok(acts) = serde_json::from_str::<Vec<serde_json::Value>>(&opt.actions_json)
-                && !acts.is_empty()
-            {
-                let prev_owner = if let Some(sc) = qctx.scene.as_deref_mut() {
-                    let prev = sc.active_flow_owner_entity_id;
-                    sc.active_flow_owner_entity_id = target_entity_id;
-                    prev
-                } else {
-                    0
-                };
-                let mut cbs = quest_engine::action_callbacks();
-                let res = quest_actions::execute_action_list(
-                    &mut qctx,
-                    &mut cbs,
-                    opt.quest_id,
-                    opt.node_id,
-                    &acts,
-                );
-                if let Some(sc) = qctx.scene.as_deref_mut() {
-                    sc.active_flow_owner_entity_id = prev_owner;
-                }
-                res.map_err(|e| e.to_string())?;
-            }
-            if opt.bt_type == BtType::BtTypeLevelPlay && opt.quest_id > 0 && opt.node_id > 0 {
-                if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx) {
-                    let _ = level_play::on_dynamic_interact(
-                        &mut lp_ctx,
+                if !handled && opt.quest_id > 0 && opt.node_id > 0 {
+                    if !quest_engine::triggers::complete_do_interact_from_dynamic_option(
+                        &mut qctx,
                         opt.quest_id,
                         opt.node_id,
                         target_entity_id,
-                    );
-                }
-                handled = true;
-            } else if opt.quest_id > 0 && opt.node_id > 0 {
-                if !quest_engine::triggers::complete_do_interact_from_dynamic_option(
-                    &mut qctx,
-                    opt.quest_id,
-                    opt.node_id,
-                    target_entity_id,
-                    &guid,
-                )
-                .map_err(|e| e.to_string())?
-                {
-                    let _ = quest_engine::events::on_submit_node(
-                        &mut qctx,
-                        opt.quest_id,
-                        i64::from(opt.quest_id),
-                        opt.node_id,
+                        &guid,
                     )
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| e.to_string())?
+                    {
+                        let _ = quest_engine::events::on_submit_node(
+                            &mut qctx,
+                            opt.quest_id,
+                            i64::from(opt.quest_id),
+                            opt.node_id,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
+                    handled = true;
                 }
-                handled = true;
             }
+            DynamicInteractKind::None => {}
         }
-        DynamicInteractKind::None => {}
     }
 
     if !handled {

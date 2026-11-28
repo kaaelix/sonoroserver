@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::io;
 
@@ -15,13 +15,13 @@ use sonoro_proto::enums::{
     BtType, ChildQuestNodeStatus, EAttributeType, FailReason, GameCtxType, NodeStatus,
 };
 use sonoro_proto::pb::{
-    BtRollbackNotify, BtRollbackStartNotify, BtVarUpdateNotify, BehaviorTreeInfoNotify,
-    ChildQuestNodeInfo, ChildQuestNodeProgress, ChildQuestNodeProgressProgressOneof,
-    EnterLevelPlayNotify, EntityAddNotify, EntityRemoveInfo, EntityRemoveNotify, KillProgress,
-    LeaveLevelPlayNotify, LevelPlayFirstNotify, LevelPlayInfo, LevelPlayInfoNotify,
-    LevelPlayStateNotify, NodeInfo, NodeInfoExtraInfoOneof, TimerInfoPb, TreeInfo,
-    UpdateNodeProgressNotify, UpdateNodeStatusNotify, UpdateTimerInfoNotify, VarDefinePb,
-    VarDefinePbValueOneof,
+    BehaviorTreeInfoNotify, BtRollbackInfo, BtRollbackInfoNotify, BtRollbackNotify,
+    BtRollbackStartNotify, BtVarUpdateNotify, ChildQuestNodeInfo, ChildQuestNodeProgress,
+    ChildQuestNodeProgressProgressOneof, EnterLevelPlayNotify, EntityAddNotify, EntityRemoveInfo,
+    EntityRemoveNotify, FailRollbackData, KillProgress, LeaveLevelPlayNotify, LevelPlayFirstNotify,
+    LevelPlayInfo, LevelPlayInfoNotify, LevelPlayStateNotify, NodeInfo, NodeInfoExtraInfoOneof,
+    TimerInfoPb, TreeInfo, UpdateNodeProgressNotify, UpdateNodeStatusNotify, UpdateTimerInfoNotify,
+    VarDefinePb, VarDefinePbValueOneof,
 };
 
 use crate::component::entity::small::{
@@ -59,6 +59,30 @@ const MAX_STEPS_PER_ADVANCE: usize = 64;
 thread_local! {
     static LP_STEP_DEPTH: Cell<u32> = const { Cell::new(0) };
     static LP_RECHECK_PENDING: Cell<bool> = const { Cell::new(false) };
+    static LP_ROLLBACK_ACTIVE: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+}
+
+struct LpRollbackGuard {
+    lp_id: i32,
+}
+impl LpRollbackGuard {
+    fn try_enter(lp_id: i32) -> Option<Self> {
+        LP_ROLLBACK_ACTIVE.with(|list| {
+            let mut v = list.borrow_mut();
+            if v.contains(&lp_id) {
+                return None;
+            }
+            v.push(lp_id);
+            Some(Self { lp_id })
+        })
+    }
+}
+impl Drop for LpRollbackGuard {
+    fn drop(&mut self) {
+        LP_ROLLBACK_ACTIVE.with(|list| {
+            list.borrow_mut().retain(|&id| id != self.lp_id);
+        });
+    }
 }
 
 struct StepDepthGuard;
@@ -180,6 +204,7 @@ impl<'a, S: PushSink + ?Sized> LevelPlayContext<'a, S> {
             progress_comp: self.progress_comp.as_deref(),
             scene: Some(&*self.scene),
             owner_quest_id: lp_id,
+            owner_is_level_play: true,
             target_role_id: 0,
             self_entity_config_id: 0,
         }
@@ -991,14 +1016,19 @@ fn is_lp_child_quest_satisfied_now<S: PushSink + ?Sized>(
         return is_player_within_reach_area(ctx, lp_id, &node.data, cond, pos);
     }
     let qctx = ctx.as_quest_ctx();
-    quest_engine::eval_child_condition_auto(&qctx, lp_id, node)
+    quest_engine::triggers::eval_child_condition_auto_bt(
+        &qctx,
+        BtType::BtTypeLevelPlay,
+        lp_id,
+        node,
+    )
 }
 
-fn push_level_play_behavior_tree_info<S: PushSink + ?Sized>(
-    ctx: &mut LevelPlayContext<'_, S>,
+fn build_level_play_tree_info<S: PushSink + ?Sized>(
+    ctx: &LevelPlayContext<'_, S>,
     lp_id: i32,
     nodes: &[NodeEntry],
-) -> io::Result<()> {
+) -> TreeInfo {
     let lp_opt = ctx.assets.tables.level_play_data.get_data_by_id(&lp_id);
     let mut tree_nodes = std::collections::BTreeMap::new();
     let mut timer_infos = Vec::new();
@@ -1075,18 +1105,27 @@ fn push_level_play_behavior_tree_info<S: PushSink + ?Sized>(
         );
     }
 
+    TreeInfo {
+        TreeOwnerId: lp_id,
+        TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id),
+        BtType: Some(BtType::BtTypeLevelPlay),
+        BlackboardId: lp_id,
+        Nodes: tree_nodes,
+        TimerInfos: timer_infos,
+        ..Default::default()
+    }
+}
+
+fn push_level_play_behavior_tree_info<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+    lp_id: i32,
+    nodes: &[NodeEntry],
+) -> io::Result<()> {
+    let tree_info = build_level_play_tree_info(ctx, lp_id, nodes);
     ctx.sink.push(
         BehaviorTreeInfoNotify::MSG_ID,
         &BehaviorTreeInfoNotify {
-            TreeInfos: vec![TreeInfo {
-                TreeOwnerId: lp_id,
-                TreeIncId: i64::from(lp_id),
-                BtType: Some(BtType::BtTypeLevelPlay),
-                BlackboardId: lp_id,
-                Nodes: tree_nodes,
-                TimerInfos: timer_infos,
-                ..Default::default()
-            }],
+            TreeInfos: vec![tree_info],
         },
     );
     ctx.scene.sent_lp_bt_trees.insert(lp_id);
@@ -1101,7 +1140,7 @@ fn finish_lp_non_child_node<S: PushSink + ?Sized>(
     dirty_pc: &mut bool,
     mut deferred_bt_vars: Option<&mut Vec<DeferredBtVar>>,
 ) {
-    ctx.scene.release_occupations_for_node(lp_id, node.id);
+    ctx.scene.release_occupations_for_node_bt(BtType::BtTypeLevelPlay, lp_id, node.id);
     if node.reward_id > 0 {
         let _ = reward::grant_drop_package(&mut ctx.as_reward_ctx(), node.reward_id, 6003);
     }
@@ -1111,7 +1150,7 @@ fn finish_lp_non_child_node<S: PushSink + ?Sized>(
             UpdateNodeStatusNotify::MSG_ID,
             &UpdateNodeStatusNotify {
                 TreeOwnerId: lp_id,
-                TreeIncId: i64::from(lp_id),
+                TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id),
                 NodeId: node.id,
                 Status: Some(NodeStatus::CompletedSuccess),
             },
@@ -1144,8 +1183,96 @@ fn reset_lp_subtree_finished_nodes<S: PushSink + ?Sized>(
         if n.parent_id != parent_id {
             continue;
         }
+        ctx.scene.lp_timers.cancel(lp_id, n.id);
+        ctx.scene.lp_fail_timers.cancel(lp_id, n.id);
+        ctx.scene
+            .release_occupations_for_node_bt(BtType::BtTypeLevelPlay, lp_id, n.id);
+        ctx.scene
+            .remove_action_node_next_idx(BtType::BtTypeLevelPlay, lp_id, n.id);
+        let mut qctx = ctx.as_quest_ctx();
+        quest_engine::remove_do_interact_options_for_bt_node(
+            &mut qctx,
+            BtType::BtTypeLevelPlay,
+            lp_id,
+            n.id,
+        );
+        set_lp_node_active(ctx, lp_id, n.id, false, dirty_pc);
         clear_lp_node_finished(ctx, lp_id, n.id, dirty_pc);
         reset_lp_subtree_finished_nodes(ctx, lp_id, nodes, n.id, dirty_pc);
+    }
+}
+
+fn is_lp_node_or_subtree_active<S: PushSink + ?Sized>(
+    ctx: &LevelPlayContext<'_, S>,
+    lp_id: i32,
+    nodes: &[NodeEntry],
+    root_id: i32,
+) -> bool {
+    let pc = ctx.progress_comp.as_deref();
+    if is_lp_node_active(pc, lp_id, root_id) || is_level_play_node_marked(pc, lp_id, root_id) {
+        return true;
+    }
+    nodes
+        .iter()
+        .any(|n| n.parent_id == root_id && is_lp_node_or_subtree_active(ctx, lp_id, nodes, n.id))
+}
+
+fn deactivate_other_lp_selector_slots<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+    lp_id: i32,
+    nodes: &[NodeEntry],
+    slots: &[Value],
+    keep_cid: Option<i32>,
+    push_updates: bool,
+    dirty_pc: &mut bool,
+) {
+    let mut to_deactivate = Vec::new();
+    for slot in slots {
+        let Some(cid) = slot
+            .as_object()
+            .and_then(|s| s.get("Node"))
+            .and_then(|n| n.as_object())
+            .and_then(|n| json_int(n.get("Id")))
+        else {
+            continue;
+        };
+        if Some(cid) != keep_cid && is_lp_node_or_subtree_active(ctx, lp_id, nodes, cid) {
+            to_deactivate.push(cid);
+        }
+    }
+    for cid in to_deactivate {
+        deactivate_lp_subtree(ctx, lp_id, nodes, cid, push_updates, dirty_pc);
+        ctx.scene.lp_timers.cancel(lp_id, cid);
+        ctx.scene.lp_fail_timers.cancel(lp_id, cid);
+        ctx.scene
+            .release_occupations_for_node_bt(BtType::BtTypeLevelPlay, lp_id, cid);
+        ctx.scene
+            .remove_action_node_next_idx(BtType::BtTypeLevelPlay, lp_id, cid);
+        let was_active = is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, cid);
+        set_lp_node_active(ctx, lp_id, cid, false, dirty_pc);
+        clear_lp_node_finished(ctx, lp_id, cid, dirty_pc);
+        let mut qctx = ctx.as_quest_ctx();
+        quest_engine::remove_do_interact_options_for_bt_node(
+            &mut qctx,
+            BtType::BtTypeLevelPlay,
+            lp_id,
+            cid,
+        );
+        if push_updates && was_active {
+            ctx.sink.push(
+                UpdateNodeStatusNotify::MSG_ID,
+                &UpdateNodeStatusNotify {
+                    TreeOwnerId: lp_id,
+                    TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(
+                        BtType::BtTypeLevelPlay,
+                        lp_id,
+                    ),
+                    NodeId: cid,
+                    Status: Some(NodeStatus::Destroy),
+                },
+            );
+        }
+        reset_lp_subtree_finished_nodes(ctx, lp_id, nodes, cid, dirty_pc);
     }
 }
 
@@ -1163,7 +1290,8 @@ fn deactivate_lp_subtree<S: PushSink + ?Sized>(
         }
         ctx.scene.lp_timers.cancel(lp_id, n.id);
         ctx.scene.lp_fail_timers.cancel(lp_id, n.id);
-        ctx.scene.release_occupations_for_node(lp_id, n.id);
+        ctx.scene.release_occupations_for_node_bt(BtType::BtTypeLevelPlay, lp_id, n.id);
+        ctx.scene.remove_action_node_next_idx(BtType::BtTypeLevelPlay, lp_id, n.id);
         let was_active = is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, n.id);
         set_lp_node_active(ctx, lp_id, n.id, false, dirty_pc);
         let is_child = n.node_type == "ChildQuest";
@@ -1189,7 +1317,7 @@ fn deactivate_lp_subtree<S: PushSink + ?Sized>(
                     UpdateNodeStatusNotify::MSG_ID,
                     &UpdateNodeStatusNotify {
                         TreeOwnerId: lp_id,
-                        TreeIncId: i64::from(lp_id),
+                        TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id),
                         NodeId: n.id,
                         Status: Some(NodeStatus::Destroy),
                     },
@@ -1300,7 +1428,7 @@ fn activate_lp_node_if_needed<S: PushSink + ?Sized>(
             UpdateNodeStatusNotify::MSG_ID,
             &UpdateNodeStatusNotify {
                 TreeOwnerId: lp_id,
-                TreeIncId: i64::from(lp_id),
+                TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id),
                 NodeId: node_id,
                 Status: Some(NodeStatus::Activate),
             },
@@ -1319,7 +1447,7 @@ fn push_lp_timer_info<S: PushSink + ?Sized>(
         UpdateTimerInfoNotify::MSG_ID,
         &UpdateTimerInfoNotify {
             TreeOwnerId: lp_id,
-            TreeIncId: i64::from(lp_id),
+            TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id),
             TimerInfo: Some(TimerInfoPb {
                 TimerType: timer_type.as_bytes().to_vec(),
                 NodeId: node_id,
@@ -1468,7 +1596,7 @@ fn step_level_play_node<S: PushSink + ?Sized>(
             let needed_sel = if node.count > 0 {
                 node.count
             } else {
-                eligible_children.max(1)
+                eligible_children
             };
             let mut finished_count = 0i32;
             let mut failed_count = 0i32;
@@ -1479,9 +1607,14 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                 if child.parent_id != node.id {
                     continue;
                 }
-                total_children += 1;
+                let is_monitor = child.node_type == "QuestFailed";
+                if !is_monitor {
+                    total_children += 1;
+                }
                 if is_level_play_node_marked(ctx.progress_comp.as_deref(), lp_id, child.id) {
-                    finished_count += 1;
+                    if !is_monitor {
+                        finished_count += 1;
+                    }
                     continue;
                 }
                 let res = step_level_play_node(
@@ -1504,12 +1637,18 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                         break;
                     }
                     LpStepResult::Completed => {
-                        finished_count += 1;
-                        if !is_parallel_all && finished_count >= needed_sel {
-                            break;
+                        if !is_monitor {
+                            finished_count += 1;
+                            if !is_parallel_all && finished_count >= needed_sel {
+                                break;
+                            }
                         }
                     }
-                    LpStepResult::Failed => failed_count += 1,
+                    LpStepResult::Failed => {
+                        if !is_monitor {
+                            failed_count += 1;
+                        }
+                    }
                     LpStepResult::Running => {}
                 }
             }
@@ -1518,6 +1657,8 @@ fn step_level_play_node<S: PushSink + ?Sized>(
             }
             let needed = if is_parallel_all {
                 total_children
+            } else if eligible_children == 0 {
+                0
             } else {
                 needed_sel
             };
@@ -1624,8 +1765,9 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                 let mut lp_fail_timers = std::mem::take(&mut ctx.scene.lp_fail_timers);
                 let res = {
                     let mut qctx = ctx.as_quest_ctx();
-                    quest_engine::eval_quest_failed_condition_pub(
+                    quest_engine::eval_quest_failed_condition_for_bt_pub(
                         &mut qctx,
+                        BtType::BtTypeLevelPlay,
                         lp_id,
                         node,
                         player_pos_opt,
@@ -1665,6 +1807,7 @@ fn step_level_play_node<S: PushSink + ?Sized>(
             Ok(LpStepResult::Running)
         }
         "Action" | "ActionWithResult" => {
+            let is_action_with_result = node.node_type == "ActionWithResult";
             let act_items: Vec<Value> = match &node.data {
                 Value::Object(obj) => match obj.get("Actions") {
                     Some(Value::Array(arr)) => arr.clone(),
@@ -1675,48 +1818,143 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                 },
                 _ => Vec::new(),
             };
-            if push_updates && !act_items.is_empty() {
-                ctx.sink.push(
-                    UpdateNodeStatusNotify::MSG_ID,
-                    &UpdateNodeStatusNotify {
-                        TreeOwnerId: lp_id,
-                        TreeIncId: i64::from(lp_id),
-                        NodeId: node.id,
-                        Status: Some(NodeStatus::Activate),
-                    },
-                );
-                let mut qctx = ctx.as_quest_ctx();
-                let _ = quest_engine::push_bt_level_events_for_type(
-                    &mut qctx,
-                    BtType::BtTypeLevelPlay,
-                    lp_id,
-                    node.id,
-                    GameCtxType::ActionGroupNodeAction,
-                    &act_items,
-                );
-            }
+            let mut action_failed = false;
             if !act_items.is_empty() {
-                if defer_bt_notifies {
-                    newly_actions.push(node.clone());
-                }
-                let is_async_flow = quest_engine::has_async_play_flow_action(&act_items);
-                let items_val = Value::Array(act_items);
-                run_level_play_actions(
-                    ctx,
-                    lp_id,
-                    node.id,
-                    Some(&items_val),
-                    deferred_bt_vars.as_deref_mut(),
-                );
-                if !is_async_flow
-                    && ((ctx.scene.active_flow_inc_id != 0
-                        && ctx.scene.active_flow_quest_id == lp_id
-                        && ctx.scene.active_flow_node_id == node.id)
-                        || ctx.scene.has_pending_flow_for_node(lp_id, node.id))
+                let start_idx = ctx
+                    .scene
+                    .get_action_node_next_idx(BtType::BtTypeLevelPlay, lp_id, node.id)
+                    .unwrap_or(0);
+                if start_idx < act_items.len()
+                    && ctx.scene.has_pending_or_deferred_flow_for_bt_node(
+                        BtType::BtTypeLevelPlay,
+                        lp_id,
+                        node.id,
+                    )
                 {
                     set_lp_node_active(ctx, lp_id, node.id, true, dirty_pc);
                     return Ok(LpStepResult::Running);
                 }
+                if start_idx == 0 {
+                    if push_updates {
+                        ctx.sink.push(
+                            UpdateNodeStatusNotify::MSG_ID,
+                            &UpdateNodeStatusNotify {
+                                TreeOwnerId: lp_id,
+                                TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(
+                                    BtType::BtTypeLevelPlay,
+                                    lp_id,
+                                ),
+                                NodeId: node.id,
+                                Status: Some(NodeStatus::Activate),
+                            },
+                        );
+                        let mut qctx = ctx.as_quest_ctx();
+                        let _ = quest_engine::push_bt_level_events_for_type(
+                            &mut qctx,
+                            BtType::BtTypeLevelPlay,
+                            lp_id,
+                            node.id,
+                            GameCtxType::ActionGroupNodeAction,
+                            &act_items,
+                        );
+                    }
+                    if defer_bt_notifies {
+                        newly_actions.push(node.clone());
+                    }
+                }
+                let mut cursor = start_idx;
+                while cursor < act_items.len() {
+                    let (end_idx, _) = quest_engine::triggers::next_action_slice_end(&act_items, cursor);
+                    let slice = &act_items[cursor..=end_idx];
+                    let items_val = Value::Array(slice.to_vec());
+                    let exec_res = run_level_play_actions_res(
+                        ctx,
+                        lp_id,
+                        node.id,
+                        Some(&items_val),
+                        deferred_bt_vars.as_deref_mut(),
+                    );
+                    if is_action_with_result {
+                        if exec_res.is_err()
+                            || lp_action_node_signaled_failure(ctx, lp_id, node, slice)
+                        {
+                            action_failed = true;
+                            break;
+                        }
+                    } else {
+                        exec_res?;
+                    }
+                    cursor = end_idx + 1;
+                    if ctx.scene.has_pending_or_deferred_flow_for_bt_node(
+                        BtType::BtTypeLevelPlay,
+                        lp_id,
+                        node.id,
+                    ) {
+                        ctx.scene.set_action_node_next_idx(
+                            BtType::BtTypeLevelPlay,
+                            lp_id,
+                            node.id,
+                            cursor,
+                        );
+                        set_lp_node_active(ctx, lp_id, node.id, true, dirty_pc);
+                        return Ok(LpStepResult::Running);
+                    }
+                }
+                if !action_failed
+                    && ctx.scene.has_pending_or_deferred_flow_for_bt_node(
+                        BtType::BtTypeLevelPlay,
+                        lp_id,
+                        node.id,
+                    )
+                {
+                    ctx.scene.set_action_node_next_idx(
+                        BtType::BtTypeLevelPlay,
+                        lp_id,
+                        node.id,
+                        act_items.len(),
+                    );
+                    set_lp_node_active(ctx, lp_id, node.id, true, dirty_pc);
+                    return Ok(LpStepResult::Running);
+                }
+                if !action_failed {
+                    ctx.scene.remove_action_node_next_idx(
+                        BtType::BtTypeLevelPlay,
+                        lp_id,
+                        node.id,
+                    );
+                }
+            } else if is_action_with_result
+                && lp_action_node_signaled_failure(ctx, lp_id, node, &act_items)
+            {
+                action_failed = true;
+            }
+            if action_failed {
+                ctx.scene.release_occupations_for_node_bt(
+                    BtType::BtTypeLevelPlay,
+                    lp_id,
+                    node.id,
+                );
+                ctx.scene.remove_action_node_next_idx(
+                    BtType::BtTypeLevelPlay,
+                    lp_id,
+                    node.id,
+                );
+                set_lp_node_active(ctx, lp_id, node.id, false, dirty_pc);
+                if push_updates {
+                    ctx.sink.push(
+                        UpdateNodeStatusNotify::MSG_ID,
+                        &UpdateNodeStatusNotify {
+                            TreeOwnerId: lp_id,
+                            TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(
+                                BtType::BtTypeLevelPlay,
+                                lp_id,
+                            ),
+                            NodeId: node.id,
+                            Status: Some(NodeStatus::CompletedFailed),
+                        },
+                    );
+                }
+                return Ok(LpStepResult::Failed);
             }
             finish_lp_non_child_node(
                 ctx,
@@ -1736,7 +1974,12 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                 .unwrap_or(false);
             let ok = if let Some(cb) = node.data.get("Condition") {
                 let qctx = ctx.as_quest_ctx();
-                quest_engine::eval_inline_condition(&qctx, lp_id, cb)
+                quest_engine::triggers::eval_inline_condition_bt(
+                    &qctx,
+                    BtType::BtTypeLevelPlay,
+                    lp_id,
+                    cb,
+                )
             } else {
                 true
             };
@@ -1758,6 +2001,7 @@ fn step_level_play_node<S: PushSink + ?Sized>(
             })
         }
         "ConditionSelector" => {
+            let mut active_slot_cid: Option<i32> = None;
             if let Some(Value::Array(slots)) = node.data.get("Slots") {
                 for slot in slots {
                     let Value::Object(sobj) = slot else {
@@ -1765,7 +2009,12 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                     };
                     let pass = if let Some(sc) = sobj.get("Condition") {
                         let qctx = ctx.as_quest_ctx();
-                        quest_engine::eval_inline_condition(&qctx, lp_id, sc)
+                        quest_engine::triggers::eval_inline_condition_bt(
+                            &qctx,
+                            BtType::BtTypeLevelPlay,
+                            lp_id,
+                            sc,
+                        )
                     } else {
                         true
                     };
@@ -1781,6 +2030,15 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                     let Some(cnode) = find_lp_node_by_id(nodes, cid) else {
                         continue;
                     };
+                    deactivate_other_lp_selector_slots(
+                        ctx,
+                        lp_id,
+                        nodes,
+                        slots,
+                        Some(cid),
+                        push_updates,
+                        dirty_pc,
+                    );
                     let res = step_level_play_node(
                         ctx,
                         lp_id,
@@ -1807,30 +2065,67 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                             );
                             return Ok(LpStepResult::Completed);
                         }
-                        LpStepResult::Running | LpStepResult::TreeEnded => return Ok(res),
+                        LpStepResult::Running | LpStepResult::TreeEnded => {
+                            active_slot_cid = Some(cid);
+                            if res == LpStepResult::TreeEnded {
+                                return Ok(res);
+                            }
+                            break;
+                        }
                         LpStepResult::Failed => continue,
                     }
+                }
+                if active_slot_cid.is_none() {
+                    deactivate_other_lp_selector_slots(
+                        ctx,
+                        lp_id,
+                        nodes,
+                        slots,
+                        None,
+                        push_updates,
+                        dirty_pc,
+                    );
                 }
             }
             Ok(LpStepResult::Running)
         }
         "Repeater" => {
             let cd_key = repeater_cooldown_key(lp_id, node.id);
+            let max_repeat = node
+                .data
+                .get("MaxRepeatTimes")
+                .and_then(|v| json_int(Some(v)))
+                .unwrap_or(0);
             while *steps < MAX_STEPS_PER_ADVANCE {
-                if let Some(ec) = node.data.get("ExitCondition") {
+                let exit_ok = node.data.get("ExitCondition").is_some_and(|ec| {
                     let qctx = ctx.as_quest_ctx();
-                    if quest_engine::eval_inline_condition(&qctx, lp_id, ec) {
-                        deactivate_lp_subtree(ctx, lp_id, nodes, node.id, push_updates, dirty_pc);
-                        finish_lp_non_child_node(
-                            ctx,
-                            lp_id,
-                            node,
-                            push_updates,
-                            dirty_pc,
-                            deferred_bt_vars.as_deref_mut(),
-                        );
-                        return Ok(LpStepResult::Completed);
-                    }
+                    quest_engine::triggers::eval_inline_condition_bt(
+                        &qctx,
+                        BtType::BtTypeLevelPlay,
+                        lp_id,
+                        ec,
+                    )
+                }) || (max_repeat > 0
+                    && ctx
+                        .scene
+                        .repeater_counts
+                        .get(&cd_key)
+                        .copied()
+                        .unwrap_or(0)
+                        >= max_repeat);
+                if exit_ok {
+                    ctx.scene.lp_repeater_cooldowns.remove(&cd_key);
+                    ctx.scene.repeater_counts.remove(&cd_key);
+                    deactivate_lp_subtree(ctx, lp_id, nodes, node.id, push_updates, dirty_pc);
+                    finish_lp_non_child_node(
+                        ctx,
+                        lp_id,
+                        node,
+                        push_updates,
+                        dirty_pc,
+                        deferred_bt_vars.as_deref_mut(),
+                    );
+                    return Ok(LpStepResult::Completed);
                 }
                 if let Some(&ready_ms) = ctx.scene.lp_repeater_cooldowns.get(&cd_key)
                     && now_millis() < ready_ms
@@ -1868,6 +2163,8 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                     return Ok(LpStepResult::Running);
                 }
                 if !any_child {
+                    ctx.scene.lp_repeater_cooldowns.remove(&cd_key);
+                    ctx.scene.repeater_counts.remove(&cd_key);
                     finish_lp_non_child_node(
                         ctx,
                         lp_id,
@@ -1881,7 +2178,22 @@ fn step_level_play_node<S: PushSink + ?Sized>(
                 if !child_completed {
                     return Ok(LpStepResult::Running);
                 }
+                let next_cnt = ctx.scene.repeater_counts.get(&cd_key).copied().unwrap_or(0) + 1;
+                ctx.scene.repeater_counts.insert(cd_key, next_cnt);
                 reset_lp_subtree_finished_nodes(ctx, lp_id, nodes, node.id, dirty_pc);
+                if max_repeat > 0 && next_cnt >= max_repeat {
+                    ctx.scene.lp_repeater_cooldowns.remove(&cd_key);
+                    ctx.scene.repeater_counts.remove(&cd_key);
+                    finish_lp_non_child_node(
+                        ctx,
+                        lp_id,
+                        node,
+                        push_updates,
+                        dirty_pc,
+                        deferred_bt_vars.as_deref_mut(),
+                    );
+                    return Ok(LpStepResult::Completed);
+                }
                 let wait_ms = subtree_wait_delay_ms(nodes, node.id);
                 if wait_ms > 0 {
                     ctx.scene
@@ -2033,13 +2345,14 @@ fn seed_unset_lp_score_targets<S: PushSink + ?Sized>(
     let empty_obj = serde_json::Map::new();
     let mut pushed_vars = Vec::new();
     for (vname, tenths) in TARGET_VARS {
-        let scoped = crate::helpers::quest_types::scoped_var_key_with_owner(
+        let scoped = crate::helpers::quest_types::scoped_var_key_with_bt(
             Some(ctx.scene),
+            BtType::BtTypeLevelPlay,
             lp_id,
             &empty_obj,
             vname,
         )
-        .unwrap_or_else(|| format!("Self:{lp_id}:{vname}"));
+        .unwrap_or_else(|| format!("LpSelf:{lp_id}:{vname}"));
         if ctx.quest_comp.info.get_var_int(&scoped) != 0 {
             continue;
         }
@@ -2059,13 +2372,34 @@ fn seed_unset_lp_score_targets<S: PushSink + ?Sized>(
                 BtVarUpdateNotify::MSG_ID,
                 &BtVarUpdateNotify {
                     TreeOwnerId: lp_id,
-                    TreeIncId: i64::from(lp_id),
+                    TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id),
                     VarName: var_name,
                     VarDefine: Some(var_define),
                 },
             );
         }
     }
+}
+
+fn can_get_level_play_reward<S: PushSink + ?Sized>(
+    ctx: &LevelPlayContext<'_, S>,
+    lp_id: i32,
+) -> bool {
+    let Some(lp) = ctx.assets.tables.level_play_data.get_data_by_id(&lp_id) else {
+        return false;
+    };
+    let Some(rc) = &lp.Data.LevelPlayRewardConfig else {
+        return false;
+    };
+    if rc.Type == "None" || (rc.RewardId <= 0 && rc.FirstRewardId <= 0 && rc.RewardEntityId <= 0)
+    {
+        return false;
+    }
+    let claimed = ctx.progress_comp.as_deref().is_some_and(|pc| {
+        pc.info.get_key_int(&format!("lp_reward_claimed:{lp_id}")) > 0
+            || pc.info.has_claim(&format!("lp_reward_claimed:{lp_id}"))
+    }) || (rc.RewardEntityId > 0 && ctx.quest_comp.info.has_opened_chest(rc.RewardEntityId));
+    !claimed
 }
 
 fn step_level_play_tree<S: PushSink + ?Sized>(
@@ -2093,7 +2427,7 @@ fn step_level_play_tree<S: PushSink + ?Sized>(
             &EnterLevelPlayNotify {
                 Id: lp_id,
                 State: 2,
-                CanGetReward: true,
+                CanGetReward: can_get_level_play_reward(ctx, lp_id),
             },
         );
         let _ = push_level_play_behavior_tree_info(ctx, lp_id, nodes);
@@ -2179,7 +2513,7 @@ fn enter_and_start_level_play<S: PushSink + ?Sized>(
     ctx.sink.push(
         EnterLevelPlayNotify::MSG_ID,
         &EnterLevelPlayNotify {
-            CanGetReward: true,
+            CanGetReward: can_get_level_play_reward(ctx, lp_id),
             State: 2,
             Id: lp_id,
         },
@@ -2232,7 +2566,7 @@ fn enter_and_start_level_play<S: PushSink + ?Sized>(
             ctx.sink.push(
                 BtVarUpdateNotify::MSG_ID,
                 &BtVarUpdateNotify {
-                    TreeIncId: i64::from(dv.owner_id),
+                    TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(dv.bt_type, dv.owner_id),
                     VarName: dv.var_name.into_bytes(),
                     VarDefine: Some(dv.var_define),
                     TreeOwnerId: dv.owner_id,
@@ -2294,6 +2628,7 @@ fn enter_and_start_level_play<S: PushSink + ?Sized>(
             step_level_play_tree(ctx, lp_id, &nodes, true, player_pos_opt)?;
         }
     } else {
+        let _ = ensure_active_timers_scheduled(ctx);
         let _ = push_level_play_behavior_tree_info(ctx, lp_id, &nodes);
         for node in nodes.iter() {
             if is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id) {
@@ -2313,6 +2648,57 @@ fn enter_and_start_level_play<S: PushSink + ?Sized>(
     Ok(())
 }
 
+fn lp_action_node_signaled_failure<S: PushSink + ?Sized>(
+    ctx: &LevelPlayContext<'_, S>,
+    lp_id: i32,
+    node: &NodeEntry,
+    items: &[Value],
+) -> bool {
+    if node.data.get("Result").and_then(Value::as_bool) == Some(false)
+        || node
+            .data
+            .get("Action")
+            .and_then(|a| a.get("Result"))
+            .and_then(Value::as_bool)
+            == Some(false)
+        || items.iter().any(|item| {
+            item.get("Result").and_then(Value::as_bool) == Some(false)
+                || item.get("Success").and_then(Value::as_bool) == Some(false)
+        })
+    {
+        return true;
+    }
+    ctx.progress_comp.as_deref().is_some_and(|pc| {
+        pc.info
+            .get_key_int(&format!("action_result:{lp_id}:{}", node.id))
+            < 0
+            || pc
+                .info
+                .get_key_int(&format!("lp_action_result:{lp_id}:{}", node.id))
+                < 0
+    })
+}
+
+fn run_level_play_actions_res<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+    owner_id: i32,
+    node_id: i32,
+    actions_opt: Option<&Value>,
+    deferred_bt_vars: Option<&mut Vec<DeferredBtVar>>,
+) -> io::Result<()> {
+    let Some(Value::Array(items)) = actions_opt else {
+        return Ok(());
+    };
+    if items.is_empty() {
+        return Ok(());
+    }
+    let mut cbs = quest_engine::action_callbacks::<S>();
+    cbs.bt_type = BtType::BtTypeLevelPlay;
+    cbs.deferred_bt_vars = deferred_bt_vars;
+    let mut qctx = ctx.as_quest_ctx();
+    quest_actions::execute_action_list(&mut qctx, &mut cbs, owner_id, node_id, items)
+}
+
 fn run_level_play_actions<S: PushSink + ?Sized>(
     ctx: &mut LevelPlayContext<'_, S>,
     owner_id: i32,
@@ -2320,17 +2706,7 @@ fn run_level_play_actions<S: PushSink + ?Sized>(
     actions_opt: Option<&Value>,
     deferred_bt_vars: Option<&mut Vec<DeferredBtVar>>,
 ) {
-    let Some(Value::Array(items)) = actions_opt else {
-        return;
-    };
-    if items.is_empty() {
-        return;
-    }
-    let mut cbs = quest_engine::action_callbacks::<S>();
-    cbs.bt_type = BtType::BtTypeLevelPlay;
-    cbs.deferred_bt_vars = deferred_bt_vars;
-    let mut qctx = ctx.as_quest_ctx();
-    let _ = quest_actions::execute_action_list(&mut qctx, &mut cbs, owner_id, node_id, items);
+    let _ = run_level_play_actions_res(ctx, owner_id, node_id, actions_opt, deferred_bt_vars);
 }
 
 pub fn complete_level_play<S: PushSink + ?Sized>(
@@ -2343,9 +2719,17 @@ pub fn complete_level_play<S: PushSink + ?Sized>(
     ctx.scene.lp_timers.cancel_quest(level_play_id);
     ctx.scene.fail_timers.cancel_quest(level_play_id);
     ctx.scene.lp_fail_timers.cancel_quest(level_play_id);
+    ctx.scene.release_occupations_for_tree_bt(
+        BtType::BtTypeLevelPlay,
+        level_play_id,
+        crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, level_play_id),
+    );
+    ctx.scene.clear_save_nodes_for_bt(BtType::BtTypeLevelPlay, level_play_id);
+    ctx.scene.clear_action_node_progress_for_bt(BtType::BtTypeLevelPlay, level_play_id);
+    ctx.scene.clear_deferred_actions_for_bt(BtType::BtTypeLevelPlay, level_play_id);
+    ctx.scene.clear_lp_killed_entities(level_play_id);
     ctx.scene
-        .release_occupations_for_tree(level_play_id, i64::from(level_play_id));
-    ctx.scene.clear_save_nodes_for_owner(level_play_id);
+        .clear_repeater_state_for_bt(BtType::BtTypeLevelPlay, level_play_id);
     if ctx.quest_comp.info.completed_level_plays.contains(&level_play_id) {
         return Ok(());
     }
@@ -2377,7 +2761,10 @@ pub fn complete_level_play<S: PushSink + ?Sized>(
                     UpdateNodeStatusNotify::MSG_ID,
                     &UpdateNodeStatusNotify {
                         TreeOwnerId: level_play_id,
-                        TreeIncId: i64::from(level_play_id),
+                        TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(
+                            BtType::BtTypeLevelPlay,
+                            level_play_id,
+                        ),
                         NodeId: node.id,
                         Status: Some(NodeStatus::CompletedSuccess),
                     },
@@ -2519,9 +2906,23 @@ fn check_level_play_kill_progress<S: PushSink + ?Sized>(
         if !matches_scene_instance(ctx.assets, lp, ctx.scene.instance_id) {
             continue;
         }
+        let is_entered = ctx
+            .quest_comp
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&lp_id);
+        if !is_entered && !can_enter_level_play(ctx, lp, None) {
+            continue;
+        }
         let Ok(nodes) = ctx.assets.level_play_nodes.get_owner_nodes(lp_id) else {
             continue;
         };
+
+        let booted = is_lp_bt_booted(ctx.progress_comp.as_deref(), lp_id);
+        let has_active_node = nodes
+            .iter()
+            .any(|n| is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, n.id));
 
         let mut all_targets_cleared = true;
         let mut has_matching_kill_node = false;
@@ -2529,6 +2930,14 @@ fn check_level_play_kill_progress<S: PushSink + ?Sized>(
 
         for node in nodes.iter() {
             if node.node_type != "ChildQuest" {
+                continue;
+            }
+            if is_level_play_node_marked(ctx.progress_comp.as_deref(), lp_id, node.id) {
+                continue;
+            }
+            if (booted || has_active_node)
+                && !is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id)
+            {
                 continue;
             }
             let Some(Value::Object(cond)) = node.data.get("Condition") else {
@@ -2626,7 +3035,7 @@ fn check_level_play_kill_progress<S: PushSink + ?Sized>(
                         UpdateNodeProgressNotify::MSG_ID,
                         &UpdateNodeProgressNotify {
                             TreeOwnerId: lp_id,
-                            TreeIncId: i64::from(lp_id),
+                            TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id),
                             NodeId: node.id,
                             Progress: Some(progress),
                         },
@@ -3109,18 +3518,12 @@ pub fn on_entity_interact_fallback<S: PushSink + ?Sized>(
             }
         }
         if let Some(mnode) = matched_node {
-            if is_lp_bt_booted(ctx.progress_comp.as_deref(), lp_id) || has_tree_active {
-                let mut dirty_pc = false;
-                complete_lp_child_quest(ctx, lp_id, &mnode, true, &mut dirty_pc, None)?;
-                if dirty_pc && let Some(pc) = ctx.progress_comp.as_deref_mut() {
-                    pc.save(ctx.fs)?;
-                }
-                step_level_play_tree(ctx, lp_id, &nodes, true, None)?;
+            let target_eid = if net_id != 0 && ctx.scene.entity(net_id).is_some() {
+                net_id
             } else {
-                run_level_play_actions(ctx, lp_id, mnode.id, mnode.data.get("FinishActions"), None);
-                complete_level_play(ctx, lp_id)?;
-            }
-            return Ok(true);
+                i64::from(cfg_id)
+            };
+            return on_dynamic_interact(ctx, lp_id, mnode.id, target_eid);
         }
     }
 
@@ -3398,8 +3801,17 @@ pub fn leave_off_map_level_plays<S: PushSink + ?Sized>(
             scene.sent_lp_bt_trees.remove(&lp_id);
             scene.lp_timers.cancel_quest(lp_id);
             scene.lp_fail_timers.cancel_quest(lp_id);
-            scene.release_occupations_for_tree(lp_id, i64::from(lp_id));
-            scene.remove_bt_timers_for_owner(lp_id);
+            scene.release_occupations_for_tree_bt(
+                BtType::BtTypeLevelPlay,
+                lp_id,
+                crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id),
+            );
+            scene.remove_bt_timers_for_bt(BtType::BtTypeLevelPlay, lp_id);
+            scene.clear_save_nodes_for_bt(BtType::BtTypeLevelPlay, lp_id);
+            scene.clear_action_node_progress_for_bt(BtType::BtTypeLevelPlay, lp_id);
+            scene.clear_deferred_actions_for_bt(BtType::BtTypeLevelPlay, lp_id);
+            scene.clear_lp_killed_entities(lp_id);
+            scene.clear_repeater_state_for_bt(BtType::BtTypeLevelPlay, lp_id);
         }
         sink.push(LeaveLevelPlayNotify::MSG_ID, &LeaveLevelPlayNotify { Id: lp_id });
         if remove_int_value(&mut quest_comp.info.progress.entered_level_plays, lp_id) {
@@ -3469,7 +3881,7 @@ pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut LevelPlayContext<'_, S>) ->
             ctx.sink.push(
                 EnterLevelPlayNotify::MSG_ID,
                 &EnterLevelPlayNotify {
-                    CanGetReward: true,
+                    CanGetReward: can_get_level_play_reward(ctx, lp_id),
                     State: 2,
                     Id: lp_id,
                 },
@@ -3550,9 +3962,12 @@ pub fn on_player_move<S: PushSink + ?Sized>(
                 ctx.scene.sent_lp_bt_trees.remove(&lp_id);
                 ctx.scene.lp_timers.cancel_quest(lp_id);
                 ctx.scene.lp_fail_timers.cancel_quest(lp_id);
-                ctx.scene
-                    .release_occupations_for_tree(lp_id, i64::from(lp_id));
-                ctx.scene.remove_bt_timers_for_owner(lp_id);
+                ctx.scene.release_occupations_for_tree_bt(
+                    BtType::BtTypeLevelPlay,
+                    lp_id,
+                    crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id),
+                );
+                ctx.scene.remove_bt_timers_for_bt(BtType::BtTypeLevelPlay, lp_id);
                 ctx.sink
                     .push(LeaveLevelPlayNotify::MSG_ID, &LeaveLevelPlayNotify { Id: lp_id });
                 dirty_entered = true;
@@ -3780,8 +4195,9 @@ pub fn on_player_move<S: PushSink + ?Sized>(
                     let mut lp_fail_timers = std::mem::take(&mut ctx.scene.lp_fail_timers);
                     let res = {
                         let mut qctx = ctx.as_quest_ctx();
-                        quest_engine::eval_quest_failed_condition_pub(
+                        quest_engine::eval_quest_failed_condition_for_bt_pub(
                             &mut qctx,
+                            BtType::BtTypeLevelPlay,
                             lp_id,
                             node,
                             Some(player_pos),
@@ -3987,10 +4403,18 @@ pub fn on_level_play_enabled<S: PushSink + ?Sized>(
         ctx.scene.lp_timers.cancel_quest(level_play_id);
         ctx.scene.fail_timers.cancel_quest(level_play_id);
         ctx.scene.lp_fail_timers.cancel_quest(level_play_id);
-        ctx.scene.remove_bt_timers_for_owner(level_play_id);
+        ctx.scene.remove_bt_timers_for_bt(BtType::BtTypeLevelPlay, level_play_id);
+        ctx.scene.release_occupations_for_tree_bt(
+            BtType::BtTypeLevelPlay,
+            level_play_id,
+            crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, level_play_id),
+        );
+        ctx.scene.clear_save_nodes_for_bt(BtType::BtTypeLevelPlay, level_play_id);
+        ctx.scene.clear_action_node_progress_for_bt(BtType::BtTypeLevelPlay, level_play_id);
+        ctx.scene.clear_deferred_actions_for_bt(BtType::BtTypeLevelPlay, level_play_id);
+        ctx.scene.clear_lp_killed_entities(level_play_id);
         ctx.scene
-            .release_occupations_for_tree(level_play_id, i64::from(level_play_id));
-        ctx.scene.clear_save_nodes_for_owner(level_play_id);
+            .clear_repeater_state_for_bt(BtType::BtTypeLevelPlay, level_play_id);
 
         let nodes = ctx
             .assets
@@ -4113,18 +4537,28 @@ pub fn on_dynamic_interact<S: PushSink + ?Sized>(
         }
         if let Some(Value::Array(opts)) = cond.get("AddOptions")
             && opts.len() > 1
-            && let Some(pc) = ctx.progress_comp.as_deref()
         {
-            for o in opts {
-                if let Value::Object(obj) = o
-                    && let Some(eid) = json_int(obj.get("EntityId"))
-                    && !pc
-                        .info
-                        .has_claim(&format!("lp_interact:{lp_id}:{node_id}:{eid}"))
-                {
-                    all_done = false;
-                    break;
+            if let Some(pc) = ctx.progress_comp.as_deref() {
+                let mut any_checked = false;
+                for o in opts {
+                    if let Value::Object(obj) = o
+                        && let Some(eid) = json_int(obj.get("EntityId")).filter(|&e| e > 0)
+                    {
+                        any_checked = true;
+                        if !pc
+                            .info
+                            .has_claim(&format!("lp_interact:{lp_id}:{node_id}:{eid}"))
+                        {
+                            all_done = false;
+                            break;
+                        }
+                    }
                 }
+                if !any_checked && cfg_id == 0 {
+                    all_done = false;
+                }
+            } else {
+                all_done = false;
             }
         }
         if !all_done {
@@ -4387,26 +4821,51 @@ pub fn on_bt_rollback_with_select<S: PushSink + ?Sized>(
     reason: FailReason,
     select: i32,
 ) -> io::Result<()> {
+    let Some(_rb_guard) = LpRollbackGuard::try_enter(lp_id) else {
+        return Ok(());
+    };
     if lp_id <= 0 || ctx.quest_comp.info.completed_level_plays.contains(&lp_id) {
         return Ok(());
     }
     ctx.scene.lp_timers.cancel_quest(lp_id);
     ctx.scene.lp_fail_timers.cancel_quest(lp_id);
+    ctx.scene.release_occupations_for_tree_bt(
+        BtType::BtTypeLevelPlay,
+        lp_id,
+        crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id),
+    );
+    ctx.scene.clear_save_nodes_for_bt(BtType::BtTypeLevelPlay, lp_id);
+    ctx.scene.clear_action_node_progress_for_bt(BtType::BtTypeLevelPlay, lp_id);
+    ctx.scene.clear_deferred_actions_for_bt(BtType::BtTypeLevelPlay, lp_id);
+    ctx.scene.clear_lp_killed_entities(lp_id);
     ctx.scene
-        .release_occupations_for_tree(lp_id, i64::from(lp_id));
+        .clear_repeater_state_for_bt(BtType::BtTypeLevelPlay, lp_id);
 
     let nodes = ctx
         .assets
         .level_play_nodes
         .get_owner_nodes(lp_id)
         .unwrap_or_default();
+    let seq_of = |nid: i32| -> Option<usize> { nodes.iter().position(|n| n.id == nid) };
+    let fail_seq = if fail_node_id > 0 {
+        seq_of(fail_node_id)
+    } else {
+        None
+    };
     let mut latest_ckpt_id = 0i32;
-    for node in nodes.iter() {
-        if !is_level_play_node_marked(ctx.progress_comp.as_deref(), lp_id, node.id) {
+    let mut latest_ckpt_seq: Option<usize> = None;
+    for (nseq, node) in nodes.iter().enumerate() {
+        if !is_level_play_node_marked(ctx.progress_comp.as_deref(), lp_id, node.id)
+            && !is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id)
+        {
             continue;
         }
-        if node.data.get("SaveConfig").is_some_and(|v| !v.is_null()) && node.id > latest_ckpt_id {
+        if node.data.get("SaveConfig").is_some_and(|v| !v.is_null())
+            && fail_seq.is_none_or(|fs| nseq <= fs)
+            && latest_ckpt_seq.is_none_or(|bs| nseq > bs)
+        {
             latest_ckpt_id = node.id;
+            latest_ckpt_seq = Some(nseq);
         }
     }
     if (latest_ckpt_id == 0 || reason == FailReason::GiveUpFail) && reason != FailReason::DefaultFail {
@@ -4417,7 +4876,7 @@ pub fn on_bt_rollback_with_select<S: PushSink + ?Sized>(
                 &BtRollbackNotify {
                     BtRollbackInfo: None,
                     FailReason: Some(reason),
-                    TreeIncId: i64::from(lp_id),
+                    TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id),
                     TreeOwnerId: lp_id,
                     FailNodeId: fail_node_id,
                 },
@@ -4430,10 +4889,14 @@ pub fn on_bt_rollback_with_select<S: PushSink + ?Sized>(
     let mut dirty_pc = false;
     let mut reset_nodes = Vec::new();
     let mut preserved_awake_ids = HashSet::new();
-    for node in nodes.iter() {
+    for (nseq, node) in nodes.iter().enumerate() {
         let was_active = is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id);
-        let in_reset_subtree = is_lp_descendant_or_self(&nodes, node.id, latest_ckpt_id)
-            || node.id >= latest_ckpt_id;
+        let in_reset_subtree = match (latest_ckpt_id, latest_ckpt_seq) {
+            (cid, Some(cseq)) if cid > 0 => {
+                is_lp_descendant_or_self(&nodes, node.id, cid) || nseq >= cseq
+            }
+            _ => true,
+        };
         if was_active {
             let mut qctx = ctx.as_quest_ctx();
             quest_engine::remove_do_interact_options_for_bt_node(
@@ -4477,11 +4940,12 @@ pub fn on_bt_rollback_with_select<S: PushSink + ?Sized>(
         pc.save(ctx.fs)?;
     }
 
+    let tree_inc_id = crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id);
     ctx.sink.push(
         BtRollbackStartNotify::MSG_ID,
         &BtRollbackStartNotify {
             TreeOwnerId: lp_id,
-            TreeIncId: i64::from(lp_id),
+            TreeIncId: tree_inc_id,
             IsRollbackSubLevel: false,
             IsRollbackPos: select == 1,
         },
@@ -4489,11 +4953,26 @@ pub fn on_bt_rollback_with_select<S: PushSink + ?Sized>(
     ctx.sink.push(
         BtRollbackNotify::MSG_ID,
         &BtRollbackNotify {
-            BtRollbackInfo: None,
+            BtRollbackInfo: Some(BtRollbackInfo {
+                FailRollbackData: Some(FailRollbackData {
+                    FailNodeId: fail_node_id,
+                    FailReason: Some(reason),
+                }),
+                ForceClosedRollbackData: None,
+            }),
             FailReason: Some(reason),
-            TreeIncId: i64::from(lp_id),
+            TreeIncId: tree_inc_id,
             TreeOwnerId: lp_id,
             FailNodeId: fail_node_id,
+        },
+    );
+    let rollback_tree_info = build_level_play_tree_info(ctx, lp_id, &nodes);
+    ctx.sink.push(
+        BtRollbackInfoNotify::MSG_ID,
+        &BtRollbackInfoNotify {
+            TreeInfo: Some(rollback_tree_info),
+            TreeOwnerId: lp_id,
+            TreeIncId: tree_inc_id,
         },
     );
 
@@ -4519,9 +4998,60 @@ pub fn on_flow_end<S: PushSink + ?Sized>(
     };
     let mut dirty_pc = false;
     if node.node_type == "ChildQuest" {
+        let owner_eid = ctx.scene.active_flow_owner_entity_id;
+        if let Some(cond) = quest_engine::get_child_condition_pub(&node.data)
+            && json_str(cond.get("Type")) == Some("DoInteract")
+        {
+            let _ = on_dynamic_interact(ctx, lp_id, node_id, owner_eid)?;
+            return Ok(());
+        }
         complete_lp_child_quest(ctx, lp_id, &node, true, &mut dirty_pc, None)?;
     } else if node.node_type == "Action" || node.node_type == "ActionWithResult" {
-        finish_lp_non_child_node(ctx, lp_id, &node, true, &mut dirty_pc, None);
+        let mut single_buf = [Value::Null];
+        let act_items = quest_engine::triggers::extract_node_action_items(&node.data, &mut single_buf);
+        let total_actions = act_items.len();
+        let next_idx = ctx
+            .scene
+            .get_action_node_next_idx(BtType::BtTypeLevelPlay, lp_id, node_id)
+            .unwrap_or(total_actions);
+        if ctx.scene.has_pending_or_deferred_flow_for_bt_node(
+            BtType::BtTypeLevelPlay,
+            lp_id,
+            node_id,
+        ) {
+            return Ok(());
+        }
+        if next_idx >= total_actions {
+            ctx.scene
+                .remove_action_node_next_idx(BtType::BtTypeLevelPlay, lp_id, node_id);
+            if node.node_type == "ActionWithResult"
+                && lp_action_node_signaled_failure(ctx, lp_id, &node, act_items)
+            {
+                ctx.scene.release_occupations_for_node_bt(
+                    BtType::BtTypeLevelPlay,
+                    lp_id,
+                    node_id,
+                );
+                set_lp_node_active(ctx, lp_id, node_id, false, &mut dirty_pc);
+                if dirty_pc && let Some(pc) = ctx.progress_comp.as_deref_mut() {
+                    pc.save(ctx.fs)?;
+                }
+                ctx.sink.push(
+                    UpdateNodeStatusNotify::MSG_ID,
+                    &UpdateNodeStatusNotify {
+                        TreeOwnerId: lp_id,
+                        TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(
+                            BtType::BtTypeLevelPlay,
+                            lp_id,
+                        ),
+                        NodeId: node_id,
+                        Status: Some(NodeStatus::CompletedFailed),
+                    },
+                );
+                return Ok(());
+            }
+            finish_lp_non_child_node(ctx, lp_id, &node, true, &mut dirty_pc, None);
+        }
     } else {
         return Ok(());
     }
@@ -4798,10 +5328,19 @@ fn find_active_level_play_id<S: PushSink + ?Sized>(
     owner_id: i32,
     tree_inc_id: i64,
 ) -> Option<i32> {
-    let candidate = if owner_id > 0 {
+    let (is_lp_inc, inc_owner) = crate::helpers::quest_types::decode_tree_inc_id(tree_inc_id);
+    let candidate = if is_lp_inc && inc_owner > 0 {
+        inc_owner
+    } else if owner_id > 0 {
+        if tree_inc_id > 0 && ctx.quest_comp.info.has_active_quest(owner_id) {
+            return None;
+        }
         owner_id
-    } else if tree_inc_id > 0 {
-        i32::try_from(tree_inc_id).ok()?
+    } else if inc_owner > 0 {
+        if ctx.quest_comp.info.has_active_quest(inc_owner) {
+            return None;
+        }
+        inc_owner
     } else {
         return None;
     };
@@ -4825,6 +5364,141 @@ pub fn on_submit_level_play_node<S: PushSink + ?Sized>(
     tree_inc_id: i64,
     node_id: i32,
 ) -> io::Result<bool> {
+    submit_level_play_node_inner(ctx, owner_id, tree_inc_id, node_id, false)
+}
+
+/// Completes a LevelPlay `ChildQuest` node for a trusted server `FinishCondition`
+/// action, bypassing client-submit-only condition filters (such as `DoInteract` / `Kill`).
+pub fn on_server_finish_level_play_condition<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+    lp_id: i32,
+    node_id: i32,
+) -> io::Result<bool> {
+    let inc_id = crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lp_id);
+    submit_level_play_node_inner(ctx, lp_id, inc_id, node_id, true)
+}
+
+fn lookup_lp_actor_var<S: PushSink + ?Sized>(
+    ctx: &LevelPlayContext<'_, S>,
+    lp_id: i32,
+    vname: &str,
+) -> Option<i64> {
+    let lp_self_key = format!("LpSelf:{lp_id}:{vname}");
+    let actor_key = format!("actor_var:{lp_id}:{vname}");
+    let self_key = format!("Self:{lp_id}:{vname}");
+
+    if let Some(pc) = ctx.progress_comp.as_deref() {
+        for key in [&actor_key, &lp_self_key] {
+            if let Some(kv) = pc.info.dynamic.ints.iter().find(|e| e.key == *key) {
+                return Some(kv.val);
+            }
+        }
+    }
+    for key in [&lp_self_key, &actor_key, &self_key] {
+        if ctx.quest_comp.info.has_var(key) {
+            let v = if ctx.quest_comp.info.get_var_bool(key) {
+                1
+            } else {
+                i64::from(ctx.quest_comp.info.get_var_int(key))
+            };
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn eval_lp_actor_var_entry<S: PushSink + ?Sized>(
+    ctx: &LevelPlayContext<'_, S>,
+    lp_id: i32,
+    vname: &str,
+    cmp_op: &str,
+    expected_val: Option<&Value>,
+    require_present: bool,
+) -> bool {
+    let cur_opt = lookup_lp_actor_var(ctx, lp_id, vname);
+    if require_present && cur_opt.is_none() {
+        return false;
+    }
+    let cur = cur_opt.unwrap_or(0);
+    let expected = match expected_val {
+        Some(Value::Bool(b)) => i64::from(*b),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .unwrap_or_else(|| n.as_f64().map_or(0, |f| f.round() as i64)),
+        Some(Value::String(s)) => s.parse::<i64>().unwrap_or(0),
+        _ => 0,
+    };
+    match cmp_op {
+        "Gt" | "Great" | ">" => cur > expected,
+        "Ge" | "GtEq" | "GreatEq" | ">=" => cur >= expected,
+        "Lt" | "Less" | "<" => cur < expected,
+        "Le" | "LtEq" | "LessEq" | "<=" => cur <= expected,
+        "Ne" | "NotEq" | "!=" => cur != expected,
+        _ => cur == expected,
+    }
+}
+
+fn eval_lp_compare_actor_var<S: PushSink + ?Sized>(
+    ctx: &LevelPlayContext<'_, S>,
+    lp_id: i32,
+    cond: &Map<String, Value>,
+    require_present: bool,
+) -> bool {
+    if let Some(Value::Array(items)) = cond.get("Conditions")
+        && !items.is_empty()
+    {
+        let mut results = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(obj) = item.as_object() else {
+                results.push(false);
+                continue;
+            };
+            let Some(vname) = json_str(obj.get("Var1")).or_else(|| json_str(obj.get("VarName")))
+            else {
+                results.push(false);
+                continue;
+            };
+            let cmp_op = json_str(obj.get("Compare")).unwrap_or("Eq");
+            let expected_val = obj
+                .get("Var2")
+                .and_then(Value::as_object)
+                .and_then(|v2| v2.get("Value"))
+                .or_else(|| obj.get("Value"));
+            results.push(eval_lp_actor_var_entry(
+                ctx,
+                lp_id,
+                vname,
+                cmp_op,
+                expected_val,
+                require_present,
+            ));
+        }
+        let need = json_int(cond.get("Count")).unwrap_or(0);
+        return if need > 0 {
+            results.iter().filter(|&&r| r).count() >= need as usize
+        } else {
+            results.into_iter().all(|r| r)
+        };
+    }
+    if let Some(vname) = json_str(cond.get("VarName")).or_else(|| json_str(cond.get("Var1"))) {
+        let cmp_op = json_str(cond.get("Compare")).unwrap_or("Eq");
+        let expected_val = cond.get("Value").or_else(|| {
+            cond.get("Var2")
+                .and_then(Value::as_object)
+                .and_then(|v2| v2.get("Value"))
+        });
+        return eval_lp_actor_var_entry(ctx, lp_id, vname, cmp_op, expected_val, require_present);
+    }
+    !require_present
+}
+
+fn submit_level_play_node_inner<S: PushSink + ?Sized>(
+    ctx: &mut LevelPlayContext<'_, S>,
+    owner_id: i32,
+    tree_inc_id: i64,
+    node_id: i32,
+    bypass_client_guard: bool,
+) -> io::Result<bool> {
     let Some(lp_id) = find_active_level_play_id(ctx, owner_id, tree_inc_id) else {
         return Ok(false);
     };
@@ -4839,31 +5513,22 @@ pub fn on_submit_level_play_node<S: PushSink + ?Sized>(
     if node.node_type != "ChildQuest" {
         return Ok(false);
     }
+    if !bypass_client_guard
+        && is_lp_bt_booted(ctx.progress_comp.as_deref(), lp_id)
+        && (is_level_play_node_marked(ctx.progress_comp.as_deref(), lp_id, node_id)
+            || !is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node_id))
+    {
+        return Ok(false);
+    }
     let Some(cond) = quest_engine::get_child_condition_pub(&node.data) else {
         return Ok(false);
     };
     let ctype = json_str(cond.get("Type")).unwrap_or("");
-    if !allows_level_play_client_submit(ctype) {
+    if !bypass_client_guard && !allows_level_play_client_submit(ctype) {
         return Ok(false);
     }
-    if ctype == "CompareActorVar"
-        && let Some(pc) = ctx.progress_comp.as_deref()
-        && let Some(vname) = json_str(cond.get("VarName"))
-    {
-        let expected = json_int_val(cond.get("Value"));
-        let cmp_op = json_str(cond.get("Compare")).unwrap_or("Eq");
-        let cur = pc.info.get_key_int(&format!("actor_var:{lp_id}:{vname}"));
-        let ok = match cmp_op {
-            "Gt" | ">" => cur > expected,
-            "Ge" | ">=" => cur >= expected,
-            "Lt" | "<" => cur < expected,
-            "Le" | "<=" => cur <= expected,
-            "Ne" | "!=" => cur != expected,
-            _ => cur == expected,
-        };
-        if !ok {
-            return Ok(true);
-        }
+    if ctype == "CompareActorVar" && !eval_lp_compare_actor_var(ctx, lp_id, cond, false) {
+        return Ok(false);
     }
 
     finish_level_play_node_and_maybe_complete(ctx, lp_id, node_id, ctype)
@@ -4951,14 +5616,60 @@ pub fn on_condition_event<S: PushSink + ?Sized>(
     let cond_type = kind.condition_type();
     if kind == LevelPlayEventKind::CompareActorVar {
         let entered = ctx.quest_comp.info.progress.entered_level_plays.clone();
+        for &id in &entered {
+            ctx.quest_comp
+                .info
+                .set_var_int(&format!("LpSelf:{id}:{target_id}"), value);
+            ctx.quest_comp
+                .info
+                .set_var_int(&format!("actor_var:{id}:{target_id}"), value);
+        }
         if let Some(pc) = ctx.progress_comp.as_deref_mut() {
-            for id in &entered {
+            for &id in &entered {
                 pc.info
                     .set_key_int(&format!("actor_var:{id}:{target_id}"), i64::from(value));
+                pc.info
+                    .set_key_int(&format!("LpSelf:{id}:{target_id}"), i64::from(value));
             }
             pc.save(ctx.fs)?;
         }
-        return Ok(());
+        let mut finish_targets = Vec::new();
+        for lp_id in &entered {
+            if ctx.quest_comp.info.completed_level_plays.contains(lp_id) {
+                continue;
+            }
+            let Ok(nodes) = ctx.assets.level_play_nodes.get_owner_nodes(*lp_id) else {
+                continue;
+            };
+            let booted = is_lp_bt_booted(ctx.progress_comp.as_deref(), *lp_id);
+            for node in nodes.iter() {
+                if node.node_type != "ChildQuest"
+                    || is_level_play_node_marked(ctx.progress_comp.as_deref(), *lp_id, node.id)
+                {
+                    continue;
+                }
+                if booted && !is_lp_node_active(ctx.progress_comp.as_deref(), *lp_id, node.id) {
+                    continue;
+                }
+                let Some(cond) = quest_engine::get_child_condition_pub(&node.data) else {
+                    continue;
+                };
+                if json_str(cond.get("Type")) == Some("CompareActorVar")
+                    && eval_lp_compare_actor_var(ctx, *lp_id, cond, true)
+                {
+                    finish_targets.push((*lp_id, node.id));
+                }
+            }
+        }
+        for (lp_id, node_id) in finish_targets {
+            let _ = finish_level_play_node_and_maybe_complete(
+                ctx,
+                lp_id,
+                node_id,
+                "CompareActorVar",
+            )?;
+        }
+        return evaluate_entered_level_play_trees(ctx, 0);
     }
 
     if let Some(stat_key) = match kind {
@@ -5070,6 +5781,7 @@ pub fn on_entity_killed_with_conditions<S: PushSink + ?Sized>(
     }
 
     let mut finish_targets: Vec<(i32, i32, &'static str)> = Vec::new();
+    let mut failed_recheck_lps: Vec<i32> = Vec::new();
 
     for lp_id in candidate_ids {
         let Some(lp) = ctx.assets.tables.level_play_data.get_data_by_id(&lp_id) else {
@@ -5084,20 +5796,42 @@ pub fn on_entity_killed_with_conditions<S: PushSink + ?Sized>(
         let Ok(nodes) = ctx.assets.level_play_nodes.get_owner_nodes(lp_id) else {
             continue;
         };
+        let is_entered = ctx
+            .quest_comp
+            .info
+            .progress
+            .entered_level_plays
+            .contains(&lp_id);
+        if !is_entered && !can_enter_level_play(ctx, &lp, None) {
+            continue;
+        }
+        let booted = is_lp_bt_booted(ctx.progress_comp.as_deref(), lp_id);
+        let has_active_node = nodes
+            .iter()
+            .any(|n| is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, n.id));
         for node in nodes.iter() {
+            if node.node_type == "QuestFailed"
+                && (is_entered || is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id))
+                && !is_level_play_node_marked(ctx.progress_comp.as_deref(), lp_id, node.id)
+                && let Some(Value::Object(edc)) = node
+                    .data
+                    .get("FailedCondition")
+                    .and_then(|fc| fc.get("EntityDeathCondition"))
+                && let Some(Value::Array(eids)) = edc.get("EntityIds")
+                && eids.iter().any(|v| json_int(Some(v)) == Some(resolved_cfg_id))
+            {
+                ctx.scene.record_lp_killed_entity(lp_id, resolved_cfg_id);
+                let _ = append_unique_int(&mut failed_recheck_lps, lp_id);
+                continue;
+            }
             if node.node_type != "ChildQuest" {
                 continue;
             }
             if is_level_play_node_marked(ctx.progress_comp.as_deref(), lp_id, node.id) {
                 continue;
             }
-            if !is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id)
-                && !ctx
-                    .quest_comp
-                    .info
-                    .progress
-                    .entered_level_plays
-                    .contains(&lp_id)
+            if (booted || has_active_node || is_entered)
+                && !is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id)
             {
                 continue;
             }
@@ -5144,12 +5878,19 @@ pub fn on_entity_killed_with_conditions<S: PushSink + ?Sized>(
             }
 
             finish_targets.push((lp_id, node.id, cond_kind));
-            break;
         }
     }
 
     for (lp_id, node_id, cond_kind) in finish_targets {
         let _ = finish_level_play_node_and_maybe_complete(ctx, lp_id, node_id, cond_kind)?;
+    }
+    for lp_id in failed_recheck_lps {
+        if !ctx.quest_comp.info.completed_level_plays.contains(&lp_id)
+            && ctx.quest_comp.info.progress.entered_level_plays.contains(&lp_id)
+            && let Ok(nodes) = ctx.assets.level_play_nodes.get_owner_nodes(lp_id)
+        {
+            let _ = step_level_play_tree(ctx, lp_id, &nodes, true, None)?;
+        }
     }
     Ok(())
 }

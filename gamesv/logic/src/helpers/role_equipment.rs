@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_data::tables::PropValue;
-use sonoro_gamesv_data::tables::buff::Buff;
+use sonoro_gamesv_data::tables::buff::{Buff, DurationPolicy};
 use sonoro_gamesv_data::tables::weapon_property_growth::WeaponPropertyGrowth;
 use sonoro_gamesv_fs::role_info::RoleInfo;
 use sonoro_proto::enums::EAttributeType;
@@ -619,19 +619,34 @@ fn contribution_from_echo_prop(
 
 fn contribution_from_buff(buff: &Buff, display_mode: DisplayMode) -> Option<Contribution> {
     if matches!(
+        buff.DurationPolicy,
+        DurationPolicy::HasDuration | DurationPolicy::Instant
+    ) || matches!(
         buff.GameAttributeID,
         EAttributeType::None | EAttributeType::MAX
     ) || buff.ModifierMagnitude.is_empty()
     {
         return None;
     }
-    Some(Contribution {
-        attr_index: buff.GameAttributeID.to_i32() as usize,
-        is_ratio: false,
-        value: buff.ModifierMagnitude[0],
-        ratio: 0.0,
-        display_mode,
-    })
+    let policy = buff.CalculationPolicy.first().copied().unwrap_or(0);
+    let value = buff.ModifierMagnitude[0];
+    match policy {
+        1 => Some(Contribution {
+            attr_index: buff.GameAttributeID.to_i32() as usize,
+            is_ratio: true,
+            value: 0,
+            ratio: f64::from(value) / 10_000.0,
+            display_mode: DisplayMode::Add,
+        }),
+        0 => Some(Contribution {
+            attr_index: buff.GameAttributeID.to_i32() as usize,
+            is_ratio: false,
+            value,
+            ratio: 0.0,
+            display_mode,
+        }),
+        _ => None,
+    }
 }
 
 fn value_for_base(contribution: Contribution, base_props: &[i32]) -> i32 {

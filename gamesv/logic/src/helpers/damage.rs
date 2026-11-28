@@ -3,7 +3,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_data::tables::damage::Damage;
 use sonoro_proto::enums::{EAttributeType, EDamageImmune};
-use sonoro_proto::pb::{CombatReceiveData, DamageExecuteNotify, DamageExecuteRequest};
+use sonoro_proto::pb::{
+    CombatCommon, CombatNotifyData, CombatNotifyDataMessageOneof, CombatReceiveData,
+    CombatReceiveDataMessageOneof, DamageExecuteNotify, DamageExecuteRequest, PartInformation,
+    PartUpdateNotify,
+};
 use sonoro_proto::wire::PbEnum;
 
 use crate::component::entity::EntityComponentStorage;
@@ -794,6 +798,78 @@ fn apply_weakness_on_hit(
     0
 }
 
+fn apply_part_damage_on_hit(
+    combat_receive_pack: &mut Vec<CombatReceiveData>,
+    scene: &mut Scene,
+    target_idx: usize,
+    target_id: i64,
+    part_index: i32,
+    damage_amount: i32,
+) {
+    if part_index < 0 || damage_amount <= 0 {
+        return;
+    }
+    let mut part_infos: Vec<PartInformation> = Vec::new();
+    let mut any_activation = false;
+    {
+        let storage = &mut scene.entities[target_idx];
+        let Some(part_comp) = storage.part.as_mut() else {
+            return;
+        };
+        let mut updated_idx = None;
+        for (idx, part) in part_comp.parts.iter_mut().enumerate() {
+            if part.index != part_index {
+                continue;
+            }
+            if part.life_max <= 0.0 || part.life <= 0.0 {
+                break;
+            }
+            part.life = (part.life - damage_amount as f32).max(0.0);
+            if part.life <= 0.0 && part.activated {
+                part.activated = false;
+                any_activation = true;
+            }
+            updated_idx = Some(idx);
+            break;
+        }
+        let Some(idx) = updated_idx else {
+            return;
+        };
+        if any_activation {
+            part_comp.sync_active_tags(storage.tag.as_mut());
+        }
+        part_comp.append_part_info(idx, &mut part_infos);
+    }
+
+    if part_infos.is_empty() {
+        return;
+    }
+    scene.mark_fsm_dirty(
+        target_id,
+        if any_activation {
+            wake_reason::PART | wake_reason::TAG
+        } else {
+            wake_reason::PART
+        },
+    );
+    combat_receive_pack.push(CombatReceiveData {
+        Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
+            CombatNotifyData {
+                CombatCommon: Some(CombatCommon {
+                    EntityId: target_id,
+                    ..Default::default()
+                }),
+                Message: Some(CombatNotifyDataMessageOneof::PartUpdateNotify(
+                    PartUpdateNotify {
+                        EntityId: target_id,
+                        PartInfos: part_infos,
+                    },
+                )),
+            },
+        )),
+    });
+}
+
 pub fn damage_entity(
     combat_receive_pack: &mut Vec<CombatReceiveData>,
     request: &DamageExecuteRequest,
@@ -838,12 +914,11 @@ pub fn damage_entity(
     let lock_floor = buff_helper::lock_hp_floor(&scene.entities[target_idx], assets);
 
     if damage.CalculateType == 0 && damage.ImmuneType == 0 {
-        let invincible_tag_id =
+        let invincible_tag_id = Some(
             gameplay_tags::id_from_name(&assets.tables.gameplay_tag_remap, "功能.逻辑状态标识.无敌")
-                .unwrap_or(1_918_148_596);
-        if let Some(target_tags) = scene.entities[target_idx].tag.as_ref()
-            && target_tags.has_tag(&assets.tables.gameplay_tag_parent, invincible_tag_id)
-        {
+                .unwrap_or(1_918_148_596),
+        );
+        if entity_has_gameplay_tag(&scene.entities[target_idx], assets, invincible_tag_id) {
             base_notify.ImmuneType = Some(EDamageImmune::Invincible);
             return base_notify;
         }
@@ -1053,6 +1128,16 @@ pub fn damage_entity(
                     == crate::component::entity::EntityType::Monster
             }) {
                 scene.set_battle_entity_active(request.TargetEntityId, true);
+            }
+            if damage.CalculateType == 0 && effective_part_index >= 0 {
+                apply_part_damage_on_hit(
+                    combat_receive_pack,
+                    scene,
+                    target_idx,
+                    request.TargetEntityId,
+                    effective_part_index,
+                    final_damage,
+                );
             }
             let _ = scene.append_battle_state_notify(combat_receive_pack);
         }

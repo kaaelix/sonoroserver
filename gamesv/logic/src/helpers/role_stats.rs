@@ -50,8 +50,16 @@ pub fn refresh_attribute_component(
 ) -> Result<(), &'static str> {
     let life_idx = EAttributeType::Life.to_i32() as usize;
     let max_idx = EAttributeType::LifeMax.to_i32() as usize;
+    let energy_idx = EAttributeType::Energy.to_i32() as usize;
+    let energy_max_idx = EAttributeType::EnergyMax.to_i32() as usize;
+    let elem_energy_idx = EAttributeType::ElementEnergy.to_i32() as usize;
+    let elem_energy_max_idx = EAttributeType::ElementEnergyMax.to_i32() as usize;
+    let shield_idx = EAttributeType::Sheild.to_i32() as usize;
     let prev_hp = attr_comp.attributes[life_idx].current;
     let prev_max = attr_comp.attributes[max_idx].current;
+    let prev_energy = attr_comp.attributes[energy_idx].current;
+    let prev_elem_energy = attr_comp.attributes[elem_energy_idx].current;
+    let prev_shield = attr_comp.attributes[shield_idx].current;
 
     let snapshot = build_snapshot(assets, role_comp, weapon_comp, echo_comp, role_id)?;
 
@@ -64,6 +72,35 @@ pub fn refresh_attribute_component(
             base,
             increment,
             current: base + increment,
+        };
+    }
+
+    let restore_pool =
+        |attrs: &mut AttributeComponent, val_idx: usize, max_idx: usize, prev_val: i32| {
+            let max_val = attrs.attributes[max_idx].current;
+            let clamped = if max_val > 0 {
+                prev_val.clamp(0, max_val)
+            } else {
+                prev_val.max(0)
+            };
+            attrs.attributes[val_idx] = Attribute {
+                base: clamped,
+                increment: 0,
+                current: clamped,
+            };
+        };
+    restore_pool(attr_comp, energy_idx, energy_max_idx, prev_energy);
+    restore_pool(
+        attr_comp,
+        elem_energy_idx,
+        elem_energy_max_idx,
+        prev_elem_energy,
+    );
+    if prev_shield > 0 {
+        attr_comp.attributes[shield_idx] = Attribute {
+            base: 0,
+            increment: prev_shield,
+            current: prev_shield,
         };
     }
 

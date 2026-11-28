@@ -87,7 +87,10 @@ pub fn dependency_mask(
         mask |= wake_reason::BLACKBOARD;
     }
     if condition.CondWaitClient.is_some() || condition.Type == Some(4) {
-        mask |= wake_reason::STATE;
+        mask |= wake_reason::CLIENT_PASS;
+    }
+    if condition.CondListenBeHit.is_some() {
+        mask |= wake_reason::EVENT | wake_reason::BLACKBOARD | wake_reason::TAG;
     }
     if condition.CondTimer.is_some() {
         mask |= wake_reason::TIMER;
@@ -240,7 +243,7 @@ pub fn evaluate(
         return comp.pass_pool.contains(&key);
     }
     let result = if condition.Type == Some(4) {
-        true
+        (ctx.flags & crate::fsm::types::EVAL_FLAG_WAIT_CLIENT) != 0
     } else if condition.Type == Some(20) {
         comp.in_hate
     } else if let Some(and) = &condition.CondAnd {
@@ -280,35 +283,31 @@ pub fn evaluate(
     } else if condition.CondSkillEnd.is_some() {
         skill_ended(comp, fsm_id, transition.From)
     } else if let Some(bb) = &condition.CondBBValueCompare {
-        let Some(k1) = usize::try_from(bb.Key1).ok() else {
-            return false;
-        };
-        let Some(k2) = usize::try_from(bb.Key2).ok() else {
-            return false;
-        };
-        let Some(&Some(v1)) = comp.blackboard.get(k1) else {
-            return false;
-        };
-        let Some(&Some(v2)) = comp.blackboard.get(k2) else {
-            return false;
-        };
-        compare_values(v1, v2, bb.Compare)
+        let v1 = usize::try_from(bb.Key1)
+            .ok()
+            .and_then(|k1| comp.blackboard.get(k1).copied().flatten());
+        let v2 = usize::try_from(bb.Key2)
+            .ok()
+            .and_then(|k2| comp.blackboard.get(k2).copied().flatten());
+        match (v1, v2) {
+            (Some(v1), Some(v2)) => compare_values(v1, v2, bb.Compare),
+            _ => false,
+        }
     } else if let Some(ac) = &condition.CondAttrCompare {
-        let Some(a1) = usize::try_from(ac.Attr1).ok() else {
-            return false;
-        };
-        let Some(a2) = usize::try_from(ac.Attr2).ok() else {
-            return false;
-        };
-        let Some(&v1) = ctx.attributes.get(a1) else {
-            return false;
-        };
-        let Some(&v2) = ctx.attributes.get(a2) else {
-            return false;
-        };
-        compare_values(v1, v2, ac.Compare)
+        let v1 = usize::try_from(ac.Attr1)
+            .ok()
+            .and_then(|a1| ctx.attributes.get(a1).copied());
+        let v2 = usize::try_from(ac.Attr2)
+            .ok()
+            .and_then(|a2| ctx.attributes.get(a2).copied());
+        match (v1, v2) {
+            (Some(v1), Some(v2)) => compare_values(v1, v2, ac.Compare),
+            _ => false,
+        }
     } else if condition.CondWaitClient.is_some() {
-        true
+        (ctx.flags & crate::fsm::types::EVAL_FLAG_WAIT_CLIENT) != 0
+    } else if let Some(be_hit) = &condition.CondListenBeHit {
+        listen_be_hit_matches(comp, be_hit)
     } else if let Some(timer) = &condition.CondTimer {
         timer_passes(
             comp,
@@ -343,14 +342,13 @@ pub fn evaluate(
     } else if condition.CondHate.is_some() {
         comp.in_hate
     } else if let Some(attr) = &condition.CondAttribute {
-        let Some(&val) = usize::try_from(attr.AttributeId)
+        usize::try_from(attr.AttributeId)
             .ok()
-            .and_then(|id| ctx.attributes.get(id))
-        else {
-            return condition.Reverse;
-        };
-        let v = f64::from(val);
-        v >= f64::from(attr.Min) && v <= f64::from(attr.Max)
+            .and_then(|id| ctx.attributes.get(id).copied())
+            .is_some_and(|val| {
+                let v = f64::from(val);
+                v >= f64::from(attr.Min) && v <= f64::from(attr.Max)
+            })
     } else if let Some(rate) = &condition.CondAttributeRate {
         attr_rate_in_range(ctx.attributes, rate.AttributeId, rate.Denominator, rate.Min, rate.Max)
     } else if let Some(tag) = &condition.CondTag {
@@ -385,6 +383,55 @@ fn state_name_matches(comp: &FsmComponent, state: i32, name: &str) -> bool {
     state_hierarchy::find_node_exact(comp, state)
         .and_then(|n| n.Name.as_deref())
         .is_some_and(|n| n == name)
+}
+
+fn custom_bb_int(comp: &FsmComponent, key: &str) -> i32 {
+    comp.custom_blackboards
+        .iter()
+        .find(|(k, _)| k == key)
+        .map_or(0, |(_, v)| *v)
+}
+
+fn listen_be_hit_matches(
+    comp: &FsmComponent,
+    be_hit: &sonoro_gamesv_data::tables::ai_state_machine_config::ConditionListenBeHit,
+) -> bool {
+    let hit_active =
+        custom_bb_int(comp, "be_hit:active") > 0 || comp.event.as_deref() == Some("BeHit");
+    if !hit_active {
+        return false;
+    }
+    if be_hit.Parry && custom_bb_int(comp, "be_hit:parry") <= 0 {
+        return false;
+    }
+    if be_hit.BreakWeakness && custom_bb_int(comp, "be_hit:break_weakness") <= 0 {
+        return false;
+    }
+    if be_hit.VisionCounterAttackId != 0 {
+        let vc = custom_bb_int(comp, "be_hit:vision_counter");
+        if vc <= 0 || (vc != 1 && vc != be_hit.VisionCounterAttackId) {
+            return false;
+        }
+    }
+    let any_anim_filter = be_hit.NoHitAnimation
+        || be_hit.SoftKnock
+        || be_hit.HeavyKnock
+        || be_hit.KnockUp
+        || be_hit.KnockDown;
+    if any_anim_filter {
+        let anim = custom_bb_int(comp, "be_hit:anim");
+        if anim >= 0 && comp.custom_blackboards.iter().any(|(k, _)| k == "be_hit:anim") {
+            let matches_anim = (be_hit.NoHitAnimation && anim == 0)
+                || (be_hit.SoftKnock && anim == 1)
+                || (be_hit.HeavyKnock && anim == 2)
+                || (be_hit.KnockUp && anim == 3)
+                || (be_hit.KnockDown && anim == 4);
+            if !matches_anim {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn hp_less_than(attributes: &[i32], hp_ratio: f32) -> bool {

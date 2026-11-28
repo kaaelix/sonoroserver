@@ -110,6 +110,7 @@ fn apply_buff_request_impl(
     events: &mut EventQueue,
     entity_id: i64,
     buff_id: i64,
+    level: i32,
     instigator_id: i64,
     stack_count: i32,
     is_active: bool,
@@ -129,6 +130,7 @@ fn apply_buff_request_impl(
     let Some(scene) = state.scene.as_mut() else {
         return false;
     };
+    let effective_level = level.max(1);
 
     if buff_data.DurationPolicy == DurationPolicy::Instant {
         // Client ApplyGameplayEffectPush originates after local AddBuffLocal execution.
@@ -159,12 +161,14 @@ fn apply_buff_request_impl(
                 )),
             });
         }
-        buff_helper::execute_buff_effects(
+        buff_helper::execute_buff_effects_with_assets_and_level(
             receive_data_pack,
             entity_id,
             instigator_id,
             &buff_data,
             scene,
+            &state.assets,
+            effective_level,
         );
         return true;
     }
@@ -188,6 +192,7 @@ fn apply_buff_request_impl(
             stack_count,
             is_active,
             duration_seconds,
+            level: effective_level,
             notify_client: announce_client,
             ..Default::default()
         }],
@@ -218,6 +223,7 @@ pub fn handle_order_apply_buff_request(
         events,
         entity_id,
         req.Id,
+        req.Level,
         req.InstigatorId,
         req.StackCount,
         true,
@@ -265,6 +271,7 @@ pub fn handle_apply_gameplay_effect_request(
         events,
         entity_id,
         req.Id,
+        req.Level,
         req.InstigatorId,
         req.StackCount,
         req.IsActive,
@@ -310,6 +317,7 @@ pub fn handle_apply_gameplay_effect_push(
         events,
         entity_id,
         push.Id,
+        push.Level,
         push.InstigatorId,
         stack_count,
         push.IsActive,

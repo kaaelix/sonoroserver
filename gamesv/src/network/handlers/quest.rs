@@ -4,7 +4,7 @@ use sonoro_gamesv_logic::helpers::{
     level_play::{self, LevelPlayContext},
     quest_engine,
 };
-use sonoro_proto::enums::{ErrorCode, QuestFocusReason};
+use sonoro_proto::enums::{BtType, ErrorCode, QuestFocusReason};
 use sonoro_proto::pb::{
     AcceptFocusWaitQuestRequest, AcceptFocusWaitQuestResponse, ActionFinishRequest,
     ActionFinishResponse, BtGiveUpRequest, BtGiveUpResponse, BtRollbackRequest, BtRollbackResponse,
@@ -225,18 +225,49 @@ pub fn handle_submit_node_request(
     req: SubmitNodeRequest,
 ) -> Result<SubmitNodeResponse, String> {
     let mut qctx = state.quest_context(events);
-    let err_id =
-        quest_engine::events::on_submit_node(&mut qctx, req.TreeOwnerId, req.TreeIncId, req.NodeId)
-            .map_err(|e| e.to_string())?;
-    if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx) {
-        let _ = level_play::on_submit_level_play_node(
-            &mut lp_ctx,
+    let (is_lp, _) =
+        sonoro_gamesv_logic::helpers::quest_types::decode_tree_inc_id(req.TreeIncId);
+    let err_id = if is_lp {
+        let accepted = if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx) {
+            level_play::on_submit_level_play_node(
+                &mut lp_ctx,
+                req.TreeOwnerId,
+                req.TreeIncId,
+                req.NodeId,
+            )
+            .map_err(|e| e.to_string())?
+        } else {
+            false
+        };
+        if accepted {
+            ErrorCode::Success
+        } else {
+            ErrorCode::ErrTreeNodeNotActive
+        }
+    } else {
+        let q_err = quest_engine::events::on_submit_node(
+            &mut qctx,
             req.TreeOwnerId,
             req.TreeIncId,
             req.NodeId,
         )
         .map_err(|e| e.to_string())?;
-    }
+        if q_err != ErrorCode::Success
+            && req.TreeIncId <= 0
+            && let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx)
+            && level_play::on_submit_level_play_node(
+                &mut lp_ctx,
+                req.TreeOwnerId,
+                req.TreeIncId,
+                req.NodeId,
+            )
+            .map_err(|e| e.to_string())?
+        {
+            ErrorCode::Success
+        } else {
+            q_err
+        }
+    };
     Ok(SubmitNodeResponse {
         TreeOwnerId: req.TreeOwnerId,
         TreeIncId: req.TreeIncId,
@@ -361,6 +392,65 @@ pub fn handle_action_finish_request(
         .map_err(|e| e.to_string())?;
     let mut qctx = state.quest_context(events);
     quest_engine::events::on_condition_state_changed(&mut qctx).map_err(|e| e.to_string())?;
+
+    let is_held_by_flow_or_wait =
+        |sc: &sonoro_gamesv_logic::scene::Scene, bt_type: BtType, owner_id: i32, node_id: i32| {
+            sc.has_pending_or_deferred_flow_for_bt_node(bt_type, owner_id, node_id)
+                || sc.pending_deferred_actions.iter().any(|e| {
+                    e.bt_type == bt_type && e.quest_id == owner_id && e.node_id == node_id
+                })
+        };
+
+    let ready_quests: Vec<i32> = if let Some(sc) = qctx.scene.as_deref() {
+        qctx.quest_comp
+            .info
+            .active_quests
+            .iter()
+            .filter_map(|aq| {
+                let paused = sc.paused_action_node_ids_for_bt(BtType::BtTypeQuest, aq.quest_id);
+                paused
+                    .into_iter()
+                    .any(|nid| !is_held_by_flow_or_wait(sc, BtType::BtTypeQuest, aq.quest_id, nid))
+                    .then_some(aq.quest_id)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !ready_quests.is_empty() {
+        for qid in ready_quests {
+            quest_engine::tree::advance_quest_tree(&mut qctx, qid, true)
+                .map_err(|e| e.to_string())?;
+        }
+        quest_engine::tree::finalize_progression(&mut qctx).map_err(|e| e.to_string())?;
+    }
+
+    let ready_lps: Vec<i32> = if let Some(sc) = qctx.scene.as_deref() {
+        qctx.quest_comp
+            .info
+            .progress
+            .entered_level_plays
+            .iter()
+            .copied()
+            .filter(|&lp_id| {
+                let paused = sc.paused_action_node_ids_for_bt(BtType::BtTypeLevelPlay, lp_id);
+                paused
+                    .into_iter()
+                    .any(|nid| !is_held_by_flow_or_wait(sc, BtType::BtTypeLevelPlay, lp_id, nid))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !ready_lps.is_empty()
+        && let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx)
+    {
+        for lp_id in ready_lps {
+            level_play::step_entered_tree_by_id(&mut lp_ctx, lp_id)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
     Ok(ActionFinishResponse {
         Code: Some(ErrorCode::Success),
     })
@@ -491,22 +581,46 @@ pub fn handle_submit_awake_and_load_entity_node_request(
     events: &mut EventQueue,
     req: SubmitAwakeAndLoadEntityNodeRequest,
 ) -> Result<SubmitAwakeAndLoadEntityNodeResponse, String> {
+    let (is_lp_inc, inc_owner) =
+        sonoro_gamesv_logic::helpers::quest_types::decode_tree_inc_id(req.TreeIncId);
+    let owner = if req.TreeOwnerId > 0 {
+        req.TreeOwnerId
+    } else {
+        inc_owner
+    };
+    let has_active_quest = owner > 0
+        && state
+            .player_components
+            .quest
+            .info
+            .find_active_quest(owner)
+            .is_some();
+    let is_lp = owner > 0 && (is_lp_inc || !has_active_quest);
     let mut dirty = false;
-    if req.TreeOwnerId > 0 {
+    if is_lp {
         state
             .player_components
             .progress
             .info
-            .set_key_int(&format!("awake_node:{}", req.TreeOwnerId), i64::from(req.NodeId));
+            .set_key_int(&format!("lp_awake_node:{owner}"), i64::from(req.NodeId));
         dirty = true;
-    }
-    if req.TreeIncId > 0 {
-        state
-            .player_components
-            .progress
-            .info
-            .set_key_int(&format!("awake_node:{}", req.TreeIncId), i64::from(req.NodeId));
-        dirty = true;
+    } else {
+        if req.TreeOwnerId > 0 {
+            state
+                .player_components
+                .progress
+                .info
+                .set_key_int(&format!("awake_node:{}", req.TreeOwnerId), i64::from(req.NodeId));
+            dirty = true;
+        }
+        if req.TreeIncId > 0 {
+            state
+                .player_components
+                .progress
+                .info
+                .set_key_int(&format!("awake_node:{}", req.TreeIncId), i64::from(req.NodeId));
+            dirty = true;
+        }
     }
     if dirty {
         state
@@ -516,20 +630,8 @@ pub fn handle_submit_awake_and_load_entity_node_request(
             .map_err(|e| e.to_string())?;
     }
 
-    let owner = if req.TreeOwnerId > 0 {
-        req.TreeOwnerId
-    } else {
-        i32::try_from(req.TreeIncId).unwrap_or(0)
-    };
-    let has_active_quest = owner > 0
-        && state
-            .player_components
-            .quest
-            .info
-            .find_active_quest(owner)
-            .is_some();
     let mut qctx = state.quest_context(events);
-    if owner > 0 && !has_active_quest {
+    if is_lp {
         if let Some(mut lp_ctx) = LevelPlayContext::from_quest_ctx(&mut qctx) {
             let _ = level_play::on_submit_level_play_node(
                 &mut lp_ctx,

@@ -906,13 +906,13 @@ pub fn handle_skin_reward_request(
     req: SkinRewardRequest,
 ) -> Result<SkinRewardResponse, String> {
     if req.RewardId <= 0
-        || (state
+        || state
             .assets
             .tables
             .role_skin
             .get_data_by_id(&req.RewardId)
             .is_none()
-            && !CosmeticInfo::has(&state.player_components.cosmetic.info.role_skins, req.RewardId))
+        || !CosmeticInfo::has(&state.player_components.cosmetic.info.role_skins, req.RewardId)
     {
         return Ok(SkinRewardResponse {
             ErrorCode: Some(ErrorCode::ErrSkinRewardNotFound),

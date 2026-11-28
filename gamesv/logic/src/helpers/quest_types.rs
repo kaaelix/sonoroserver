@@ -2,7 +2,38 @@ use serde_json::{Map, Value};
 use sonoro_common::fs::FileSystem;
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_data::lazy_node_store::NodeEntry;
+use sonoro_proto::enums::BtType;
 use sonoro_proto::pb::VarDefinePb;
+
+/// Disjoint `TreeIncId` base for `BtTypeLevelPlay` trees so shared IDs (e.g. `169750001`)
+/// never collide with `BtTypeQuest` trees in the client's `GeneralLogicTreeModel`.
+pub const LEVEL_PLAY_TREE_INC_OFFSET: i64 = 1_000_000_000;
+
+/// Returns a protocol `TreeIncId` disjoint between Quest and LevelPlay behavior trees.
+#[inline]
+pub fn bt_tree_inc_id(bt_type: BtType, owner_id: i32) -> i64 {
+    if bt_type == BtType::BtTypeLevelPlay && owner_id > 0 {
+        let raw = i64::from(owner_id);
+        if raw < LEVEL_PLAY_TREE_INC_OFFSET {
+            LEVEL_PLAY_TREE_INC_OFFSET + raw
+        } else {
+            raw
+        }
+    } else {
+        i64::from(owner_id)
+    }
+}
+
+/// Decodes an inbound `TreeIncId`, returning `(is_level_play_inc, owner_id)`.
+#[inline]
+pub fn decode_tree_inc_id(tree_inc_id: i64) -> (bool, i32) {
+    if tree_inc_id >= LEVEL_PLAY_TREE_INC_OFFSET {
+        let raw = tree_inc_id - LEVEL_PLAY_TREE_INC_OFFSET;
+        (true, i32::try_from(raw).unwrap_or(0))
+    } else {
+        (false, i32::try_from(tree_inc_id).unwrap_or(0))
+    }
+}
 
 use crate::component::player::{
     PlayerBasicComponent, PlayerEchoComponent, PlayerGuideComponent, PlayerInventoryComponent,
@@ -17,6 +48,7 @@ use crate::sink::PushSink;
 
 #[derive(Debug, Clone)]
 pub struct DeferredBtVar {
+    pub bt_type: BtType,
     pub owner_id: i32,
     pub var_name: String,
     pub var_define: VarDefinePb,
@@ -67,6 +99,10 @@ impl<'a, S: PushSink + ?Sized> QuestContext<'a, S> {
     }
 
     pub fn make_eval_context_for_quest(&self, owner_quest_id: i32) -> EvalContext<'_> {
+        self.make_eval_context_for_bt(BtType::BtTypeQuest, owner_quest_id)
+    }
+
+    pub fn make_eval_context_for_bt(&self, bt_type: BtType, owner_id: i32) -> EvalContext<'_> {
         EvalContext {
             assets: Some(self.assets),
             basic_comp: self.basic_comp,
@@ -79,7 +115,8 @@ impl<'a, S: PushSink + ?Sized> QuestContext<'a, S> {
             guide_comp: self.guide_comp.as_deref(),
             progress_comp: self.progress_comp.as_deref(),
             scene: self.scene.as_deref(),
-            owner_quest_id,
+            owner_quest_id: owner_id,
+            owner_is_level_play: bt_type == BtType::BtTypeLevelPlay,
             target_role_id: 0,
             self_entity_config_id: 0,
         }
@@ -247,6 +284,16 @@ pub fn scoped_var_key_with_owner(
     obj: &Map<String, Value>,
     var_name: &str,
 ) -> Option<String> {
+    scoped_var_key_with_bt(scene, BtType::BtTypeQuest, owner_id, obj, var_name)
+}
+
+pub fn scoped_var_key_with_bt(
+    scene: Option<&Scene>,
+    bt_type: BtType,
+    owner_id: i32,
+    obj: &Map<String, Value>,
+    var_name: &str,
+) -> Option<String> {
     let src = json_str(obj.get("Source")).unwrap_or("");
     if src == "Global" {
         return None;
@@ -257,6 +304,9 @@ pub fn scoped_var_key_with_owner(
         return Some(format!("{ref_type}:{ref_id}:{var_name}"));
     }
     if owner_id > 0 {
+        if bt_type == BtType::BtTypeLevelPlay {
+            return Some(format!("LpSelf:{owner_id}:{var_name}"));
+        }
         return Some(format!("Self:{owner_id}:{var_name}"));
     }
     if let Some(sc) = scene {
@@ -274,18 +324,27 @@ pub fn scoped_var_key_with_owner(
 }
 
 pub fn scoped_var_key(obj: &Map<String, Value>, var_name: &str) -> Option<String> {
-    scoped_var_key_with_owner(None, 0, obj, var_name)
+    scoped_var_key_with_bt(None, BtType::BtTypeQuest, 0, obj, var_name)
 }
 
 pub fn resolve_var_int<S: PushSink + ?Sized>(
     ctx: &QuestContext<'_, S>,
     var_opt: Option<&Value>,
 ) -> i32 {
-    resolve_var_int_for_owner(ctx, 0, var_opt)
+    resolve_var_int_for_bt(ctx, BtType::BtTypeQuest, 0, var_opt)
 }
 
 pub fn resolve_var_int_for_owner<S: PushSink + ?Sized>(
     ctx: &QuestContext<'_, S>,
+    owner_id: i32,
+    var_opt: Option<&Value>,
+) -> i32 {
+    resolve_var_int_for_bt(ctx, BtType::BtTypeQuest, owner_id, var_opt)
+}
+
+pub fn resolve_var_int_for_bt<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    bt_type: BtType,
     owner_id: i32,
     var_opt: Option<&Value>,
 ) -> i32 {
@@ -297,7 +356,7 @@ pub fn resolve_var_int_for_owner<S: PushSink + ?Sized>(
         return json_int(obj.get("Value")).unwrap_or(0);
     }
     if src == "System" {
-        return condition::eval_system_var(&ctx.make_eval_context_for_quest(owner_id), obj)
+        return condition::eval_system_var(&ctx.make_eval_context_for_bt(bt_type, owner_id), obj)
             .map_or(0, |f| f.round() as i32);
     }
     let Some(name) = resolve_var_name(obj) else {
@@ -314,13 +373,25 @@ pub fn resolve_var_int_for_owner<S: PushSink + ?Sized>(
             }
         }
     }
-    if let Some(sk) = scoped_var_key_with_owner(ctx.scene.as_deref(), owner_id, obj, name)
-        && ctx.quest_comp.info.has_var(&sk)
-    {
-        if is_bool {
-            return i32::from(ctx.quest_comp.info.get_var_bool(&sk));
+    if let Some(sk) = scoped_var_key_with_bt(ctx.scene.as_deref(), bt_type, owner_id, obj, name) {
+        if ctx.quest_comp.info.has_var(&sk) {
+            if is_bool {
+                return i32::from(ctx.quest_comp.info.get_var_bool(&sk));
+            }
+            return ctx.quest_comp.info.get_var_int(&sk);
         }
-        return ctx.quest_comp.info.get_var_int(&sk);
+        if bt_type == BtType::BtTypeLevelPlay
+            && owner_id > 0
+            && (src.is_empty() || src == "Self")
+        {
+            let legacy_k = format!("Self:{owner_id}:{name}");
+            if ctx.quest_comp.info.has_var(&legacy_k) {
+                if is_bool {
+                    return i32::from(ctx.quest_comp.info.get_var_bool(&legacy_k));
+                }
+                return ctx.quest_comp.info.get_var_int(&legacy_k);
+            }
+        }
     }
     if ctx.quest_comp.info.has_var(name) {
         if is_bool {
@@ -328,7 +399,8 @@ pub fn resolve_var_int_for_owner<S: PushSink + ?Sized>(
         }
         return ctx.quest_comp.info.get_var_int(name);
     }
-    if let Some(init_val) = condition::lookup_entity_config_var(&ctx.make_eval_context(), obj, name)
+    if let Some(init_val) =
+        condition::lookup_entity_config_var(&ctx.make_eval_context_for_bt(bt_type, owner_id), obj, name)
     {
         return match init_val {
             Value::Number(n) => n

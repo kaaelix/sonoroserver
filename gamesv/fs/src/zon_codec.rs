@@ -187,7 +187,7 @@ impl<'de> MapAccess<'de> for FieldMap {
         match self.iter.next() {
             Some((k, v)) => {
                 self.pending_val = Some(v);
-                seed.deserialize(ZonDe(ZonValue::Str(k))).map(Some)
+                seed.deserialize(MapKeyDe(k)).map(Some)
             }
             None => Ok(None),
         }
@@ -202,6 +202,138 @@ impl<'de> MapAccess<'de> for FieldMap {
             .take()
             .ok_or_else(|| ZonCodecError::Custom("missing map value".into()))?;
         seed.deserialize(ZonDe(val))
+    }
+}
+
+struct MapKeyDe(String);
+
+macro_rules! impl_map_key_parse {
+    ($de_method:ident, $visit_method:ident, $ty:ty) => {
+        fn $de_method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            let parsed = self.0.parse::<$ty>().map_err(|e| {
+                ZonCodecError::Custom(format!(
+                    "invalid {} map key '{}': {e}",
+                    stringify!($ty),
+                    self.0
+                ))
+            })?;
+            visitor.$visit_method(parsed)
+        }
+    };
+}
+
+impl<'de> Deserializer<'de> for MapKeyDe {
+    type Error = ZonCodecError;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        visitor.visit_string(self.0)
+    }
+
+    fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        match self.0.as_str() {
+            "true" => visitor.visit_bool(true),
+            "false" => visitor.visit_bool(false),
+            other => Err(ZonCodecError::Custom(format!(
+                "invalid bool map key '{other}'"
+            ))),
+        }
+    }
+
+    impl_map_key_parse!(deserialize_i8, visit_i8, i8);
+    impl_map_key_parse!(deserialize_i16, visit_i16, i16);
+    impl_map_key_parse!(deserialize_i32, visit_i32, i32);
+    impl_map_key_parse!(deserialize_i64, visit_i64, i64);
+    impl_map_key_parse!(deserialize_i128, visit_i128, i128);
+    impl_map_key_parse!(deserialize_u8, visit_u8, u8);
+    impl_map_key_parse!(deserialize_u16, visit_u16, u16);
+    impl_map_key_parse!(deserialize_u32, visit_u32, u32);
+    impl_map_key_parse!(deserialize_u64, visit_u64, u64);
+    impl_map_key_parse!(deserialize_u128, visit_u128, u128);
+    impl_map_key_parse!(deserialize_f32, visit_f32, f32);
+    impl_map_key_parse!(deserialize_f64, visit_f64, f64);
+
+    fn deserialize_newtype_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        if self.0 == "null" {
+            visitor.visit_none()
+        } else {
+            visitor.visit_some(self)
+        }
+    }
+
+    fn deserialize_enum<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        visitor.visit_enum(KeyEnumAccess(self.0))
+    }
+
+    serde::forward_to_deserialize_any! {
+        char str string bytes byte_buf unit unit_struct seq tuple tuple_struct
+        map struct identifier ignored_any
+    }
+}
+
+struct KeyEnumAccess(String);
+
+impl<'de> de::EnumAccess<'de> for KeyEnumAccess {
+    type Error = ZonCodecError;
+    type Variant = UnitVariantOnly;
+
+    fn variant_seed<V: de::DeserializeSeed<'de>>(
+        self,
+        seed: V,
+    ) -> Result<(V::Value, Self::Variant), Self::Error> {
+        let val = seed.deserialize(MapKeyDe(self.0))?;
+        Ok((val, UnitVariantOnly))
+    }
+}
+
+struct UnitVariantOnly;
+
+impl<'de> de::VariantAccess<'de> for UnitVariantOnly {
+    type Error = ZonCodecError;
+
+    fn unit_variant(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn newtype_variant_seed<T: de::DeserializeSeed<'de>>(
+        self,
+        _seed: T,
+    ) -> Result<T::Value, Self::Error> {
+        Err(ZonCodecError::Custom(
+            "map enum key cannot be a newtype variant".into(),
+        ))
+    }
+
+    fn tuple_variant<V: Visitor<'de>>(
+        self,
+        _len: usize,
+        _visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        Err(ZonCodecError::Custom(
+            "map enum key cannot be a tuple variant".into(),
+        ))
+    }
+
+    fn struct_variant<V: Visitor<'de>>(
+        self,
+        _fields: &'static [&'static str],
+        _visitor: V,
+    ) -> Result<V::Value, Self::Error> {
+        Err(ZonCodecError::Custom(
+            "map enum key cannot be a struct variant".into(),
+        ))
     }
 }
 
@@ -251,7 +383,9 @@ impl Serializer for ZonSer {
     }
 
     fn serialize_u64(self, v: u64) -> Result<Self::Ok, Self::Error> {
-        Ok(ZonValue::Int(v as i64))
+        i64::try_from(v)
+            .map(ZonValue::Int)
+            .map_err(|_| ZonCodecError::Custom(format!("u64 value {v} exceeds i64::MAX")))
     }
 
     fn serialize_f32(self, v: f32) -> Result<Self::Ok, Self::Error> {
@@ -459,7 +593,15 @@ impl SerializeMap for ZonMapSer {
         match key.serialize(ZonSer)? {
             ZonValue::Str(s) => self.key = Some(s),
             ZonValue::Int(n) => self.key = Some(n.to_string()),
-            other => self.key = Some(zon::stringify(&other)),
+            ZonValue::Bool(b) => self.key = Some(b.to_string()),
+            ZonValue::Float(f) => self.key = Some(f.to_string()),
+            ZonValue::EnumLiteral(s) => self.key = Some(s),
+            other => {
+                return Err(ZonCodecError::Custom(format!(
+                    "unsupported map key: {}",
+                    zon::stringify(&other)
+                )));
+            }
         }
         Ok(())
     }
@@ -521,5 +663,49 @@ impl SerializeStructVariant for ZonStructVariantSer {
             self.variant,
             ZonValue::Struct(self.fields),
         )]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    enum KeyKind {
+        Alpha,
+        Beta,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct MapHolder {
+        by_i32: BTreeMap<i32, String>,
+        by_u64: BTreeMap<u64, i32>,
+        by_bool: BTreeMap<bool, String>,
+        by_enum: BTreeMap<KeyKind, i32>,
+    }
+
+    #[test]
+    fn roundtrips_integer_bool_and_enum_map_keys() {
+        let orig = MapHolder {
+            by_i32: BTreeMap::from([(-5, "neg".into()), (42, "pos".into())]),
+            by_u64: BTreeMap::from([(0, 10), (i64::MAX as u64, 99)]),
+            by_bool: BTreeMap::from([(false, "no".into()), (true, "yes".into())]),
+            by_enum: BTreeMap::from([(KeyKind::Alpha, 1), (KeyKind::Beta, 2)]),
+        };
+        let zon_str = to_zon_string(&orig).expect("serialize maps");
+        let decoded: MapHolder = from_zon_str(&zon_str).expect("deserialize maps");
+        assert_eq!(decoded, orig);
+    }
+
+    #[test]
+    fn rejects_u64_exceeding_i64_max() {
+        let too_big = (i64::MAX as u64) + 1;
+        assert!(to_zon_value(&too_big).is_err());
+        assert!(to_zon_value(&u64::MAX).is_err());
+
+        let bad_map = BTreeMap::from([(u64::MAX, "x")]);
+        assert!(to_zon_string(&bad_map).is_err());
     }
 }

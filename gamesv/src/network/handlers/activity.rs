@@ -664,6 +664,7 @@ pub fn push_activity_update_notify<S: PushSink + ?Sized>(
         guide_comp: None,
         scene: None,
         owner_quest_id: 0,
+        owner_is_level_play: false,
         target_role_id: 0,
         self_entity_config_id: 0,
     };

@@ -85,32 +85,32 @@ fn magnitude_at_level(buff_data: &Buff, level: i32) -> i32 {
     buff_data.ModifierMagnitude[idx.min(buff_data.ModifierMagnitude.len() - 1)]
 }
 
-fn compute_from_attr_delta(
-    scene: Option<&Scene>,
+fn resolve_from_attr_source<'a>(
+    scene: Option<&'a Scene>,
     target_id: i64,
     instigator_id: i64,
-    target_attr: &AttributeComponent,
+    instigator_attr: Option<&'a AttributeComponent>,
+    target_attr: &'a AttributeComponent,
     buff_data: &Buff,
-    level: i32,
-) -> Option<i32> {
+) -> Option<&'a AttributeComponent> {
     if buff_data.CalculationPolicy.len() < 2 {
         return None;
     }
-    let modifier = f64::from(magnitude_at_level(buff_data, level));
-    let based_attr_id = buff_data.CalculationPolicy[1];
     let use_instigator = buff_data.CalculationPolicy.get(2).copied() == Some(1);
-    let source_id = if use_instigator {
-        instigator_id
+    if use_instigator && instigator_id != target_id {
+        instigator_attr.or_else(|| scene?.entity(instigator_id)?.attribute.as_ref())
     } else {
-        target_id
-    };
+        Some(target_attr)
+    }
+}
 
-    let source_attr = if source_id == target_id {
-        target_attr
-    } else {
-        scene?.entity(source_id)?.attribute.as_ref()?
-    };
-
+fn compute_from_attr_raw(
+    source_attr: &AttributeComponent,
+    buff_data: &Buff,
+    level: i32,
+) -> Option<i32> {
+    let &based_attr_id = buff_data.CalculationPolicy.get(1)?;
+    let modifier = f64::from(magnitude_at_level(buff_data, level));
     let raw_source = attributes::get_attr_by_id(source_attr, based_attr_id);
     let source_value = f64::from(raw_source);
     let min_required = buff_data
@@ -141,6 +141,38 @@ fn compute_from_attr_delta(
         calculated
     };
     Some(scaled.min(max_value).trunc() as i32)
+}
+
+fn compute_from_attr_delta(
+    scene: Option<&Scene>,
+    target_id: i64,
+    instigator_id: i64,
+    target_attr: &AttributeComponent,
+    buff_data: &Buff,
+    level: i32,
+) -> Option<i32> {
+    let source_attr =
+        resolve_from_attr_source(scene, target_id, instigator_id, None, target_attr, buff_data)?;
+    compute_from_attr_raw(source_attr, buff_data, level)
+}
+
+fn compute_override_from_attr(
+    source_attr: &AttributeComponent,
+    buff_data: &Buff,
+    level: i32,
+) -> Option<i32> {
+    let &based_attr_id = buff_data.CalculationPolicy.get(1)?;
+    let src_val = attributes::get_attr_by_id(source_attr, based_attr_id);
+    let modifier = magnitude_at_level(buff_data, level);
+    Some((f64::from(src_val) * f64::from(modifier) / 1e4).round() as i32)
+}
+
+fn scale_rate_bp(attr_type: EAttributeType, target_attr: &AttributeComponent, bp: i32) -> i32 {
+    if bp == 0 {
+        return 0;
+    }
+    let reference = compute_rate_reference(attr_type, target_attr);
+    (f64::from(reference) * f64::from(bp) / 1e4).round() as i32
 }
 
 fn compute_rate_reference(attr_type: EAttributeType, target_attr: &AttributeComponent) -> i32 {
@@ -181,6 +213,28 @@ pub fn execute_buff_effects(
         buff_data,
         scene,
         None,
+        None,
+    );
+}
+
+pub fn execute_buff_effects_with_assets_and_level(
+    combat_receive_pack: &mut Vec<CombatReceiveData>,
+    target_id: i64,
+    instigator_id: i64,
+    buff_data: &Buff,
+    scene: &mut Scene,
+    assets: &Assets,
+    level: i32,
+) {
+    execute_buff_effects_inner(
+        ExecutionMode::Instant,
+        combat_receive_pack,
+        target_id,
+        instigator_id,
+        buff_data,
+        scene,
+        Some(assets),
+        Some(level),
     );
 }
 
@@ -198,6 +252,7 @@ pub fn execute_periodic_buff_effects(
         instigator_id,
         buff_data,
         scene,
+        None,
         None,
     );
 }
@@ -218,6 +273,7 @@ pub fn execute_periodic_with_assets(
         buff_data,
         scene,
         Some(assets),
+        None,
     );
 }
 
@@ -229,6 +285,7 @@ fn execute_buff_effects_inner(
     buff_data: &Buff,
     scene: &mut Scene,
     maybe_assets: Option<&Assets>,
+    explicit_level: Option<i32>,
 ) {
     let Some(&idx) = scene.net_id_map.get(&target_id) else {
         tracing::debug!("couldnt find target entity for buff effect: {target_id}");
@@ -300,7 +357,10 @@ fn execute_buff_effects_inner(
             .buffs
             .as_ref()
             .and_then(|b| b.get_by_buff_id(buff_data.Id));
-        let eff_level = active_buff.map_or(1, |b| b.Level.max(1));
+        let eff_level = explicit_level
+            .filter(|&lvl| lvl > 0)
+            .or_else(|| active_buff.map(|b| b.Level.max(1)))
+            .unwrap_or(1);
         let eff_stacks = if mode == ExecutionMode::Periodic {
             active_buff.map_or(1, |b| b.StackCount.max(1))
         } else {
@@ -428,11 +488,7 @@ fn calculate_buff_effects(
         }
         CalculationPolicy::AddRate => {
             let modifier = magnitude_at_level(buff_data, level);
-            if modifier == 0 {
-                return Vec::new();
-            }
-            let reference = compute_rate_reference(buff_data.GameAttributeID, target_attr);
-            let delta = (f64::from(reference) * f64::from(modifier) / 1e4).round() as i32;
+            let delta = scale_rate_bp(buff_data.GameAttributeID, target_attr, modifier);
             if delta == 0 {
                 return Vec::new();
             }
@@ -444,7 +500,7 @@ fn calculate_buff_effects(
                 delta,
             )
         }
-        CalculationPolicy::AddFromAttr | CalculationPolicy::AddFromAttrRate => {
+        CalculationPolicy::AddFromAttr => {
             let Some(delta) = compute_from_attr_delta_with_source(
                 target_id,
                 instigator_id,
@@ -455,6 +511,29 @@ fn calculate_buff_effects(
             ) else {
                 return Vec::new();
             };
+            if delta == 0 {
+                return Vec::new();
+            }
+            attributes::change_attr(
+                target_attr,
+                buff_data.GameAttributeID,
+                AttributeChangeType::Delta,
+                AttributeValueType::Current,
+                delta,
+            )
+        }
+        CalculationPolicy::AddFromAttrRate => {
+            let Some(bp) = compute_from_attr_delta_with_source(
+                target_id,
+                instigator_id,
+                instigator_attr,
+                target_attr,
+                buff_data,
+                level,
+            ) else {
+                return Vec::new();
+            };
+            let delta = scale_rate_bp(buff_data.GameAttributeID, target_attr, bp);
             if delta == 0 {
                 return Vec::new();
             }
@@ -477,21 +556,19 @@ fn calculate_buff_effects(
             )
         }
         CalculationPolicy::OverrideFromAttr => {
-            if buff_data.CalculationPolicy.len() < 2 {
+            let Some(source_attr) = resolve_from_attr_source(
+                None,
+                target_id,
+                instigator_id,
+                instigator_attr,
+                target_attr,
+                buff_data,
+            ) else {
                 return Vec::new();
-            }
-            let based_attr_id = buff_data.CalculationPolicy[1];
-            let use_instigator = buff_data.CalculationPolicy.get(2).copied() == Some(1);
-            let src_val = if use_instigator && instigator_id != target_id {
-                let Some(attr) = instigator_attr else {
-                    return Vec::new();
-                };
-                attributes::get_attr_by_id(attr, based_attr_id)
-            } else {
-                attributes::get_attr_by_id(target_attr, based_attr_id)
             };
-            let modifier = magnitude_at_level(buff_data, level);
-            let value = (f64::from(src_val) * f64::from(modifier) / 1e4).round() as i32;
+            let Some(value) = compute_override_from_attr(source_attr, buff_data, level) else {
+                return Vec::new();
+            };
             attributes::change_attr(
                 target_attr,
                 buff_data.GameAttributeID,
@@ -512,46 +589,15 @@ fn compute_from_attr_delta_with_source(
     buff_data: &Buff,
     level: i32,
 ) -> Option<i32> {
-    if buff_data.CalculationPolicy.len() < 2 {
-        return None;
-    }
-    let modifier = f64::from(magnitude_at_level(buff_data, level));
-    let based_attr_id = buff_data.CalculationPolicy[1];
-    let use_instigator = buff_data.CalculationPolicy.get(2).copied() == Some(1);
-    let source_attr = if use_instigator && instigator_id != target_id {
-        instigator_attr?
-    } else {
-        target_attr
-    };
-    let raw_source = attributes::get_attr_by_id(source_attr, based_attr_id);
-    let source_value = f64::from(raw_source);
-    let min_required = buff_data
-        .CalculationPolicy
-        .get(5)
-        .copied()
-        .map_or(0.0, f64::from);
-    if source_value < min_required {
-        return None;
-    }
-    let conversion_factor = buff_data
-        .CalculationPolicy
-        .get(6)
-        .copied()
-        .map_or(1.0, |v| f64::from(v).max(1.0));
-    let max_value = buff_data
-        .CalculationPolicy
-        .get(7)
-        .copied()
-        .map_or(f64::from(i32::MAX), f64::from);
-
-    let calculated = ((source_value - min_required) / conversion_factor) * (modifier / 1e4);
-    let scaled = if buff_data.Id == 1102 && buff_data.Period > 0.0 {
-        // HardnessRecover is specified per second while Buff 1102 ticks on a 0.1s period.
-        calculated * f64::from(buff_data.Period)
-    } else {
-        calculated
-    };
-    Some(scaled.min(max_value).trunc() as i32)
+    let source_attr = resolve_from_attr_source(
+        None,
+        target_id,
+        instigator_id,
+        instigator_attr,
+        target_attr,
+        buff_data,
+    )?;
+    compute_from_attr_raw(source_attr, buff_data, level)
 }
 
 pub fn sync_continuous_buff_modifiers(
@@ -579,7 +625,28 @@ pub fn sync_continuous_buff_modifiers(
         .map(|b| b.prebaked_handles.clone())
         .unwrap_or_default();
 
+    let mut prev = vec![0i64; ATTR_COUNT];
+    for m in &applied_mods {
+        if m.attr_idx >= 0 && (m.attr_idx as usize) < ATTR_COUNT {
+            prev[m.attr_idx as usize] = i64::from(m.delta);
+        }
+    }
+
+    // Build an unbuffed view of the entity's own attributes so self-referencing
+    // attr-based policies (e.g. LifeMax = LifeMax * 200%) remain idempotent across re-syncs.
+    let mut unbuffed_self_attr = attr_snapshot.clone();
+    for i in 0..ATTR_COUNT {
+        if prev[i] != 0 {
+            let inc = (i64::from(unbuffed_self_attr.attributes[i].increment) - prev[i])
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            unbuffed_self_attr.attributes[i].increment = inc;
+            unbuffed_self_attr.attributes[i].current =
+                unbuffed_self_attr.attributes[i].base.saturating_add(inc);
+        }
+    }
+
     let mut desired = vec![0i64; ATTR_COUNT];
+    let mut override_targets: Vec<Option<i64>> = vec![None; ATTR_COUNT];
     for info in &buff_infos {
         let is_prebaked = prebaked_handles.contains(&info.HandleId);
         if !info.IsActive && !is_prebaked {
@@ -620,48 +687,82 @@ pub fn sync_continuous_buff_modifiers(
             continue;
         };
         let level = if info.Level > 0 { info.Level } else { 1 };
+        let use_unbuffed_self = buff_data.CalculationPolicy.get(1).copied()
+            == Some(buff_data.GameAttributeID.to_i32())
+            && !(buff_data.CalculationPolicy.get(2).copied() == Some(1)
+                && info.InstigatorId != entity_id);
+        let target_src_attr = if use_unbuffed_self {
+            &unbuffed_self_attr
+        } else {
+            &attr_snapshot
+        };
         let per_stack: i64 = match policy {
             CalculationPolicy::AddValue => i64::from(magnitude_at_level(&buff_data, level)),
             CalculationPolicy::AddRate => {
                 let modifier = magnitude_at_level(&buff_data, level);
-                if modifier == 0 {
-                    0
-                } else {
-                    let reference =
-                        compute_rate_reference(buff_data.GameAttributeID, &attr_snapshot);
-                    (f64::from(reference) * f64::from(modifier) / 1e4).round() as i64
-                }
+                i64::from(scale_rate_bp(
+                    buff_data.GameAttributeID,
+                    &attr_snapshot,
+                    modifier,
+                ))
             }
-            CalculationPolicy::AddFromAttr | CalculationPolicy::AddFromAttrRate => i64::from(
+            CalculationPolicy::AddFromAttr => i64::from(
                 compute_from_attr_delta(
                     Some(scene),
                     entity_id,
                     info.InstigatorId,
-                    &attr_snapshot,
+                    target_src_attr,
                     &buff_data,
                     level,
                 )
                 .unwrap_or(0),
             ),
+            CalculationPolicy::AddFromAttrRate => {
+                let bp = compute_from_attr_delta(
+                    Some(scene),
+                    entity_id,
+                    info.InstigatorId,
+                    target_src_attr,
+                    &buff_data,
+                    level,
+                )
+                .unwrap_or(0);
+                i64::from(scale_rate_bp(buff_data.GameAttributeID, &attr_snapshot, bp))
+            }
             CalculationPolicy::OverrideValue => {
-                if is_prebaked {
-                    0
-                } else {
-                    let override_val = magnitude_at_level(&buff_data, level);
-                    desired[attr_idx] =
-                        i64::from(override_val) - i64::from(attr_snapshot.attributes[attr_idx].base);
-                    continue;
+                if !is_prebaked {
+                    override_targets[attr_idx] =
+                        Some(i64::from(magnitude_at_level(&buff_data, level)));
                 }
+                continue;
+            }
+            CalculationPolicy::OverrideFromAttr => {
+                if !is_prebaked
+                    && let Some(source_attr) = resolve_from_attr_source(
+                        Some(scene),
+                        entity_id,
+                        info.InstigatorId,
+                        None,
+                        target_src_attr,
+                        &buff_data,
+                    )
+                    && let Some(override_val) =
+                        compute_override_from_attr(source_attr, &buff_data, level)
+                {
+                    override_targets[attr_idx] = Some(i64::from(override_val));
+                }
+                continue;
             }
             _ => 0,
         };
         desired[attr_idx] += per_stack * i64::from(stacks);
     }
 
-    let mut prev = vec![0i64; ATTR_COUNT];
-    for m in &applied_mods {
-        if m.attr_idx >= 0 && (m.attr_idx as usize) < ATTR_COUNT {
-            prev[m.attr_idx as usize] = i64::from(m.delta);
+    for i in 0..ATTR_COUNT {
+        if let Some(override_val) = override_targets[i] {
+            let non_buff_total = i64::from(attr_snapshot.attributes[i].base)
+                + (i64::from(attr_snapshot.attributes[i].increment) - prev[i]);
+            desired[i] += override_val - non_buff_total;
         }
     }
 

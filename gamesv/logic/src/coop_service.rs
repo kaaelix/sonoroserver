@@ -9,10 +9,13 @@ use serde::{Deserialize, Serialize};
 use sonoro_common::fs::FileSystem;
 use sonoro_gamesv_fs::basic_info::BasicInfo;
 use sonoro_gamesv_fs::file_util::{load_or_create_zon, parse_zon, serialize_zon};
+use sonoro_gamesv_fs::formation_info::FormationInfo;
 use sonoro_gamesv_fs::progress_info::ProgressInfo;
+use sonoro_gamesv_fs::role_info::RoleInfo;
 use sonoro_proto::enums::{
-    EMatchPlayerUiState, EPlayerTeleportState, ErrorCode, MatchFailReason, MatchTeamState,
-    WorldEnterPermission, WorldTeamLeaveReason, WorldTeamPlayerChangeType,
+    EMatchAcceptInviteResult, EMatchPlayerUiState, EPlayerTeleportState, ErrorCode,
+    MatchFailReason, MatchTeamState, WorldEnterPermission, WorldTeamLeaveReason,
+    WorldTeamPlayerChangeType,
 };
 use sonoro_proto::pb::{
     AgreeJoinResultNotify, ApplyJoinWorldNotify, ApplyerEnterSceneNotify, CancelMatchNotify,
@@ -22,8 +25,9 @@ use sonoro_proto::pb::{
     MatchTeamNotify, MatchTeamStateNotify, MovePackageNotify, MovingEntityData, PlayerDetails,
     PlayerEnterWorldTeamNotify, PlayerLeaveWorldTeamNotify, PlayerLocation,
     PlayerTeleportStateNotify, PrivateChatHistoryContentProto, Rotator, StartMatchNotify,
-    SyncPlayerLocationNotify, Vector, WorldTeamPlayerFightInfo, WorldTeamPlayerInfo,
-    WorldTeamPlayerInfoChangeNotify, WorldTeamRoleInfo,
+    SyncPlayerLocationNotify, TeamMatchAcceptInviteNotify, TeamMatchInviteNotify,
+    TeamMatchInviteRetToHostNotify, TeamTeleportStartNotify, Vector, WorldTeamPlayerFightInfo,
+    WorldTeamPlayerInfo, WorldTeamPlayerInfoChangeNotify, WorldTeamRoleInfo,
 };
 use sonoro_proto::wire::PbMessage;
 
@@ -227,17 +231,61 @@ impl CoopService {
 
     pub fn register_online(&self, mut entry: OnlinePlayer) {
         let mut online = self.online.lock().unwrap_or_else(|p| p.into_inner());
-        if entry.room_host_id == 0 {
+        if entry.room_host_id <= 0 {
             entry.room_host_id = entry.player_id;
         }
         if let Some(prev) = online.get(&entry.player_id) {
-            entry.room_host_id = prev.room_host_id;
+            if prev.room_host_id > 0 {
+                entry.room_host_id = prev.room_host_id;
+            }
             entry.enter_permission = prev.enter_permission;
+            if entry.cur_role_id <= 0 && prev.cur_role_id > 0 {
+                entry.cur_role_id = prev.cur_role_id;
+            }
+            if entry.match_host_id == 0 && prev.match_host_id > 0 {
+                entry.match_inst_id = prev.match_inst_id;
+                entry.match_host_id = prev.match_host_id;
+                entry.match_ready = prev.match_ready;
+                entry.match_confirm = prev.match_confirm;
+                entry.match_ui_state = prev.match_ui_state;
+            }
         }
+        entry.is_can_lobby_online = entry.enter_permission != WorldEnterPermission::ForbidJoin;
         online.insert(entry.player_id, entry);
     }
 
     pub fn unregister_online(&self, player_id: i32) {
+        let (in_match, room_host, guest_ids) = {
+            let online = self.online.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(me) = online.get(&player_id) else {
+                return;
+            };
+            let in_match = me.match_host_id != 0 || me.match_inst_id != 0;
+            let room_host = me.room_host_id;
+            let guest_ids: Vec<i32> = if room_host == player_id {
+                online
+                    .values()
+                    .filter(|p| p.room_host_id == player_id && p.player_id != player_id)
+                    .map(|p| p.player_id)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (in_match, room_host, guest_ids)
+        };
+
+        if in_match {
+            self.cancel_match(player_id);
+        }
+        if room_host > 0 && room_host != player_id {
+            self.leave_or_kick_room(player_id, WorldTeamLeaveReason::Logout);
+        } else if !guest_ids.is_empty() {
+            self.leave_or_kick_room(player_id, WorldTeamLeaveReason::Logout);
+            for gid in guest_ids {
+                self.leave_or_kick_room(gid, WorldTeamLeaveReason::Dissolve);
+            }
+        }
+
         let mut online = self.online.lock().unwrap_or_else(|p| p.into_inner());
         online.remove(&player_id);
     }
@@ -564,7 +612,7 @@ impl CoopService {
                     continue;
                 }
                 let det = to_details(p, member_count);
-                let wi = to_world_team_member(p, det);
+                let wi = to_world_team_member(p, det, Some(fs));
                 if p.player_id == guest_id {
                     guest_world_info = Some(wi.clone());
                 }
@@ -949,8 +997,11 @@ impl CoopService {
                 if p.player_id == player_id {
                     continue;
                 }
-                if p.match_inst_id == inst_id && matched_ids.len() < 4 {
+                if p.match_inst_id == inst_id && p.match_host_id == 0 && matched_ids.len() < 4 {
                     p.match_host_id = player_id;
+                    p.match_ready = true;
+                    p.match_confirm = false;
+                    p.match_ui_state = EMatchPlayerUiState::Confirm;
                     matched_ids.push(p.player_id);
                 }
             }
@@ -1001,13 +1052,245 @@ impl CoopService {
             },
         );
         let mut online = self.online.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(me) = online.get_mut(&player_id) {
-            me.match_inst_id = 0;
-            me.match_host_id = 0;
-            me.match_ready = false;
-            me.match_confirm = false;
-            me.match_ui_state = EMatchPlayerUiState::Wait;
+        let host_id = online.get(&player_id).map_or(0, |p| {
+            if p.match_host_id > 0 {
+                p.match_host_id
+            } else {
+                player_id
+            }
+        });
+        for p in online.values_mut() {
+            if p.player_id == player_id || (host_id > 0 && p.match_host_id == host_id) {
+                p.match_inst_id = 0;
+                p.match_host_id = 0;
+                p.match_ready = false;
+                p.match_confirm = false;
+                p.match_ui_state = EMatchPlayerUiState::Wait;
+            }
         }
+    }
+
+    pub fn invite_room_to_match(&self, host_id: i32, inst_id: i32) {
+        let targets: Vec<i32> = {
+            let mut online = self.online.lock().unwrap_or_else(|p| p.into_inner());
+            let effective_host = online.get(&host_id).map_or(host_id, |me| {
+                if me.room_host_id > 0 {
+                    me.room_host_id
+                } else {
+                    host_id
+                }
+            });
+            if let Some(me) = online.get_mut(&host_id) {
+                me.match_inst_id = inst_id;
+                me.match_host_id = host_id;
+                me.match_ready = true;
+                me.match_confirm = true;
+                me.match_ui_state = EMatchPlayerUiState::Ready;
+            }
+            online
+                .values()
+                .filter(|p| p.room_host_id == effective_host && p.player_id != host_id)
+                .map(|p| p.player_id)
+                .collect()
+        };
+        let invite = TeamMatchInviteNotify {
+            InstId: inst_id,
+            HostId: host_id,
+        };
+        for tid in targets {
+            let _ = self.push_to_player(tid, TeamMatchInviteNotify::MSG_ID, &invite);
+        }
+        let _ = self.push_to_player(
+            host_id,
+            TeamMatchInviteRetToHostNotify::MSG_ID,
+            &TeamMatchInviteRetToHostNotify {
+                ErrorCode: Some(ErrorCode::Success),
+                InstId: inst_id,
+            },
+        );
+    }
+
+    pub fn respond_to_match_invite(
+        &self,
+        player_id: i32,
+        host_id: i32,
+        inst_id: i32,
+        accept_result: EMatchAcceptInviteResult,
+    ) {
+        let _ = self.push_to_player(
+            host_id,
+            TeamMatchAcceptInviteNotify::MSG_ID,
+            &TeamMatchAcceptInviteNotify {
+                PlayerId: player_id,
+                AcceptResult: Some(accept_result),
+            },
+        );
+
+        let accepted = accept_result == EMatchAcceptInviteResult::Accept;
+        if !accepted {
+            let fail_reason = if accept_result == EMatchAcceptInviteResult::TimeOutRefuse {
+                MatchFailReason::TimeOut
+            } else {
+                MatchFailReason::NotAccept
+            };
+            let _ = self.push_to_player(
+                host_id,
+                MatchFailNotify::MSG_ID,
+                &MatchFailNotify {
+                    Reason: Some(fail_reason),
+                },
+            );
+            let mut online = self.online.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(me) = online.get_mut(&player_id)
+                && me.match_host_id == host_id
+            {
+                me.match_inst_id = 0;
+                me.match_host_id = 0;
+                me.match_ready = false;
+                me.match_confirm = false;
+                me.match_ui_state = EMatchPlayerUiState::Wait;
+            }
+            return;
+        }
+
+        let (peer_ids, team_players) = {
+            let mut online = self.online.lock().unwrap_or_else(|p| p.into_inner());
+            let target_inst = if inst_id > 0 {
+                inst_id
+            } else {
+                online.get(&host_id).map_or(0, |h| h.match_inst_id)
+            };
+            if let Some(host) = online.get_mut(&host_id) {
+                if host.match_inst_id == 0 && target_inst > 0 {
+                    host.match_inst_id = target_inst;
+                }
+                if host.match_host_id == 0 {
+                    host.match_host_id = host_id;
+                }
+                host.match_ready = true;
+                host.match_confirm = true;
+                host.match_ui_state = EMatchPlayerUiState::Ready;
+            }
+            if let Some(me) = online.get_mut(&player_id) {
+                me.match_inst_id = target_inst;
+                me.match_host_id = host_id;
+                me.match_ready = true;
+                me.match_confirm = true;
+                me.match_ui_state = EMatchPlayerUiState::Ready;
+            }
+            let peer_ids: Vec<i32> = online
+                .values()
+                .filter(|p| p.player_id == host_id || p.match_host_id == host_id)
+                .map(|p| p.player_id)
+                .collect();
+            let team_players: Vec<MatchPlayerInfo> = peer_ids
+                .iter()
+                .filter_map(|pid| online.get(pid))
+                .map(|mp| MatchPlayerInfo {
+                    PlayerId: mp.player_id,
+                    PlayerName: mp.name.as_bytes().to_vec(),
+                    IsConfirm: mp.match_confirm,
+                    IsReady: mp.match_ready,
+                    MatchUiState: Some(mp.match_ui_state),
+                    ..Default::default()
+                })
+                .collect();
+            (peer_ids, team_players)
+        };
+
+        let team_notify = MatchTeamNotify {
+            TeamInfo: Some(MatchTeamInfo {
+                HostId: host_id,
+                PlayerInfos: team_players,
+                TeamState: Some(MatchTeamState::ReadyConfirm),
+                ..Default::default()
+            }),
+        };
+        let state_notify = MatchTeamStateNotify {
+            TeamState: Some(MatchTeamState::ReadyConfirm),
+        };
+        for pid in peer_ids {
+            let _ = self.push_to_player(pid, MatchTeamNotify::MSG_ID, &team_notify);
+            let _ = self.push_to_player(pid, MatchTeamStateNotify::MSG_ID, &state_notify);
+        }
+    }
+
+    pub fn prepare_team_enter_inst(
+        &self,
+        player_id: i32,
+        requested_inst_id: i32,
+        invite_teammates: bool,
+    ) -> i32 {
+        let (target_inst_id, teammate_ids) = {
+            let mut online = self.online.lock().unwrap_or_else(|p| p.into_inner());
+            let (target_inst_id, match_host, room_host) = online.get(&player_id).map_or(
+                (requested_inst_id, player_id, player_id),
+                |me| {
+                    let inst = if requested_inst_id > 0 {
+                        requested_inst_id
+                    } else {
+                        me.match_inst_id
+                    };
+                    let mh = if me.match_host_id > 0 {
+                        me.match_host_id
+                    } else {
+                        player_id
+                    };
+                    let rh = if me.room_host_id > 0 {
+                        me.room_host_id
+                    } else {
+                        player_id
+                    };
+                    (inst, mh, rh)
+                },
+            );
+            if target_inst_id <= 0 {
+                return 0;
+            }
+            if let Some(me) = online.get_mut(&player_id) {
+                me.match_inst_id = target_inst_id;
+            }
+            let mut teammates = Vec::new();
+            for p in online.values_mut() {
+                if p.player_id == player_id {
+                    continue;
+                }
+                let in_match = p.match_host_id == match_host && match_host > 0;
+                let in_room = p.room_host_id == room_host && room_host > 0;
+                if in_match || in_room {
+                    p.match_inst_id = target_inst_id;
+                    if p.match_host_id == 0 {
+                        p.match_host_id = match_host;
+                    }
+                    teammates.push(p.player_id);
+                }
+            }
+            (target_inst_id, teammates)
+        };
+
+        let enter_start = MatchTeamStateNotify {
+            TeamState: Some(MatchTeamState::EnterInstStart),
+        };
+        let teleport_start = TeamTeleportStartNotify {
+            PlayerId: player_id,
+            TimeoutSec: 15,
+        };
+        let _ = self.push_to_player(player_id, MatchTeamStateNotify::MSG_ID, &enter_start);
+        for tid in teammate_ids {
+            let _ = self.push_to_player(tid, MatchTeamStateNotify::MSG_ID, &enter_start);
+            let _ = self.push_to_player(tid, TeamTeleportStartNotify::MSG_ID, &teleport_start);
+            if invite_teammates {
+                let _ = self.push_to_player(
+                    tid,
+                    TeamMatchInviteNotify::MSG_ID,
+                    &TeamMatchInviteNotify {
+                        InstId: target_inst_id,
+                        HostId: player_id,
+                    },
+                );
+            }
+        }
+        target_inst_id
     }
 
     pub fn broadcast_all<M: PbMessage>(&self, exclude_id: i32, msg_id: u16, msg: &M) -> usize {
@@ -1237,7 +1520,50 @@ fn to_details(p: &OnlinePlayer, count: i32) -> PlayerDetails {
     }
 }
 
-fn to_world_team_member(p: &OnlinePlayer, details: PlayerDetails) -> WorldTeamPlayerInfo {
+fn resolve_member_role_and_level(p: &OnlinePlayer, fs: Option<&FileSystem>) -> (i32, i32) {
+    let fallback_level = p.level.max(1);
+    let Some(fs) = fs else {
+        return (p.cur_role_id, fallback_level);
+    };
+    let mut role_id = p.cur_role_id;
+    if role_id <= 0
+        && let Ok(Some(bytes)) = fs.read_file(&format!("player/{}/formation_info", p.player_id))
+        && let Ok(form_info) = parse_zon::<FormationInfo>(&bytes)
+    {
+        let idx = usize::try_from(form_info.cur_formation)
+            .ok()
+            .filter(|&i| i < form_info.formations.len())
+            .unwrap_or(0);
+        if let Some(form) = form_info.formations.get(idx) {
+            role_id = form.cur_role;
+            if role_id <= 0 {
+                role_id = form
+                    .roles
+                    .iter()
+                    .flatten()
+                    .next()
+                    .map_or(0, |r| r.role_id);
+            }
+        }
+    }
+    let role_level = if role_id > 0
+        && let Ok(Some(bytes)) =
+            fs.read_file(&format!("player/{}/{}/{role_id}", p.player_id, RoleInfo::DATA_DIR))
+        && let Ok(ri) = parse_zon::<RoleInfo>(&bytes)
+    {
+        ri.level.max(1)
+    } else {
+        fallback_level
+    };
+    (role_id, role_level)
+}
+
+fn to_world_team_member(
+    p: &OnlinePlayer,
+    details: PlayerDetails,
+    fs: Option<&FileSystem>,
+) -> WorldTeamPlayerInfo {
+    let (role_id, role_level) = resolve_member_role_and_level(p, fs);
     WorldTeamPlayerInfo {
         PlayerId: p.player_id,
         PlayerName: p.name.as_bytes().to_vec(),
@@ -1245,10 +1571,10 @@ fn to_world_team_member(p: &OnlinePlayer, details: PlayerDetails) -> WorldTeamPl
         Level: p.level,
         Signature: p.signature.as_bytes().to_vec(),
         FightInfo: Some(WorldTeamPlayerFightInfo {
-            CurRoleId: p.cur_role_id,
+            CurRoleId: role_id,
             RoleInfos: vec![WorldTeamRoleInfo {
-                RoleId: p.cur_role_id,
-                RoleLevel: 90,
+                RoleId: role_id,
+                RoleLevel: role_level,
                 ..Default::default()
             }],
         }),

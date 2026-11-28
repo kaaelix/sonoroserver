@@ -434,7 +434,21 @@ pub fn handle_teleport_to_target_request(
         &state.fs,
         state.player_id,
     );
-    if cur_map_id == tp_map_id {
+    let cur_inst_id = state.scene.as_ref().map_or(0, |s| s.instance_id);
+    let target_inst_id = if tp.inst_id > 0
+        && state
+            .assets
+            .tables
+            .instance_dungeon
+            .get_data_by_id(&tp.inst_id)
+            .is_some()
+    {
+        tp.inst_id
+    } else {
+        state.assets.resolve_instance_id_for_map(tp_map_id)
+    };
+
+    if cur_inst_id == target_inst_id {
         if let Some(scene) = state.scene.as_mut() {
             scene.force_battle_state(false);
             let mut battle_data = Vec::new();
@@ -466,19 +480,29 @@ pub fn handle_teleport_to_target_request(
                 ..Default::default()
             },
         );
+        if let Some(coop) = state.coop_service.as_ref() {
+            let role_nid = state
+                .scene
+                .as_ref()
+                .map_or(0, |s| s.current_role_entity_id());
+            coop.notify_teleport_state(
+                state.player_id,
+                EPlayerTeleportState::Default,
+                role_nid,
+                target_pos,
+                [0.0, 0.0, yaw],
+            );
+        }
     } else {
-        let target_inst_id = if tp.inst_id > 0
-            && state
-                .assets
-                .tables
-                .instance_dungeon
-                .get_data_by_id(&tp.inst_id)
-                .is_some()
-        {
-            tp.inst_id
-        } else {
-            state.assets.resolve_instance_id_for_map(tp_map_id)
-        };
+        if let Some(coop) = state.coop_service.as_ref() {
+            coop.notify_teleport_state(
+                state.player_id,
+                EPlayerTeleportState::Teleporting,
+                0,
+                target_pos,
+                [0.0, 0.0, yaw],
+            );
+        }
         enqueue_scene_transfer(state, events, target_inst_id, target_pos, yaw)?;
     }
 

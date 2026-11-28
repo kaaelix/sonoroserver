@@ -4,7 +4,6 @@ use serde_json::Value;
 use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_data::asset_indexes::{entity_world_pos, entity_world_rot};
 use sonoro_gamesv_data::tables::entity_components::extra::{ExtraEntry, HookInteractConfig};
-use sonoro_gamesv_fs::formation_info::FormationRole;
 use crate::network::state::PlayerComponentStorage;
 use sonoro_gamesv_logic::component::entity::small::{
     EntityType, LiftComponent as EntityLiftComponent, MoveSplineComponent, MoveToPointComponent,
@@ -25,10 +24,11 @@ use sonoro_gamesv_logic::helpers::{
     condition, consume, energy, entity_proto, gameplay_tags, gravity, level_play, map as map_helper,
     pb_kv, reward, role as role_helper, spline_state,
 };
+use sonoro_gamesv_logic::scene::{Scene, now_millis};
 use sonoro_proto::enums::{
-    ArchiveType, EAttributeType, EControlState, EPlayerTeleportState, ErrorCode, GameCtxType,
-    GravityFlipType, HookInteractActionType, MoveStatus, PilotThrowOperationType, SneakFinishType,
-    TeleportReason,
+    ArchiveType, EAttributeType, EControlState, EPlayerTeleportState, ERechallengeResultResult,
+    ErrorCode, GameCtxType, GravityFlipType, HookInteractActionType, MoveStatus,
+    PilotThrowOperationType, PlayEnterOrExitPollutionRangeType, SneakFinishType, TeleportReason,
 };
 use sonoro_proto::pb::{
     AcceptEntrustRequest, AcceptEntrustResponse, AccessPasserbyNpcSpawnerRequest,
@@ -46,12 +46,12 @@ use sonoro_proto::pb::{
     CaptureBatchEntityResponse, CaptureEntityRequest, CaptureEntityResponse,
     ChangeEntityRoleRequest, ChangeEntityRoleResponse, ChangeEntityStateRequest,
     ChangeEntityStateResponse, CharacterMoveToPointEndPush, ChatMutePlayerRequest,
-    ChatMutePlayerResponse, CombineEntitiesRequest, CombineEntitiesResponse,
-    CommonOrganResetTimeRequest, CommonOrganResetTimeResponse, CommonTagData,
-    CommonTouchUiSettingUpdateRequest, CommonTouchUiSettingUpdateResponse,
+    ChatMutePlayerResponse, CombatReceivePackNotify, CombineEntitiesRequest,
+    CombineEntitiesResponse, CommonOrganResetTimeRequest, CommonOrganResetTimeResponse,
+    CommonTagData, CommonTouchUiSettingUpdateRequest, CommonTouchUiSettingUpdateResponse,
     ConnectorCanConnectRequest, ConnectorCanConnectResponse, ConnectorConnectEntityNotify,
     ConnectorConnectEntityRequest, ConnectorConnectEntityResponse, ControlPointData,
-    DiscardWeaponPush, DiscardWeaponRequest, DiscardWeaponResponse,
+    DecalAddNotify, DecalInfo, DiscardWeaponPush, DiscardWeaponRequest, DiscardWeaponResponse,
     DissolveCombineRelationRequest, DissolveCombineRelationResponse, ElevatorMoveNotify,
     ElevatorStateChangeRequest, ElevatorStateChangeResponse, EnrichmentAreaRequest,
     EnrichmentAreaResponse, EntityAdsorbRequest, EntityAdsorbResponse, EntityBattleInfoRequest,
@@ -77,53 +77,57 @@ use sonoro_proto::pb::{
     HookLockPointFinishResponse, HookLockPointRequest, HookLockPointResponse, InstDetailEntry,
     InstEntityTeleportRequest, InstEntityTeleportResponse, InstEntranceDetailRequest,
     InstEntranceDetailResponse, InteractiveUpdateRequest, InteractiveUpdateResponse,
-    InviteRechallengeRequest, InviteRechallengeResponse, LastBigSceneMiniMapInfoRequest,
-    LastBigSceneMiniMapInfoResponse, LevelSequenceFrameEventActionRequest,
-    LevelSequenceFrameEventActionResponse, LoadingAreaConfig, LoadingLevelAreaRequest,
-    LoadingLevelAreaResponse, LoopTeleportVolumeActionRequest, LoopTeleportVolumeActionResponse,
+    InviteRechallengeNotify, InviteRechallengeRequest, InviteRechallengeResponse,
+    LastBigSceneMiniMapInfoRequest, LastBigSceneMiniMapInfoResponse,
+    LevelSequenceFrameEventActionRequest, LevelSequenceFrameEventActionResponse,
+    LoadingAreaConfig, LoadingLevelAreaRequest, LoadingLevelAreaResponse,
+    LoopTeleportVolumeActionRequest, LoopTeleportVolumeActionResponse,
     LowMemoryChangeSceneFinishRequest, LowMemoryChangeSceneFinishResponse, LstBattleRecordRequest,
     LstBattleRecordResponse, MaterialReplaceRequest, MaterialReplaceResponse,
     MobileButtonSettingUpdateRequest, MobileButtonSettingUpdateResponse,
     MonsterPatrolPointReachedRequest, MonsterPatrolPointReachedResponse, MovePackageNotify,
     MovePlacementNotify, MovePlacementRequest, MovePlacementResponse, MoveReplaySample,
     MoveSceneItemPush, MoveSceneItemResetPositionRequest, MoveSceneItemResetPositionResponse,
-    MovingEntityData, MulFishingIllustratedRewardRequest, MulFishingIllustratedRewardResponse,
-    NavigationFindPathRequest, NavigationFindPathResponse, NpcTraceFailedRequest,
-    NpcTraceFailedResponse, OnlineMotorActivityLevelRequest, OnlineMotorActivityLevelResponse,
-    PassPortalRequest, PassPortalResponse, PhotographPush, PickUpDropItemRequest,
-    PickUpDropItemResponse, PilotThrowOperationRequest, PilotThrowOperationResponse,
-    PlayEntityMontagePush, PlayerCreatePsnSessionRequest, PlayerCreatePsnSessionResponse,
-    PlayerEnterPollutionRequest, PlayerEnterPollutionResponse, PlayerNetStateBackServerPush,
-    PlayerPsnInfoGetRequest, PlayerPsnInfoGetResponse, PlayerReviveNotify, PlayerSceneGroupData,
-    PlayerSceneGroupDataList, PlayerXboxInfoGetRequest, PlayerXboxInfoGetResponse,
-    ProgressBarFinishRequest, ProgressBarFinishResponse, PsnSettingUpdateRequest,
-    PsnSettingUpdateResponse, QuestFastReturnPosRequest, QuestFastReturnPosResponse,
-    QuestNpcMoveOverRequest, QuestNpcMoveOverResponse, QuestReadyForGiveUpRequest,
-    QuestReadyForGiveUpResponse, ReadDisplayInfoRequest, ReadDisplayInfoResponse,
-    ReceiveRechallengeRequest, ReceiveRechallengeResponse, RemoteBatchCollectRequest,
-    RemoteBatchCollectResponse, RemoveTreasureBoxSlotRequest, RemoveTreasureBoxSlotResponse,
-    ReorderFormationRequest, ReorderFormationResponse, ResonantChainOptionalLimitRequest,
+    MoveSplineStatusNotify, MovingEntityData, MulFishingIllustratedRewardRequest,
+    MulFishingIllustratedRewardResponse, NavigationFindPathRequest, NavigationFindPathResponse,
+    NpcTraceFailedRequest, NpcTraceFailedResponse, OnlineMotorActivityLevelRequest,
+    OnlineMotorActivityLevelResponse, PassPortalRequest, PassPortalResponse, PhotographPush,
+    PickUpDropItemRequest, PickUpDropItemResponse, PilotThrowOperationRequest,
+    PilotThrowOperationResponse, PlayEntityMontagePush, PlayerCreatePsnSessionRequest,
+    PlayerCreatePsnSessionResponse, PlayerEnterPollutionRequest, PlayerEnterPollutionResponse,
+    PlayerNetStateBackServerPush, PlayerPsnInfoGetRequest, PlayerPsnInfoGetResponse,
+    PlayerReviveNotify, PlayerSceneGroupData, PlayerSceneGroupDataList, PlayerXboxInfoGetRequest,
+    PlayerXboxInfoGetResponse, ProgressBarFinishRequest, ProgressBarFinishResponse,
+    PsnSettingUpdateRequest, PsnSettingUpdateResponse, QuestFastReturnPosRequest,
+    QuestFastReturnPosResponse, QuestNpcMoveOverRequest, QuestNpcMoveOverResponse,
+    QuestReadyForGiveUpRequest, QuestReadyForGiveUpResponse, ReadDisplayInfoRequest,
+    ReadDisplayInfoResponse, ReceiveRechallengeNotify, ReceiveRechallengeRequest,
+    ReceiveRechallengeResponse, RemoteBatchCollectRequest, RemoteBatchCollectResponse,
+    RemoveTreasureBoxSlotRequest, RemoveTreasureBoxSlotResponse, ReorderFormationRequest,
+    ReorderFormationResponse, ResonantChainOptionalLimitRequest,
     ResonantChainOptionalLimitResponse, ReviveRequest, ReviveResponse,
     RoadNetworkEntityUpdateCurRoadPush, RoleGood, RoleProperSettle, Rotator,
     SceneGroupDataAndCurFormationEntityRequest, SceneGroupDataAndCurFormationEntityResponse,
     SceneItemBlackboardParamValueOneof, SceneItemMoveSplineRequest, SceneItemMoveSplineResponse,
     SceneItemMoveTargetRequest, SceneItemMoveTargetResponse, SceneItemSequenceFrameEndRequest,
     SceneItemSequenceFrameEndResponse, SceneItemSequenceFrameStartRequest,
-    SceneItemSequenceFrameStartResponse, SceneItemSetPosSenderRequest,
-    SceneItemSetPosSenderResponse, SceneItemSplineRuntimeDataDistanceOneof,
-    SceneItemSplineRuntimeDataRotOneof, SceneItemStateRequest, SceneItemStateResponse,
-    SceneItemStopRequest, SceneItemStopResponse, SceneModeChangeFinishRequest,
-    SceneModeChangeFinishResponse, SceneRoleInformation, SeamlessTeleportRequest,
-    SeamlessTeleportResponse, SeamlessTeleportVehicleRequest, SeamlessTeleportVehicleResponse,
-    SetBaoziStateRequest, SetBaoziStateResponse, SetFanNumberOfTurnsRequest,
-    SetFanNumberOfTurnsResponse, SetFanStateRequest, SetFanStateResponse, SetInitTagRequest,
-    SetInitTagResponse, SingleItemInfo, SitChairRequest, SitChairResponse, SneakFinishRequest,
-    SneakFinishResponse, SneakRequest, SneakResponse, SneakTimeRequest, SneakTimeResponse,
-    SplineMoveRequest, SplineMoveResponse, SplinePositionUpdateRequest,
-    SplinePositionUpdateResponse, StopHoldHandNotify, StopMoveSplineRequest,
-    StopMoveSplineResponse, SubmitWalkingPatternPointRequest, SubmitWalkingPatternPointResponse,
-    Summon2Request, Summon2Response, SummonRandomRequest, SummonRandomResponse,
-    SwitchBattleModeRequest, SwitchBattleModeResponse, TeleportNotify, TeleportUpdateNotify,
+    SceneItemSequenceFrameStartResponse, SceneItemSetPosSenderNotify,
+    SceneItemSetPosSenderRequest, SceneItemSetPosSenderResponse,
+    SceneItemSplineRuntimeDataDistanceOneof, SceneItemSplineRuntimeDataRotOneof,
+    SceneItemStateRequest, SceneItemStateResponse, SceneItemStopRequest, SceneItemStopResponse,
+    SceneModeChangeFinishRequest, SceneModeChangeFinishResponse, SceneRoleInformation,
+    SeamlessTeleportRequest, SeamlessTeleportResponse, SeamlessTeleportVehicleRequest,
+    SeamlessTeleportVehicleResponse, SetBaoziStateRequest, SetBaoziStateResponse,
+    SetFanNumberOfTurnsRequest, SetFanNumberOfTurnsResponse, SetFanStateRequest,
+    SetFanStateResponse, SetInitTagRequest, SetInitTagResponse, SingleItemInfo, SitChairRequest,
+    SitChairResponse, SneakFinishRequest, SneakFinishResponse, SneakRequest, SneakResponse,
+    SneakTimeRequest, SneakTimeResponse, SplineMoveRequest, SplineMoveResponse,
+    SplinePositionUpdateRequest, SplinePositionUpdateResponse, StopHoldHandNotify,
+    StopMoveSplineRequest, StopMoveSplineResponse, SubmitWalkingPatternPointRequest,
+    SubmitWalkingPatternPointResponse, Summon2Request, Summon2Response, SummonRandomNotify,
+    SummonRandomRequest, SummonRandomResponse, SummonRequestInfo, SwitchBattleModeRequest,
+    SwitchBattleModeResponse,
+    TeleportNotify, TeleportUpdateNotify,
     TestSpawnTemplateEntityPush, TimelineTraceControlRequest, TimelineTraceControlResponse,
     TimelineTraceExitRequest, TimelineTraceExitResponse, TimelineTraceStartRequest,
     TimelineTraceStartResponse, TreasureBoxSlotAllInfoNotify, TreasureBoxSlotInfo,
@@ -246,6 +250,117 @@ fn safe_float_to_i64(f: f32) -> i64 {
     f.clamp(-9_000_000_000_000_000_000.0, 9_000_000_000_000_000_000.0) as i64
 }
 
+fn collect_tag_strings_from_json(
+    val: &Value,
+    remaps: &sonoro_gamesv_data::data_tables::Table<
+        sonoro_gamesv_data::tables::gameplay_tag_remap::GameplayTagRemap,
+        i32,
+    >,
+    out: &mut std::collections::HashMap<i32, String>,
+) {
+    match val {
+        Value::String(s) => {
+            if s.contains('.')
+                && let Some(id) = gameplay_tags::id_from_name(remaps, s)
+            {
+                out.entry(id).or_insert_with(|| s.clone());
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                collect_tag_strings_from_json(item, remaps, out);
+            }
+        }
+        Value::Object(map) => {
+            for v in map.values() {
+                collect_tag_strings_from_json(v, remaps, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn tag_reverse_lookup(assets: &Assets) -> &'static std::collections::HashMap<i32, String> {
+    static INDEX: std::sync::OnceLock<std::collections::HashMap<i32, String>> =
+        std::sync::OnceLock::new();
+    INDEX.get_or_init(|| {
+        let remaps = &assets.tables.gameplay_tag_remap;
+        let mut out = std::collections::HashMap::with_capacity(1024);
+        const SEED_TAGS: &[&str] = &[
+            "关卡.Common.状态.常态",
+            "关卡.Common.状态.激活",
+            "关卡.Common.状态.完成",
+            "关卡.Common.状态.销毁",
+            "关卡.Common.状态.解锁",
+            "关卡.Common.状态.锁定",
+            "关卡.Common.状态.封锁",
+            "关卡.Common.状态.失败",
+            "关卡.Common.状态.休眠",
+            "关卡.Common.状态.交互中",
+            "关卡.Common.状态.准备中",
+            "关卡.Common.状态.低压",
+            "关卡.Common.状态.高压",
+            "关卡.Common.状态.死眼命中",
+            "关卡.Common.状态.场景物件交互中",
+            "关卡.Common.状态.出生",
+            "关卡.Common.a79721bf.常态",
+            "关卡.Common.a79721bf.激活",
+            "关卡.Common.a79721bf.锁定",
+            "关卡.Common.表现.7a21323a.常态",
+            "关卡.Common.表现.娃娃机.常态",
+            "关卡.Common.表现.娃娃机.进行中",
+            "关卡.电梯.上升",
+            "关卡.电梯.下降",
+        ];
+        for &name in SEED_TAGS {
+            if let Some(id) = gameplay_tags::id_from_name(remaps, name) {
+                out.entry(id).or_insert_with(|| name.to_string());
+            }
+        }
+        const TAG_TABLES: &[&str] = &[
+            "AiStateMachineConfig",
+            "CommonParam",
+            "Condition",
+            "ElementalBoxDefine",
+            "EntityFsm",
+            "EntityState",
+            "FormationProperty",
+            "InteractData",
+            "LevelPlayData",
+            "PlayerStateRestriction",
+            "TemplateConfig",
+        ];
+        for table in TAG_TABLES {
+            for row in &assets.read_raw_json_array(table) {
+                collect_tag_strings_from_json(row, remaps, &mut out);
+            }
+        }
+        out
+    })
+}
+
+fn find_tag_name_in_json(
+    val: &Value,
+    remaps: &sonoro_gamesv_data::data_tables::Table<
+        sonoro_gamesv_data::tables::gameplay_tag_remap::GameplayTagRemap,
+        i32,
+    >,
+    tag_id: i32,
+) -> Option<String> {
+    match val {
+        Value::String(s) => (s.contains('.')
+            && gameplay_tags::id_from_name(remaps, s) == Some(tag_id))
+        .then(|| s.clone()),
+        Value::Array(arr) => arr
+            .iter()
+            .find_map(|item| find_tag_name_in_json(item, remaps, tag_id)),
+        Value::Object(map) => map
+            .values()
+            .find_map(|v| find_tag_name_in_json(v, remaps, tag_id)),
+        _ => None,
+    }
+}
+
 fn state_name_from_tag_id(
     state: &State,
     map_id: i32,
@@ -256,38 +371,36 @@ fn state_name_from_tag_id(
         return None;
     }
     let remaps = &state.assets.tables.gameplay_tag_remap;
-    const CANDIDATES: &[&str] = &[
-        "关卡.Common.状态.常态",
-        "关卡.Common.状态.激活",
-        "关卡.Common.状态.完成",
-        "关卡.Common.状态.销毁",
-        "关卡.Common.状态.解锁",
-        "关卡.Common.状态.锁定",
-        "关卡.Common.状态.封锁",
-        "关卡.Common.状态.失败",
-        "关卡.Common.状态.交互中",
-        "关卡.Common.状态.准备中",
-        "关卡.Common.状态.低压",
-        "关卡.Common.状态.高压",
-        "关卡.Common.状态.死眼命中",
-        "关卡.Common.状态.场景物件交互中",
-        "关卡.Common.a79721bf.常态",
-        "关卡.Common.a79721bf.激活",
-        "关卡.Common.表现.7a21323a.常态",
-        "关卡.Common.表现.娃娃机.常态",
-        "关卡.Common.表现.娃娃机.进行中",
-    ];
-    for &name in CANDIDATES {
-        if gameplay_tags::id_from_name(remaps, name) == Some(tag_id) {
-            return Some(name.to_string());
-        }
+    if let Some(found) = tag_reverse_lookup(&state.assets).get(&tag_id) {
+        return Some(found.clone());
     }
-    if let Some(lcfg) = state.assets.find_level_entity(map_id, entity_cfg_id)
-        && let Some(esc) = &lcfg.ComponentsData.EntityStateComponent
-        && let Some(st) = &esc.State
-        && gameplay_tags::id_from_name(remaps, st) == Some(tag_id)
-    {
-        return Some(st.clone());
+    if let Some(lcfg) = state.assets.find_level_entity(map_id, entity_cfg_id) {
+        if let Some(esc) = &lcfg.ComponentsData.EntityStateComponent {
+            if let Some(st) = &esc.State
+                && gameplay_tags::id_from_name(remaps, st) == Some(tag_id)
+            {
+                return Some(st.clone());
+            }
+            for beh in &esc.StateChangeBehaviors {
+                if let Some(found) = find_tag_name_in_json(beh, remaps, tag_id) {
+                    return Some(found);
+                }
+            }
+        }
+        if let Some(tpl) = state.assets.find_template_config(&lcfg.BlueprintType)
+            && let Some(esc) = &tpl.ComponentsData.EntityStateComponent
+        {
+            if let Some(st) = &esc.State
+                && gameplay_tags::id_from_name(remaps, st) == Some(tag_id)
+            {
+                return Some(st.clone());
+            }
+            for beh in &esc.StateChangeBehaviors {
+                if let Some(found) = find_tag_name_in_json(beh, remaps, tag_id) {
+                    return Some(found);
+                }
+            }
+        }
     }
     None
 }
@@ -2103,7 +2216,7 @@ pub fn handle_move_scene_item_reset_position_request(
     state: &mut State,
     req: MoveSceneItemResetPositionRequest,
 ) -> Result<MoveSceneItemResetPositionResponse, String> {
-    let (cfg_id, reset_pos) = if let Some(scene) = state.scene.as_mut()
+    let (cfg_id, reset_pos, reset_rot) = if let Some(scene) = state.scene.as_mut()
         && let Some(&idx) = scene.net_id_map.get(&req.EntityId)
     {
         let cfg_id = scene.entities[idx].config.config_id;
@@ -2117,8 +2230,8 @@ pub fn handle_move_scene_item_reset_position_request(
         let mut cpack = Vec::new();
         if scene.set_entity_visibility(req.EntityId, true, &mut cpack) && !cpack.is_empty() {
             let _ = state.conn.push_msg(
-                sonoro_proto::pb::CombatReceivePackNotify::MSG_ID,
-                &sonoro_proto::pb::CombatReceivePackNotify { Data: cpack },
+                CombatReceivePackNotify::MSG_ID,
+                &CombatReceivePackNotify { Data: cpack },
             );
         }
         if cfg_id > 0 {
@@ -2134,13 +2247,18 @@ pub fn handle_move_scene_item_reset_position_request(
             info.set_key_int(&format!("be_ctrl:active:{cfg_id}"), 0);
             info.set_key_int(&format!("item_bb:{cfg_id}:0"), 0);
         }
-        let pos = state
-            .assets
-            .find_level_entity(inst_id, i64::from(cfg_id))
-            .and_then(|ecfg| entity_world_pos(ecfg.as_ref()));
-        (cfg_id, pos)
+        let ecfg = state.assets.find_level_entity(inst_id, i64::from(cfg_id));
+        let pos = ecfg.as_deref().and_then(entity_world_pos);
+        let rot = ecfg.as_deref().map(entity_world_rot);
+        if let (Some(p), Some(ent_pos)) = (pos, scene.entities[idx].position.as_mut()) {
+            ent_pos.location = p;
+            if let Some(r) = rot {
+                ent_pos.rotation = r;
+            }
+        }
+        (cfg_id, pos, rot)
     } else {
-        (0, None)
+        (0, None, None)
     };
     {
         let info = &mut state.player_components.progress.info;
@@ -2152,8 +2270,40 @@ pub fn handle_move_scene_item_reset_position_request(
             .retain(|c| c != &net_destroy && (cfg_id <= 0 || c != &cfg_destroy));
     }
     if let Some(pos) = reset_pos {
-        let _ = persist_world_entity_transform(state, req.EntityId, pos, None)?;
+        let rot_pb = reset_rot.map(|r| Rotator {
+            Roll: r[0],
+            Pitch: r[1],
+            Yaw: r[2],
+        });
+        let _ = persist_world_entity_transform(state, req.EntityId, pos, rot_pb.clone())?;
+        let _ = state.conn.push_msg(
+            MovePackageNotify::MSG_ID,
+            &MovePackageNotify {
+                MovingEntities: vec![MovingEntityData {
+                    EntityId: req.EntityId,
+                    Originator: req.EntityId,
+                    ForcePush: true,
+                    MoveInfos: vec![MoveReplaySample {
+                        Location: Some(Vector {
+                            X: pos[0],
+                            Y: pos[1],
+                            Z: pos[2],
+                        }),
+                        Rotation: rot_pb,
+                        ..Default::default()
+                    }],
+                }],
+            },
+        );
     }
+    let _ = state.conn.push_msg(
+        MoveSplineStatusNotify::MSG_ID,
+        &MoveSplineStatusNotify {
+            EntityId: req.EntityId,
+            MoveStatus: Some(MoveStatus::Stop),
+            ..Default::default()
+        },
+    );
     pb_kv::persist_claim(
         &state.fs,
         &mut state.player_components.progress,
@@ -2793,6 +2943,23 @@ pub fn handle_hook_lock_point_finish_request(
         && let Some(hook_cfg) = resolve_hook_interact_config(state, inst_id, cfg_id)
         && hook_cfg.Type.as_deref() == Some("RagDollJumpingPoint")
     {
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int(&format!("hook_point:disabled:{cfg_id}"), 1);
+        if cfg_id != req.EntityId {
+            state
+                .player_components
+                .progress
+                .info
+                .set_key_int(&format!("hook_point:disabled:{}", req.EntityId), 1);
+        }
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
         if let Some(sc) = state.scene.as_mut()
             && let Some(st) = sc.entity_mut(req.EntityId)
         {
@@ -3448,17 +3615,44 @@ pub fn handle_dissolve_combine_relation_request(
     state: &mut State,
     req: DissolveCombineRelationRequest,
 ) -> Result<DissolveCombineRelationResponse, String> {
-    if let Some(scene) = state.scene.as_mut() {
+    let detached = if let Some(scene) = state.scene.as_mut() {
         if scene
             .detach_combine_relation(req.EntityA, req.EntityB)
             .is_some()
         {
             scene.signal_fsm_dissolve_combine(req.EntityA);
+            Some(sonoro_gamesv_logic::scene::CombineDetach {
+                combine_entity_id: req.EntityA,
+                target_entity_id: req.EntityB,
+            })
         } else if scene
             .detach_combine_relation(req.EntityB, req.EntityA)
             .is_some()
         {
             scene.signal_fsm_dissolve_combine(req.EntityB);
+            Some(sonoro_gamesv_logic::scene::CombineDetach {
+                combine_entity_id: req.EntityB,
+                target_entity_id: req.EntityA,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(detach) = detached {
+        let notify = CombatReceivePackNotify {
+            Data: vec![Scene::remove_combine_notify(detach)],
+        };
+        let _ = state
+            .conn
+            .push_msg(CombatReceivePackNotify::MSG_ID, &notify);
+        if let Some(coop) = state.coop_service.as_ref() {
+            coop.broadcast_room_except(
+                state.player_id,
+                CombatReceivePackNotify::MSG_ID,
+                &notify,
+            );
         }
     }
     Ok(DissolveCombineRelationResponse {
@@ -3573,8 +3767,10 @@ fn find_sneak_duration_secs(
     assets: &sonoro_gamesv_data::Assets,
     owner_id: i32,
     node_id: i32,
+    prefer_lp: bool,
 ) -> (f64, bool) {
-    if owner_id > 0
+    if !prefer_lp
+        && owner_id > 0
         && let Ok(nodes) = assets.quest_nodes.get_owner_nodes(owner_id)
         && let Some(secs) = nodes
             .iter()
@@ -3609,7 +3805,11 @@ fn find_sneak_duration_secs(
 
 pub fn handle_sneak_request(state: &mut State, req: SneakRequest) -> Result<SneakResponse, String> {
     let now_ms = sonoro_gamesv_logic::scene::now_millis();
-    let (secs, is_lp) = find_sneak_duration_secs(&state.assets, req.TreeOwnerId, req.NodeId);
+    let (is_lp_inc, _) =
+        sonoro_gamesv_logic::helpers::quest_types::decode_tree_inc_id(req.TreeIncId);
+    let (secs, detected_lp) =
+        find_sneak_duration_secs(&state.assets, req.TreeOwnerId, req.NodeId, is_lp_inc);
+    let is_lp = is_lp_inc || detected_lp;
     let end_time_ms = if req.IsStart {
         now_ms.saturating_add((secs * 1000.0).round() as i64)
     } else {
@@ -3669,12 +3869,14 @@ pub fn handle_sneak_finish_request(
     state: &mut State,
     req: SneakFinishRequest,
 ) -> Result<SneakFinishResponse, String> {
-    let ft = req.FinishType.unwrap_or(SneakFinishType::SneakSuccess);
+        let ft = req.FinishType.unwrap_or(SneakFinishType::SneakSuccess);
     let mut owner_id = 0;
-    let mut node_id = 0;
+    let node_id;
+    let mut sneak_inc_id = 0i64;
     if let Some(scene) = state.scene.as_mut() {
         owner_id = scene.active_sneak_owner_id;
         node_id = scene.active_sneak_id;
+        sneak_inc_id = scene.active_sneak_inc_id;
         if req.SneakId > 0
             && ft == SneakFinishType::SneakSuccess
             && scene.finished_sneak_nodes.contains(&(owner_id, req.SneakId))
@@ -3704,7 +3906,7 @@ pub fn handle_sneak_finish_request(
     {
         let mut qctx = state.quest_context(&mut events);
         if ft == SneakFinishType::SneakFail {
-            let _ = quest_engine::on_sneak_failed(&mut qctx, owner_id, i64::from(node_id));
+            let _ = quest_engine::on_sneak_failed(&mut qctx, owner_id, sneak_inc_id);
         } else {
             let _ = quest_engine::on_condition_state_changed(&mut qctx);
         }
@@ -4317,10 +4519,103 @@ pub fn handle_common_organ_reset_time_request(
     })
 }
 
+fn lookup_random_summon_cfg_ids(assets: &Assets, summon_index: i32, seed: u64) -> Vec<i32> {
+    static TABLE: std::sync::OnceLock<std::collections::HashMap<i32, (usize, Vec<(i32, i32)>)>> =
+        std::sync::OnceLock::new();
+    let map = TABLE.get_or_init(|| {
+        let mut out = std::collections::HashMap::new();
+        for row in &assets.read_raw_json_array("RandomSummon") {
+            let id = row.get("Id").and_then(Value::as_i64).unwrap_or(0) as i32;
+            let count = row
+                .get("Count")
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+                .max(1) as usize;
+            let mut entries = Vec::new();
+            if let Some(arr) = row.get("Random").and_then(Value::as_array) {
+                for entry in arr {
+                    if let Some(pair) = entry.get("ArrayInt").and_then(Value::as_array)
+                        && !pair.is_empty()
+                    {
+                        let cfg_id = pair[0].as_i64().unwrap_or(0) as i32;
+                        let weight = pair
+                            .get(1)
+                            .and_then(Value::as_i64)
+                            .unwrap_or(1)
+                            .max(1) as i32;
+                        if cfg_id > 0 {
+                            entries.push((cfg_id, weight));
+                        }
+                    }
+                }
+            }
+            if id > 0 && !entries.is_empty() {
+                out.insert(id, (count, entries));
+            }
+        }
+        out
+    });
+    let Some((count, entries)) = map.get(&summon_index) else {
+        return Vec::new();
+    };
+    let total_weight: i64 = entries.iter().map(|(_, w)| i64::from(*w)).sum();
+    if total_weight <= 0 {
+        return Vec::new();
+    }
+    let mut picked = Vec::with_capacity(*count);
+    let mut rng = seed ^ 0x9E37_79B9_7F4A_7C15;
+    for _ in 0..*count {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut roll = ((rng >> 16) % (total_weight as u64)) as i64;
+        for &(cfg_id, w) in entries {
+            roll -= i64::from(w);
+            if roll < 0 {
+                picked.push(cfg_id);
+                break;
+            }
+        }
+    }
+    picked
+}
+
+fn lookup_enrichment_area_ids(assets: &Assets, item_id: i32, level_id: i32) -> Vec<i32> {
+    static TABLE: std::sync::OnceLock<Vec<(i32, i32, i32)>> = std::sync::OnceLock::new();
+    let rows = TABLE.get_or_init(|| {
+        let mut out = Vec::new();
+        for row in &assets.read_raw_json_array("EnrichmentAreaConfig") {
+            let enrich_id = row
+                .get("EnrichmentId")
+                .and_then(Value::as_i64)
+                .unwrap_or(0) as i32;
+            let row_item = row.get("ItemId").and_then(Value::as_i64).unwrap_or(0) as i32;
+            let row_level = row.get("LevelId").and_then(Value::as_i64).unwrap_or(0) as i32;
+            if enrich_id > 0 && row_item > 0 {
+                out.push((row_item, row_level, enrich_id));
+            }
+        }
+        out
+    });
+    rows.iter()
+        .filter(|&&(row_item, row_level, _)| {
+            row_item == item_id && (level_id <= 0 || row_level == 0 || row_level == level_id)
+        })
+        .map(|&(_, _, eid)| eid)
+        .collect()
+}
+
 pub fn handle_summon2_request(
     state: &mut State,
     req: Summon2Request,
 ) -> Result<Summon2Response, String> {
+    if let Some(info) = req.SummonInfo {
+        let code = super::explore::spawn_custom_summon_entity(state, req.SummonerEntityId, info)?;
+        if code != ErrorCode::Success {
+            return Ok(Summon2Response {
+                Version: req.Version,
+                ErrorCode: Some(code),
+            });
+        }
+    }
     pb_kv::persist_int(
         &state.fs,
         &mut state.player_components.progress,
@@ -4328,6 +4623,7 @@ pub fn handle_summon2_request(
         i64::from(req.Version),
     )
     .map_err(|e| e.to_string())?;
+    flush_quest_condition_changed(state);
     Ok(Summon2Response {
         Version: req.Version,
         ErrorCode: Some(ErrorCode::Success),
@@ -4338,12 +4634,47 @@ pub fn handle_summon_random_request(
     state: &mut State,
     req: SummonRandomRequest,
 ) -> Result<SummonRandomResponse, String> {
+    let mut summon_ids = Vec::new();
+    if let Some(info) = req.SummonInfo {
+        let seed = (now_millis() as u64)
+            ^ (req.SummonerId as u64)
+            ^ (u64::from(info.SummonIndex as u32) << 16);
+        let cfg_ids = lookup_random_summon_cfg_ids(&state.assets, info.SummonIndex, seed);
+        for cfg_id in cfg_ids {
+            let Some(new_entity_id) = state.scene.as_mut().map(|s| s.alloc_next_entity_id())
+            else {
+                break;
+            };
+            let spawn_info = SummonRequestInfo {
+                SummonEntityId: new_entity_id,
+                SkillId: info.SkillId,
+                SummonConfigId: cfg_id,
+                Pos: info.Pos.clone(),
+                Rot: info.Rot.clone(),
+                IsVisible: info.IsVisible,
+            };
+            if super::explore::spawn_custom_summon_entity(state, req.SummonerId, spawn_info)?
+                == ErrorCode::Success
+            {
+                summon_ids.push(new_entity_id);
+            }
+        }
+    }
     pb_kv::persist_claim(
         &state.fs,
         &mut state.player_components.progress,
         &format!("summon_rand:{}", req.SummonerId),
     )
     .map_err(|e| e.to_string())?;
+    let notify = SummonRandomNotify {
+        SummonerId: req.SummonerId,
+        SummonIds: summon_ids,
+    };
+    let _ = state.conn.push_msg(SummonRandomNotify::MSG_ID, &notify);
+    if let Some(coop) = state.coop_service.as_ref() {
+        coop.broadcast_room_except(state.player_id, SummonRandomNotify::MSG_ID, &notify);
+    }
+    flush_quest_condition_changed(state);
     Ok(SummonRandomResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -4353,14 +4684,40 @@ pub fn handle_player_enter_pollution_request(
     state: &mut State,
     req: PlayerEnterPollutionRequest,
 ) -> Result<PlayerEnterPollutionResponse, String> {
-    let rty = req.RangeType.map(|t| i64::from(t.to_i32())).unwrap_or(0);
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("pollution:mgr:{}", req.ManagerEntityId),
-        rty,
-    )
-    .map_err(|e| e.to_string())?;
+    let range_type = req
+        .RangeType
+        .unwrap_or(PlayEnterOrExitPollutionRangeType::EnterAction);
+    let active = i64::from(range_type == PlayEnterOrExitPollutionRangeType::EnterAction);
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int("pollution:active", active);
+        info.set_key_int(
+            &format!("pollution:mgr:{}", req.ManagerEntityId),
+            i64::from(range_type.to_i32()),
+        );
+    }
+    if let Some(scene) = state.scene.as_mut() {
+        if let Some(storage) = scene.entity_mut(req.ManagerEntityId)
+            && let Some(fsm) = storage.fsm.as_mut()
+        {
+            fsm.set_custom_blackboard_int("pollution:in_range", active as i32);
+            scene.mark_fsm_dirty(req.ManagerEntityId, wake_reason::BLACKBOARD);
+        }
+        let cur_role_eid = scene.current_role_entity_id();
+        if cur_role_eid != 0
+            && let Some(storage) = scene.entity_mut(cur_role_eid)
+            && let Some(fsm) = storage.fsm.as_mut()
+        {
+            fsm.set_custom_blackboard_int("pollution:in_range", active as i32);
+            scene.mark_fsm_dirty(cur_role_eid, wake_reason::BLACKBOARD);
+        }
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    flush_quest_condition_changed(state);
     Ok(PlayerEnterPollutionResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -4370,12 +4727,21 @@ pub fn handle_enrichment_area_request(
     state: &mut State,
     req: EnrichmentAreaRequest,
 ) -> Result<EnrichmentAreaResponse, String> {
-    pb_kv::persist_claim(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("enrich:{}", req.ItemId),
-    )
-    .map_err(|e| e.to_string())?;
+    let level_id = state.scene.as_ref().map_or(0, |s| s.instance_id);
+    let enrichment_ids = lookup_enrichment_area_ids(&state.assets, req.ItemId, level_id);
+    {
+        let info = &mut state.player_components.progress.info;
+        info.mark_claim(&format!("enrich:{}", req.ItemId));
+        for eid in enrichment_ids {
+            info.set_key_int(&format!("enrichment:scan:{eid}"), 1);
+        }
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    flush_quest_condition_changed(state);
     Ok(EnrichmentAreaResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -4385,13 +4751,35 @@ pub fn handle_add_decal_request(
     state: &mut State,
     req: AddDecalRequest,
 ) -> Result<AddDecalResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("decal:scene:{}", req.SceneId),
-        i64::from(req.EffectId),
-    )
-    .map_err(|e| e.to_string())?;
+    let decal_id = state
+        .player_components
+        .progress
+        .info
+        .add_key_int("decal:next_id", 1)
+        .max(1);
+    state
+        .player_components
+        .progress
+        .info
+        .set_key_int(&format!("decal:scene:{}", req.SceneId), i64::from(req.EffectId));
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    let notify = DecalAddNotify {
+        Info: vec![DecalInfo {
+            DecalId: decal_id,
+            SceneId: req.SceneId,
+            Position: req.Position,
+            Rotation: req.Rotation,
+            EffectId: req.EffectId,
+        }],
+    };
+    let _ = state.conn.push_msg(DecalAddNotify::MSG_ID, &notify);
+    if let Some(coop) = state.coop_service.as_ref() {
+        coop.broadcast_room_except(state.player_id, DecalAddNotify::MSG_ID, &notify);
+    }
     Ok(AddDecalResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -4425,6 +4813,51 @@ fn material_replace_exchange_ratio(assets: &sonoro_gamesv_data::Assets, item_id:
     map.get(&item_id).copied().unwrap_or(1)
 }
 
+fn execute_material_replace(
+    state: &mut State,
+    costs: &[CostItem],
+    target_replace_item_id: i32,
+    total_consume: i64,
+    requested_target_num: Option<i32>,
+) -> Result<ErrorCode, String> {
+    if target_replace_item_id <= 0 || costs.is_empty() || total_consume <= 0 {
+        return Ok(ErrorCode::RequestParamError);
+    }
+    let ratio = i64::from(material_replace_exchange_ratio(
+        &state.assets,
+        target_replace_item_id,
+    ));
+    let max_grant = (total_consume / ratio).clamp(0, i64::from(i32::MAX)) as i32;
+    let grant_num = requested_target_num.map_or(max_grant, |n| n.min(max_grant));
+    if grant_num <= 0 {
+        return Ok(ErrorCode::RequestParamError);
+    }
+    let ok = consume::consume_costs(
+        &mut state.conn,
+        &state.fs,
+        &mut state.player_components.basic,
+        &mut state.player_components.inventory,
+        costs,
+    )
+    .map_err(|e| e.to_string())?;
+    if !ok {
+        return Ok(ErrorCode::ErrItemNotEnough);
+    }
+    let mut rctx = state.reward_context();
+    reward::grant_items(
+        &mut rctx,
+        0,
+        true,
+        &[RewardItem {
+            item_id: target_replace_item_id,
+            count: grant_num,
+        }],
+        1,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(ErrorCode::Success)
+}
+
 pub fn handle_batch_material_replace_request(
     state: &mut State,
     req: BatchMaterialReplaceRequest,
@@ -4443,47 +4876,16 @@ pub fn handle_batch_material_replace_request(
                 total_consume += i64::from(count);
             }
         }
-        if costs.is_empty() || total_consume <= 0 {
-            return Ok(BatchMaterialReplaceResponse {
-                Code: Some(ErrorCode::RequestParamError),
-            });
-        }
-        let ratio = i64::from(material_replace_exchange_ratio(
-            &state.assets,
-            ri.TargetReplaceItemId,
-        ));
-        let max_grant = (total_consume / ratio).clamp(0, i64::from(i32::MAX)) as i32;
-        let grant_num = ri.TargetNum.min(max_grant);
-        if grant_num <= 0 {
-            return Ok(BatchMaterialReplaceResponse {
-                Code: Some(ErrorCode::RequestParamError),
-            });
-        }
-        let ok = consume::consume_costs(
-            &mut state.conn,
-            &state.fs,
-            &mut state.player_components.basic,
-            &mut state.player_components.inventory,
+        let code = execute_material_replace(
+            state,
             &costs,
-        )
-        .map_err(|e| e.to_string())?;
-        if !ok {
-            return Ok(BatchMaterialReplaceResponse {
-                Code: Some(ErrorCode::ErrItemNotEnough),
-            });
+            ri.TargetReplaceItemId,
+            total_consume,
+            Some(ri.TargetNum),
+        )?;
+        if code != ErrorCode::Success {
+            return Ok(BatchMaterialReplaceResponse { Code: Some(code) });
         }
-        let mut rctx = state.reward_context();
-        reward::grant_items(
-            &mut rctx,
-            0,
-            true,
-            &[RewardItem {
-                item_id: ri.TargetReplaceItemId,
-                count: grant_num,
-            }],
-            1,
-        )
-        .map_err(|e| e.to_string())?;
     }
     Ok(BatchMaterialReplaceResponse {
         Code: Some(ErrorCode::Success),
@@ -4494,40 +4896,23 @@ pub fn handle_material_replace_request(
     state: &mut State,
     req: MaterialReplaceRequest,
 ) -> Result<MaterialReplaceResponse, String> {
-    if req.ConsumeItemId > 0 && req.ConsumeItemNum > 0 && req.TargetReplaceItemId > 0 {
-        let costs = [CostItem {
-            id: req.ConsumeItemId,
-            count: req.ConsumeItemNum,
-        }];
-        let ok = consume::consume_costs(
-            &mut state.conn,
-            &state.fs,
-            &mut state.player_components.basic,
-            &mut state.player_components.inventory,
-            &costs,
-        )
-        .map_err(|e| e.to_string())?;
-        if !ok {
-            return Ok(MaterialReplaceResponse {
-                Code: Some(ErrorCode::ErrItemNotEnough),
-            });
-        }
-        let mut rctx = state.reward_context();
-        reward::grant_items(
-            &mut rctx,
-            0,
-            true,
-            &[RewardItem {
-                item_id: req.TargetReplaceItemId,
-                count: req.ConsumeItemNum,
-            }],
-            1,
-        )
-        .map_err(|e| e.to_string())?;
+    if req.ConsumeItemId <= 0 || req.ConsumeItemNum <= 0 || req.TargetReplaceItemId <= 0 {
+        return Ok(MaterialReplaceResponse {
+            Code: Some(ErrorCode::RequestParamError),
+        });
     }
-    Ok(MaterialReplaceResponse {
-        Code: Some(ErrorCode::Success),
-    })
+    let costs = [CostItem {
+        id: req.ConsumeItemId,
+        count: req.ConsumeItemNum,
+    }];
+    let code = execute_material_replace(
+        state,
+        &costs,
+        req.TargetReplaceItemId,
+        i64::from(req.ConsumeItemNum),
+        None,
+    )?;
+    Ok(MaterialReplaceResponse { Code: Some(code) })
 }
 
 pub fn handle_furniture_diy_save_request(
@@ -5459,10 +5844,104 @@ pub fn handle_inst_entity_teleport_request(
     })
 }
 
+fn extract_plot_pos_from_flow_state(val: &Value) -> Option<([f32; 3], Option<[f32; 3]>)> {
+    let parse_vec = |v: &Value| -> Option<([f32; 3], Option<[f32; 3]>)> {
+        let obj = v.as_object()?;
+        let x = read_json_f32(obj.get("X")?)?;
+        let y = read_json_f32(obj.get("Y")?)?;
+        let z = read_json_f32(obj.get("Z")?)?;
+        if !finite_vec3([x, y, z]) {
+            return None;
+        }
+        let rot = obj
+            .get("A")
+            .and_then(read_json_f32)
+            .filter(|a| a.is_finite())
+            .map(|yaw| [0.0, 0.0, yaw]);
+        Some(([x, y, z], rot))
+    };
+    if let Some(pos_val) = val.get("Pos")
+        && let Some(parsed) = parse_vec(pos_val)
+    {
+        return Some(parsed);
+    }
+    if let Some(Value::Array(actions)) = val.get("Actions") {
+        for action in actions {
+            let Some(name) = action.get("Name").and_then(Value::as_str) else {
+                continue;
+            };
+            if matches!(
+                name,
+                "SetPlayerPos" | "ClientSetPlayerPos" | "BeginFlowTemplate"
+            ) && let Some(params) = action.get("Params")
+                && let Some(pos_val) = params.get("Pos")
+                && let Some(parsed) = parse_vec(pos_val)
+            {
+                return Some(parsed);
+            }
+        }
+    }
+    None
+}
+
 pub fn handle_flow_teleport_to_plot_pos_request(
     state: &mut State,
     req: FlowTeleportToPlotPosRequest,
 ) -> Result<FlowTeleportToPlotPosResponse, String> {
+    let plot_target = state.scene.as_ref().and_then(|scene| {
+        let inst_id = scene.instance_id;
+        let flow_name = &scene.active_flow_list_name;
+        let flow_id = scene.active_flow_id;
+        let state_id = scene.active_flow_state_id;
+        if flow_name.is_empty() || flow_id <= 0 {
+            return None;
+        }
+        let mut found = state
+            .assets
+            .flow_states
+            .get_flow_state(flow_name, flow_id, state_id)
+            .ok()
+            .flatten()
+            .and_then(|v| extract_plot_pos_from_flow_state(&v));
+        if found.is_none() && state_id != 1 {
+            found = state
+                .assets
+                .flow_states
+                .get_flow_state(flow_name, flow_id, 1)
+                .ok()
+                .flatten()
+                .and_then(|v| extract_plot_pos_from_flow_state(&v));
+        }
+        found.map(|(pos, rot)| (inst_id, pos, rot))
+    });
+    if let Some((inst_id, pos, rot)) = plot_target {
+        let mut events = EventQueue::new();
+        {
+            let mut qctx = state.quest_context(&mut events);
+            quest_actions::update_player_scene_state(&mut qctx, pos, rot)
+                .map_err(|e| e.to_string())?;
+        }
+        drain_event_queue_best_effort(&mut events, state);
+        let rot_vec = rot.unwrap_or([0.0, 0.0, 0.0]);
+        let _ = state.conn.push_msg(
+            TeleportNotify::MSG_ID,
+            &TeleportNotify {
+                MapId: state.assets.resolve_map_config_id(inst_id),
+                Pos: Some(Vector {
+                    X: pos[0],
+                    Y: pos[1],
+                    Z: pos[2],
+                }),
+                Rot: Some(Vector {
+                    X: rot_vec[0],
+                    Y: rot_vec[1],
+                    Z: rot_vec[2],
+                }),
+                Reason: Some(TeleportReason::FlowAction),
+                ..Default::default()
+            },
+        );
+    }
     pb_kv::persist_claim(
         &state.fs,
         &mut state.player_components.progress,
@@ -5698,13 +6177,27 @@ pub fn handle_invite_rechallenge_request(
     state: &mut State,
     _req: InviteRechallengeRequest,
 ) -> Result<InviteRechallengeResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        "inst:rechallenge_invite:1",
-        1,
-    )
-    .map_err(|e| e.to_string())?;
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int("inst:rechallenge_invite:1", 1);
+        info.set_key_int("inst:rechallenge_res:1", 0);
+        info.set_key_int("inst:rechallenge_accept_cnt", 1);
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    if let Some(coop) = state.coop_service.as_ref() {
+        coop.broadcast_room_except(
+            state.player_id,
+            InviteRechallengeNotify::MSG_ID,
+            &InviteRechallengeNotify {
+                InviterPlayerId: state.player_id,
+            },
+        );
+    }
+    flush_quest_condition_changed(state);
     Ok(InviteRechallengeResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -5714,14 +6207,34 @@ pub fn handle_receive_rechallenge_request(
     state: &mut State,
     req: ReceiveRechallengeRequest,
 ) -> Result<ReceiveRechallengeResponse, String> {
-    let res_val = req.Result.map(|r| i64::from(r.to_i32())).unwrap_or(0);
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        "inst:rechallenge_res:1",
-        res_val,
-    )
-    .map_err(|e| e.to_string())?;
+    let result = req.Result.unwrap_or(ERechallengeResultResult::Accept);
+    let res_val = i64::from(result.to_i32());
+    {
+        let info = &mut state.player_components.progress.info;
+        info.set_key_int("inst:rechallenge_res:1", res_val);
+        if result == ERechallengeResultResult::Accept {
+            info.add_key_int("inst:rechallenge_accept_cnt", 1);
+        } else {
+            info.set_key_int("inst:rechallenge_invite:1", 0);
+        }
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
+    let notify = ReceiveRechallengeNotify {
+        PlayerId: state.player_id,
+        Result: Some(result),
+    };
+    if let Some(coop) = state.coop_service.as_ref() {
+        coop.broadcast_room_except(
+            state.player_id,
+            ReceiveRechallengeNotify::MSG_ID,
+            &notify,
+        );
+    }
+    flush_quest_condition_changed(state);
     Ok(ReceiveRechallengeResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -5858,40 +6371,37 @@ pub fn handle_update_fight_role_request(
     state: &mut State,
     req: UpdateFightRoleRequest,
 ) -> Result<UpdateFightRoleResponse, String> {
-    let role_map = &state.player_components.role.role_map;
-    let mut roles: [Option<FormationRole>; 3] = [None, None, None];
-    let mut count = 0usize;
-    for rid in req.RoleIds {
-        if rid <= 0 || !role_map.contains_key(&rid) || count >= 3 {
-            continue;
-        }
-        roles[count] = Some(FormationRole {
-            role_id: rid,
-            entity_id: 0,
-            on_stage_without_control: false,
-        });
-        count += 1;
-    }
-    let mut events = EventQueue::new();
-    if count > 0
-        && let Some(scene) = state.scene.as_mut()
-        && let Ok(idx) = usize::try_from(scene.formation_info.cur_formation)
-        && let Some(form) = scene.formation_info.formations.get_mut(idx)
+    let valid_role_ids: Vec<i32> = {
+        let role_map = &state.player_components.role.role_map;
+        req.RoleIds
+            .iter()
+            .copied()
+            .filter(|rid| *rid > 0 && role_map.contains_key(rid))
+            .collect()
+    };
+    if !valid_role_ids.is_empty()
+        && let Some(idx) = state
+            .scene
+            .as_ref()
+            .and_then(|s| usize::try_from(s.formation_info.cur_formation).ok())
     {
-        form.roles = roles.clone();
-        form.cur_role = if req.CurRoleId != 0 {
-            req.CurRoleId
-        } else {
-            roles[0].as_ref().map(|f| f.role_id).unwrap_or(0)
-        };
-        scene.save(&state.fs).map_err(|e| e.to_string())?;
-        events.enqueue(Event::UpdateFormations {
-            player_id: state.player_id,
-            formation_id: scene.formation_info.cur_formation + 1,
-            role_ids: Vec::new(),
-        });
+        let mut events = EventQueue::new();
+        let now_ms = energy::now_seconds() * 1000;
+        let err_opt = super::formation::apply_current_formation_roles(
+            state,
+            &mut events,
+            idx,
+            &valid_role_ids,
+            req.CurRoleId,
+            now_ms,
+        )?;
+        drain_event_queue_best_effort(&mut events, state);
+        if let Some(err) = err_opt {
+            return Ok(UpdateFightRoleResponse {
+                ErrorCode: Some(err),
+            });
+        }
     }
-    drain_event_queue_best_effort(&mut events, state);
     Ok(UpdateFightRoleResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -5905,12 +6415,36 @@ pub fn handle_reorder_formation_request(
     if let Some(scene) = state.scene.as_mut()
         && !scene.formation_info.formations.is_empty()
     {
-        let max_idx = (scene.formation_info.formations.len() - 1) as i32;
-        let src_idx = (req.FormationId - 1).clamp(0, max_idx) as usize;
-        let dst_idx = (req.TargetId - 1).clamp(0, max_idx) as usize;
+        let count = scene.formation_info.formations.len() as i32;
+        if req.FormationId < 1
+            || req.FormationId > count
+            || req.TargetId < 1
+            || req.TargetId > count
+        {
+            return Ok(ReorderFormationResponse {
+                ErrorCode: Some(ErrorCode::ErrFormationIdOutOfRange),
+            });
+        }
+        let src_idx = (req.FormationId - 1) as usize;
+        let dst_idx = (req.TargetId - 1) as usize;
         if src_idx != dst_idx {
-            scene.formation_info.formations.swap(src_idx, dst_idx);
-            scene.save(&state.fs).map_err(|e| e.to_string())?;
+            if src_idx < dst_idx {
+                scene.formation_info.formations[src_idx..=dst_idx].rotate_left(1);
+            } else {
+                scene.formation_info.formations[dst_idx..=src_idx].rotate_right(1);
+            }
+            if let Ok(cur) = usize::try_from(scene.formation_info.cur_formation) {
+                scene.formation_info.cur_formation = if cur == src_idx {
+                    dst_idx as i32
+                } else if src_idx < dst_idx && cur > src_idx && cur <= dst_idx {
+                    (cur - 1) as i32
+                } else if src_idx > dst_idx && cur >= dst_idx && cur < src_idx {
+                    (cur + 1) as i32
+                } else {
+                    cur as i32
+                };
+            }
+            scene.save_persistent(&state.fs).map_err(|e| e.to_string())?;
             events.enqueue(Event::UpdateFormations {
                 player_id: state.player_id,
                 formation_id: scene.formation_info.cur_formation + 1,
@@ -6175,12 +6709,14 @@ pub fn handle_last_big_scene_mini_map_info_request(
     let mut px = 0.0f32;
     let mut py = 0.0f32;
     let mut pz = 0.0f32;
+    let mut pa = 0.0f32;
     if let Some(scene) = state.scene.as_ref() {
         for player in &scene.instance.players {
             if player.id == state.player_id {
                 px = player.location[0];
                 py = player.location[1];
                 pz = player.location[2];
+                pa = player.rotation[2];
                 break;
             }
         }
@@ -6190,7 +6726,7 @@ pub fn handle_last_big_scene_mini_map_info_request(
         PosX: px,
         PosY: py,
         PosZ: pz,
-        PosA: 0.0,
+        PosA: pa,
     })
 }
 
@@ -7006,8 +7542,9 @@ pub fn handle_udp_move_package_push(
     let mut events = EventQueue::new();
     let mut nexus_check_locs: Vec<[f32; 3]> = Vec::new();
     let mut move_quest_positions: Vec<[f32; 3]> = Vec::new();
+    let mut mode_changed_any = false;
+    let mut sync_gravity: Option<[f32; 3]> = None;
     if let Some(scene) = state.scene.as_mut() {
-        let has_active_quests = !state.player_components.quest.info.active_quests.is_empty();
         for data in &push.MovingEntities {
             let Some(&idx) = scene.net_id_map.get(&data.EntityId) else {
                 continue;
@@ -7044,7 +7581,26 @@ pub fn handle_udp_move_package_push(
                 continue;
             }
             if controlled_by_player {
+                let mode_changed =
+                    !scene.has_player_movement_mode || scene.player_movement_mode != last_move.MovementMode;
                 scene.player_movement_mode = last_move.MovementMode;
+                scene.has_player_movement_mode = true;
+                if mode_changed {
+                    mode_changed_any = true;
+                }
+                let ent_gravity = scene.entities[idx]
+                    .world_item
+                    .gravity
+                    .or_else(|| {
+                        let role_eid = scene.current_role_entity_id();
+                        (role_eid != 0)
+                            .then(|| scene.entity(role_eid).and_then(|e| e.world_item.gravity))
+                            .flatten()
+                    })
+                    .map(|g| g.location);
+                if ent_gravity.is_some() {
+                    sync_gravity = ent_gravity;
+                }
                 for player in &mut scene.instance.players {
                     if player.id == sender_id {
                         player.location = next_location;
@@ -7057,10 +7613,11 @@ pub fn handle_udp_move_package_push(
                                 player_id: sender_id,
                             });
                         }
-                        if has_active_quests
-                            && let Some(pos) = scene.entities[idx].position
-                            && dist_sq3(player.location, pos.location) >= 100.0 * 100.0
+                        if !scene.has_quest_move_loc
+                            || dist_sq3(player.location, scene.last_quest_move_loc) >= 50.0 * 50.0
                         {
+                            scene.last_quest_move_loc = player.location;
+                            scene.has_quest_move_loc = true;
                             move_quest_positions.push(player.location);
                         }
                     }
@@ -7104,10 +7661,17 @@ pub fn handle_udp_move_package_push(
             );
         }
     }
-    for pos in move_quest_positions {
+    if !move_quest_positions.is_empty() {
+        for pos in move_quest_positions {
+            let mut qctx = state.quest_context(&mut events);
+            quest_engine::events::on_player_move(&mut qctx, pos[0], pos[1], pos[2])
+                .map_err(|e| e.to_string())?;
+        }
+    } else if mode_changed_any {
         let mut qctx = state.quest_context(&mut events);
-        quest_engine::on_player_move(&mut qctx, pos[0], pos[1], pos[2])
-            .map_err(|e| e.to_string())?;
+        if let Err(err) = quest_engine::events::on_condition_state_changed(&mut qctx) {
+            tracing::warn!(target: "world_puzzle", "on_udp_move_mode failed: {err}");
+        }
     }
     drain_event_queue_best_effort(&mut events, state);
     if let Some(coop) = &state.coop_service {
@@ -7124,7 +7688,8 @@ pub fn handle_udp_move_package_push(
         };
         coop.broadcast_move_except(sender_id, push.MovingEntities);
         if let Some((map_id, area_id, loc)) = sync_loc {
-            coop.broadcast_player_location(sender_id, map_id, area_id, loc, [0.0, 0.0, -1.0]);
+            let gravity = sync_gravity.unwrap_or([0.0, 0.0, -1.0]);
+            coop.broadcast_player_location(sender_id, map_id, area_id, loc, gravity);
         }
     }
     Ok(())
@@ -7151,6 +7716,21 @@ pub fn handle_scene_item_set_pos_sender_request(
     state: &mut State,
     req: SceneItemSetPosSenderRequest,
 ) -> Result<SceneItemSetPosSenderResponse, String> {
+    let pos_sender = if req.IsControl { state.player_id } else { 0 };
+    if let Some(scene) = state.scene.as_mut()
+        && let Some(storage) = scene.entity_mut(req.EntityId)
+    {
+        if let Some(sc_item) = storage.world_item.scene_item.as_mut() {
+            sc_item.pos_sender = pos_sender;
+        } else {
+            storage.world_item.scene_item = Some(SceneItemComponent {
+                pos_sender,
+                manipulatable_state: None,
+            });
+        }
+        storage.world_item.be_controlled_player_id =
+            req.IsControl.then_some(i64::from(state.player_id));
+    }
     pb_kv::persist_int(
         &state.fs,
         &mut state.player_components.progress,
@@ -7158,6 +7738,20 @@ pub fn handle_scene_item_set_pos_sender_request(
         i64::from(req.IsControl),
     )
     .map_err(|e| e.to_string())?;
+    let notify = SceneItemSetPosSenderNotify {
+        EntityId: req.EntityId,
+        PosSender: pos_sender,
+    };
+    let _ = state
+        .conn
+        .push_msg(SceneItemSetPosSenderNotify::MSG_ID, &notify);
+    if let Some(coop) = state.coop_service.as_ref() {
+        coop.broadcast_room_except(
+            state.player_id,
+            SceneItemSetPosSenderNotify::MSG_ID,
+            &notify,
+        );
+    }
     Ok(SceneItemSetPosSenderResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

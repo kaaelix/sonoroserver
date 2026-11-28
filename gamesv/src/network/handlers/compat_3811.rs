@@ -83,6 +83,12 @@ pub fn handle_get_detection_target_request(
     let mut tids = Vec::new();
     let req_type = req.Type.unwrap_or(DetectionType::NormalMonster);
     let det_id = req.DetectionId;
+    let map_id = state
+        .scene
+        .as_ref()
+        .map(|s| state.assets.resolve_map_config_id(s.instance_id))
+        .filter(|&id| id > 0)
+        .unwrap_or(8);
 
     match req_type {
         DetectionType::NormalMonster | DetectionType::Material => {
@@ -93,12 +99,12 @@ pub fn handle_get_detection_target_request(
                     } else if !md.BlueprintType.is_empty() {
                         if let Some(db) = state.assets.tables.assets_db() {
                             let found = db
-                                .query_entity_ids_by_map_blueprint(8, &md.BlueprintType)
+                                .query_entity_ids_by_map_blueprint(map_id, &md.BlueprintType)
                                 .unwrap_or_default();
                             tids.extend(found.into_iter().take(32));
                         } else {
                             for lcfg in &state.assets.tables.level_entity_config.items {
-                                if lcfg.MapId == 8 && lcfg.BlueprintType == md.BlueprintType {
+                                if lcfg.MapId == map_id && lcfg.BlueprintType == md.BlueprintType {
                                     tids.push(lcfg.EntityId as i32);
                                     if tids.len() >= 32 {
                                         break;
@@ -202,7 +208,7 @@ pub fn handle_get_detection_target_request(
         Code: Some(ErrorCode::Success),
         DetectionId: req.DetectionId,
         DetectionTargetDatas: vec![DetectionTargetData {
-            MapId: 8,
+            MapId: map_id,
             TargetIds: tids,
         }],
     })

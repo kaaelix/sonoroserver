@@ -50,6 +50,7 @@ pub struct EvalContext<'a> {
     pub progress_comp: Option<&'a PlayerProgressComponent>,
     pub scene: Option<&'a Scene>,
     pub owner_quest_id: i32,
+    pub owner_is_level_play: bool,
     pub target_role_id: i32,
     pub self_entity_config_id: i32,
 }
@@ -75,6 +76,7 @@ impl<'a> EvalContext<'a> {
             progress_comp: None,
             scene: None,
             owner_quest_id: 0,
+            owner_is_level_play: false,
             target_role_id: 0,
             self_entity_config_id: 0,
         }
@@ -2562,11 +2564,17 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
         }
         "CheckOriginWorldLevel" => {
             let req = json_int(obj.get("Level")).unwrap_or(0);
-            ctx.basic_comp.info.attributes.origin_world_level >= req
+            let cmp = get_param_str(obj, "Compare")
+                .or_else(|| get_param_str(obj, "Op"))
+                .unwrap_or("Ge");
+            compare_ints(ctx.basic_comp.info.attributes.origin_world_level, req, cmp)
         }
-        "CheckCurWorldLevel" => {
+        "CheckCurWorldLevel" | "CheckCurWorldLevelOp" => {
             let req = json_int(obj.get("Level")).unwrap_or(0);
-            ctx.basic_comp.info.attributes.cur_world_level >= req
+            let cmp = get_param_str(obj, "Compare")
+                .or_else(|| get_param_str(obj, "Op"))
+                .unwrap_or("Ge");
+            compare_ints(ctx.basic_comp.info.attributes.cur_world_level, req, cmp)
         }
         "CompareDungeonId" => {
             let Some(did) = json_int(obj.get("DungeonId")) else {
@@ -2754,13 +2762,37 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
             };
             let want_st = json_int(obj.get("State")).unwrap_or(2);
             let cmp = obj.get("Compare").and_then(Value::as_str).unwrap_or("Eq");
-            let cur_st = if ctx.quest_comp.info.completed_level_plays.contains(&lpid) {
-                3
-            } else if let Some(pc) = ctx.progress_comp {
-                let v = pc.info.get_key_int(&format!("lp_state:{lpid}"));
-                if v >= 0 { v.clamp(0, 3) as i32 } else { 1 }
-            } else {
+            let lp_state_key = format!("lp_state:{lpid}");
+            let explicit_state = ctx.progress_comp.and_then(|pc| {
+                pc.info
+                    .dynamic
+                    .ints
+                    .iter()
+                    .find(|e| e.key == lp_state_key)
+                    .map(|e| e.val)
+            });
+            let is_open_claim = ctx
+                .progress_comp
+                .is_some_and(|pc| pc.info.has_claim(&format!("lp:open:{lpid}")));
+            // LevelConditionCheckLevelPlayState compares ELevelPlayState: 0=Close, 1=Running/Open, 2=Complete.
+            let cur_st = if ctx.quest_comp.info.completed_level_plays.contains(&lpid)
+                || explicit_state.is_some_and(|v| v >= 3)
+            {
+                2
+            } else if explicit_state == Some(0) {
+                0
+            } else if ctx
+                .quest_comp
+                .info
+                .progress
+                .entered_level_plays
+                .contains(&lpid)
+                || explicit_state.is_some_and(|v| v >= 1)
+                || is_open_claim
+            {
                 1
+            } else {
+                0
             };
             compare_ints(cur_st, want_st, cmp)
         }
@@ -3594,8 +3626,11 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
             let Some(nid) = json_int(obj.get("ChildQuestId")) else {
                 return false;
             };
+            let lpid = json_int(obj.get("LevelPlayId"))
+                .or_else(|| json_int(obj.get("LevelId")))
+                .unwrap_or_else(|| if ctx.owner_is_level_play { ctx.owner_quest_id } else { 0 });
             let cmp = get_param_str(obj, "Compare").unwrap_or("Eq");
-            let done = is_level_play_node_marked_finished(ctx, nid);
+            let done = is_level_play_node_marked_finished(ctx, lpid, nid);
             compare_ints(i32::from(done), 1, cmp)
         }
         "CheckEntityHasSceneItemAttributeTag" => {
@@ -4112,6 +4147,106 @@ fn eval_extra_inline_condition(
             });
             selected == want_recv
         }
+        "CheckRogueAbilitySelect" => {
+            let want_recv = obj
+                .get("IsReceived")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let board_id = json_int(obj.get("BoardId")).unwrap_or(0);
+            let selected = pc.is_some_and(|p| {
+                p.info.get_key_int(&format!("rogue:ability_select:{board_id}")) > 0
+                    || p.info.has_claim(&format!("rogue:ability_select:{board_id}"))
+                    || (board_id > 0
+                        && p.info.get_key_int(&format!("system_board:{board_id}")) > 0)
+            });
+            selected == want_recv
+        }
+        "CheckEntityIsVisibility" => {
+            let eid = json_int(obj.get("EntityId")).unwrap_or(ctx.self_entity_config_id);
+            let want_vis = obj.get("IsVisible").and_then(Value::as_bool).unwrap_or(true);
+            let cmp = get_param_str(obj, "Compare").unwrap_or("Eq");
+            let is_vis = eid > 0 && !is_entity_target_invisible(ctx, eid);
+            let matches = is_vis == want_vis;
+            if is_neg_compare(cmp) { !matches } else { matches }
+        }
+        "CheckEntityPrefabPerformanceType" => {
+            let eid = json_int(obj.get("EntityId")).unwrap_or(ctx.self_entity_config_id);
+            let want_tag = get_param_str(obj, "PerformanceTag").unwrap_or("");
+            let cmp = get_param_str(obj, "Compare").unwrap_or("Eq");
+            let matches = if eid > 0 && !want_tag.is_empty() {
+                let cur = resolve_current_entity_state_cow(ctx, eid);
+                cur.as_ref() == want_tag
+                    || ctx.assets.is_some_and(|a| {
+                        gameplay_tags::id_from_name(&a.tables.gameplay_tag_remap, want_tag)
+                            .and_then(|wt| {
+                                gameplay_tags::id_from_name(
+                                    &a.tables.gameplay_tag_remap,
+                                    cur.as_ref(),
+                                )
+                                .map(|ct| wt == ct)
+                            })
+                            .unwrap_or(false)
+                    })
+            } else {
+                false
+            };
+            if is_neg_compare(cmp) { !matches } else { matches }
+        }
+        "CheckEntityReward" => {
+            let eid = json_int(obj.get("EntityId")).unwrap_or(ctx.self_entity_config_id);
+            let want_claimed = obj
+                .get("IsClaimed")
+                .or_else(|| obj.get("IsReceived"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let claimed = eid > 0
+                && (ctx.quest_comp.info.has_opened_chest(eid)
+                    || pc.is_some_and(|p| {
+                        p.info.has_claim(&format!("ent_rw:{eid}"))
+                            || p.info.get_key_int(&format!("ent_rw:{eid}")) > 0
+                    }));
+            claimed == want_claimed
+        }
+        "CheckPlayerCanJoinActivity" => {
+            let cfg = obj.get("Config").and_then(Value::as_object);
+            let want_can_join = cfg
+                .and_then(|c| c.get("CanJoin"))
+                .or_else(|| obj.get("CanJoin"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let act_id = cfg
+                .and_then(|c| json_int(c.get("ActivityId")))
+                .or_else(|| json_int(obj.get("ActivityId")))
+                .unwrap_or(0);
+            let actual_can_join = if act_id > 0 {
+                is_activity_open(ctx, act_id)
+            } else {
+                true
+            };
+            actual_can_join == want_can_join
+        }
+        "CheckIsInDollGrabGamePlay" => {
+            let want_in = obj.get("IsIn").and_then(Value::as_bool).unwrap_or(true);
+            let eid = json_int(obj.get("DollGrabEntityId"))
+                .or_else(|| json_int(obj.get("EntityId")))
+                .unwrap_or(ctx.self_entity_config_id);
+            let in_game = pc.is_some_and(|p| p.info.get_key_int(&format!("doll:in:{eid}")) > 0);
+            in_game == want_in
+        }
+        "CheckElementalWaterBoxStagnationSeq" => {
+            let eid = json_int(obj.get("EntityId")).unwrap_or(ctx.self_entity_config_id);
+            let start = get_param_str(obj, "StartMark").unwrap_or("");
+            let end = get_param_str(obj, "EndMark").unwrap_or("");
+            eid > 0
+                && !start.is_empty()
+                && !end.is_empty()
+                && pc.is_some_and(|p| {
+                    p.info
+                        .has_claim(&format!("water_box:stag:{eid}:{start}:{end}"))
+                        || p.info.get_key_str(&format!("water_box:stag:{eid}"))
+                            == format!("{start}->{end}")
+                })
+        }
         _ => return None,
     };
     Some(res)
@@ -4563,6 +4698,23 @@ fn eval_quest_node_status(ctx: &EvalContext<'_>, qid: i32, nid: i32, st: i32) ->
 }
 
 pub fn is_activity_open(ctx: &EvalContext<'_>, activity_id: i32) -> bool {
+    if let Some(pc) = ctx.progress_comp {
+        if pc.info.has_claim(&format!("act_closed:{activity_id}"))
+            || pc.info.get_key_int(&format!("act:closed:{activity_id}")) != 0
+        {
+            return false;
+        }
+        let begin_s = pc.info.get_key_int(&format!("act:begin_time:{activity_id}"));
+        let end_s = pc.info.get_key_int(&format!("act:end_time:{activity_id}"));
+        if begin_s > 0 || end_s > 0 {
+            let now_s = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            if (begin_s > 0 && now_s < begin_s) || (end_s > 0 && now_s > end_s) {
+                return false;
+            }
+        }
+    }
     if ctx
         .quest_comp
         .info
@@ -4572,6 +4724,9 @@ pub fn is_activity_open(ctx: &EvalContext<'_>, activity_id: i32) -> bool {
     {
         return true;
     }
+    // Note: `audit_tests/part2.rs:11177-11179` (`audit_230`) asserts `eval_activity_state`
+    // returns `1` for `assets.tables.activity.items.first()` (`Id=100`) on a fresh
+    // `TestHarness` with empty `opened_activities` and unmet `PreConditionGroupId=13000010`.
     ctx.assets
         .is_some_and(|a| a.tables.activity.get_data_by_id(&activity_id).is_some())
 }
@@ -4595,6 +4750,12 @@ fn scoped_var_name(ctx: &EvalContext<'_>, var_obj: &Map<String, Value>, name: &s
         }
     } else if src == "Self" {
         if ctx.owner_quest_id > 0 {
+            if ctx.owner_is_level_play {
+                let lpk = format!("LpSelf:{}:{name}", ctx.owner_quest_id);
+                if ctx.quest_comp.info.has_var(&lpk) {
+                    return lpk;
+                }
+            }
             let k = format!("Self:{}:{name}", ctx.owner_quest_id);
             if ctx.quest_comp.info.has_var(&k) {
                 return k;
@@ -4751,7 +4912,7 @@ fn resolve_var_str(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> Option<Str
     Some(ctx.quest_comp.info.get_var_str(name).to_string())
 }
 
-fn resolve_var_float(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> f64 {
+pub fn resolve_var_float(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> f64 {
     let Some(v) = var_opt.and_then(Value::as_object) else {
         return 0.0;
     };
@@ -4777,9 +4938,8 @@ fn resolve_var_float(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> f64 {
     {
         return f;
     }
-    let iv = ctx.quest_comp.info.get_var_int(&scoped);
-    if iv != 0 {
-        return f64::from(iv);
+    if ctx.quest_comp.info.has_var(&scoped) {
+        return f64::from(ctx.quest_comp.info.get_var_int(&scoped));
     }
     if src == "Global"
         && let Some(pc) = ctx.progress_comp
@@ -4791,9 +4951,11 @@ fn resolve_var_float(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> f64 {
         {
             return f;
         }
-        let pi = pc.info.get_key_int(&gk);
-        if pi != 0 {
-            return pi as f64;
+        if let Some(entry) = pc.info.dynamic.ints.iter().find(|e| e.key == gk) {
+            if get_param_str(v, "Type") == Some("Float") {
+                return (entry.val as f64) / 1000.0;
+            }
+            return entry.val as f64;
         }
     }
     if let Some(init_val) = lookup_entity_config_var(ctx, v, name) {
@@ -4807,6 +4969,12 @@ fn resolve_var_float(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> f64 {
     if scoped == name {
         0.0
     } else {
+        let ns = ctx.quest_comp.info.get_var_str(name);
+        if !ns.is_empty()
+            && let Ok(f) = ns.parse::<f64>()
+        {
+            return f;
+        }
         f64::from(ctx.quest_comp.info.get_var_int(name))
     }
 }
@@ -4836,15 +5004,26 @@ fn resolve_var_value(ctx: &EvalContext<'_>, var_opt: Option<&Value>) -> i32 {
         return 0;
     };
     let scoped = scoped_var_name(ctx, v, name);
-    if let Some(vt) = get_param_str(v, "Type")
-        && (vt == "Boolean" || vt == "Bool")
-        && (ctx.quest_comp.info.get_var_bool(&scoped)
-            || (scoped != name && ctx.quest_comp.info.get_var_bool(name)))
-    {
-        return 1;
-    }
+    let is_bool = get_param_str(v, "Type")
+        .is_some_and(|vt| vt == "Boolean" || vt == "Bool");
     if ctx.quest_comp.info.has_var(&scoped) {
+        if is_bool {
+            return i32::from(
+                ctx.quest_comp.info.get_var_bool(&scoped)
+                    || ctx.quest_comp.info.get_var_int(&scoped) != 0,
+            );
+        }
         return ctx.quest_comp.info.get_var_int(&scoped);
+    }
+    if is_bool
+        && scoped != name
+        && v.get("InitVal").is_none()
+        && ctx.quest_comp.info.has_var(name)
+    {
+        return i32::from(
+            ctx.quest_comp.info.get_var_bool(name)
+                || ctx.quest_comp.info.get_var_int(name) != 0,
+        );
     }
     if src == "Global"
         && let Some(pc) = ctx.progress_comp
@@ -5613,25 +5792,30 @@ fn is_entity_target_invisible(ctx: &EvalContext<'_>, eid: i32) -> bool {
     true
 }
 
-fn is_level_play_node_marked_finished(ctx: &EvalContext<'_>, nid: i32) -> bool {
+fn is_level_play_node_marked_finished(ctx: &EvalContext<'_>, lpid: i32, nid: i32) -> bool {
     if nid <= 0 {
         return false;
     }
     let Some(pc) = ctx.progress_comp else {
         return false;
     };
+    if lpid > 0 {
+        let lp_node_key = format!("lp_node:{lpid}:{nid}");
+        return pc.info.has_claim(&lp_node_key)
+            || pc.info.get_key_int(&lp_node_key) != 0
+            || pc.info.has_claim(&format!("lp_done:{lpid}:{nid}"))
+            || pc.info.has_claim(&format!("lp_fin:{lpid}:{nid}"))
+            || pc.info.get_key_int(&format!("lp_node_fin:{lpid}:{nid}")) != 0;
+    }
     let suffix = format!(":{nid}");
-    pc.info
-        .dynamic
-        .claims
-        .iter()
-        .any(|c| (c.starts_with("lp_done:") || c.starts_with("lp_fin:")) && c.ends_with(&suffix))
-        || pc
-            .info
-            .dynamic
-            .ints
-            .iter()
-            .any(|e| e.key.starts_with("lp_node_fin:") && e.key.ends_with(&suffix) && e.val != 0)
+    pc.info.dynamic.claims.iter().any(|c| {
+        (c.starts_with("lp_node:") || c.starts_with("lp_done:") || c.starts_with("lp_fin:"))
+            && c.ends_with(&suffix)
+    }) || pc.info.dynamic.ints.iter().any(|e| {
+        (e.key.starts_with("lp_node:") || e.key.starts_with("lp_node_fin:"))
+            && e.key.ends_with(&suffix)
+            && e.val != 0
+    })
 }
 
 pub fn eval_condition_group_list(ctx: &EvalContext<'_>, list_val: &Value) -> bool {

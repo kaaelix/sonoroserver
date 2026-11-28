@@ -317,7 +317,7 @@ pub fn handle_dango_brawl_score_reward_request(
     state: &mut State,
     req: DangoBrawlScoreRewardRequest,
 ) -> Result<DangoBrawlScoreRewardResponse, String> {
-    claim_id_list(state, "db_score", "DangoBrawlChallenge", &req.ScoreIds)?;
+    claim_id_list(state, "db:score", "DangoBrawlScoreReward", &req.ScoreIds)?;
     Ok(DangoBrawlScoreRewardResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -327,7 +327,7 @@ pub fn handle_dango_brawl_task_reward_request(
     state: &mut State,
     req: DangoBrawlTaskRewardRequest,
 ) -> Result<DangoBrawlTaskRewardResponse, String> {
-    claim_id_list(state, "db_task", "DangoBrawlChallenge", &req.TaskIds)?;
+    claim_id_list(state, "db:task", "DangoBrawlReward", &req.TaskIds)?;
     Ok(DangoBrawlTaskRewardResponse {
         ErrCode: Some(ErrorCode::Success),
     })
@@ -446,12 +446,17 @@ pub fn handle_dango_monopoly_dice_request(
 ) -> Result<DangoMonopolyDiceResponse, String> {
     let now_s = energy::now_seconds().max(1);
     let roll = ((now_s % 6) + 1) as i32;
-    let key = format!("dmono_grid:{}", req.ActivityId);
+    let grid_key = format!("dmono_grid:{}", req.ActivityId);
+    let new_grid = state
+        .player_components
+        .progress
+        .info
+        .add_key_int(&grid_key, i64::from(roll));
     state
         .player_components
         .progress
         .info
-        .add_key_int(&key, i64::from(roll));
+        .set_key_int("dm:grid", new_grid);
     state
         .player_components
         .progress
@@ -473,11 +478,14 @@ pub fn handle_dango_monopoly_grid_reward_request(
         .player_components
         .progress
         .info
-        .get_key_int(&format!("dmono_grid:{}", req.ActivityId)) as i32;
-    claim_one(state, "dmono_grid_rw", "Dango", cur_grid)?;
+        .get_key_int(&format!("dmono_grid:{}", req.ActivityId))
+        .max(state.player_components.progress.info.get_key_int("dm:grid")) as i32;
+    let claim_key = format!("dmono:grid_rw:{}", cur_grid.max(1));
+    let had_claim = state.player_components.progress.info.has_claim(&claim_key);
+    claim_one(state, "dmono:grid_rw", "DangoMonopolyGrid", cur_grid.max(1))?;
     Ok(DangoMonopolyGridRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
-        HasReward: true,
+        HasReward: !had_claim,
     })
 }
 
@@ -485,11 +493,16 @@ pub fn handle_dango_monopoly_next_board_request(
     state: &mut State,
     req: DangoMonopolyNextBoardRequest,
 ) -> Result<DangoMonopolyNextBoardResponse, String> {
-    let next_board = state
-        .player_components
-        .progress
-        .info
-        .add_key_int(&format!("dmono_board:{}", req.ActivityId), 1) as i32;
+    let info = &mut state.player_components.progress.info;
+    let cur_board = info
+        .get_key_int(&format!("dmono_board:{}", req.ActivityId))
+        .max(info.get_key_int("dm:board"))
+        .max(1);
+    let next_board = (cur_board + 1) as i32;
+    info.set_key_int(&format!("dmono_board:{}", req.ActivityId), i64::from(next_board));
+    info.set_key_int("dm:board", i64::from(next_board));
+    info.set_key_int(&format!("dmono_grid:{}", req.ActivityId), 1);
+    info.set_key_int("dm:grid", 1);
     state
         .player_components
         .progress
@@ -506,7 +519,7 @@ pub fn handle_dango_monopoly_board_reward_request(
     state: &mut State,
     req: DangoMonopolyBoardRewardRequest,
 ) -> Result<DangoMonopolyBoardRewardResponse, String> {
-    claim_id_list(state, "dmono_board_rw", "Dango", &req.BoardIds)?;
+    claim_id_list(state, "dmono:board", "DangoMonopolyBoard", &req.BoardIds)?;
     Ok(DangoMonopolyBoardRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -516,7 +529,7 @@ pub fn handle_dango_monopoly_task_reward_request(
     state: &mut State,
     req: DangoMonopolyTaskRewardRequest,
 ) -> Result<DangoMonopolyTaskRewardResponse, String> {
-    claim_id_list(state, "dmono_task_rw", "Dango", &req.TaskIds)?;
+    claim_id_list(state, "dango_mono:task", "DangoMonopolyTask", &req.TaskIds)?;
     Ok(DangoMonopolyTaskRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -798,7 +811,11 @@ pub fn handle_doll_delivery_request(
         .set_key_int(&format!("doll:combo:{}", req.EntityCfgId), i64::from(combo_count));
 
     let mut drop_ids = Vec::new();
-    let achieved_milestone = combo_count.max(all_delivered.len() as i32);
+    let achieved_milestone = if combo_count > 0 {
+        combo_count.max(all_delivered.len() as i32)
+    } else {
+        all_delivered.len() as i32
+    };
     for (need_cnt, drop_id) in delivery_rewards {
         let key = format!("doll:drw:{}:{need_cnt}", req.EntityCfgId);
         if achieved_milestone >= need_cnt
@@ -872,6 +889,7 @@ pub fn handle_doll_garb_start_request(
     let info = &mut state.player_components.progress.info;
     info.set_key_int("doll_grab:cur", 0);
     info.set_key_int(&format!("doll:cur:{cfg_id}"), 0);
+    info.set_key_int(&format!("doll:in:{cfg_id}"), 1);
     state
         .player_components
         .progress
@@ -956,6 +974,7 @@ pub fn handle_doll_grab_stop_request(
     info.set_key_int(&format!("doll:high:{cfg_id}"), i64::from(high));
     info.set_key_int("doll_grab:high", i64::from(high));
     info.set_key_int(&format!("doll:fin:{cfg_id}"), 1);
+    info.set_key_int(&format!("doll:in:{cfg_id}"), 0);
     info.mark_claim(&format!("doll:fin:{cfg_id}"));
     state
         .player_components
@@ -1377,7 +1396,7 @@ pub fn handle_floro_ranch_reward_task_request(
     state: &mut State,
     req: FloroRanchRewardTaskRequest,
 ) -> Result<FloroRanchRewardTaskResponse, String> {
-    claim_id_list(state, "fr_task", "FloroRanchReward", &req.TaskIds)?;
+    claim_id_list(state, "floro:task", "FloroRanchTask", &req.TaskIds)?;
     Ok(FloroRanchRewardTaskResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -1644,7 +1663,7 @@ pub fn handle_honami_story_item_collection_request(
 ) -> Result<HonamiStoryItemCollectionResponse, String> {
     claim_id_list(
         state,
-        "honami_col",
+        "honami:col",
         "HonamiStoryItemCollection",
         &req.HonamiStoryItemCollectionId,
     )?;
@@ -1659,11 +1678,11 @@ pub fn handle_honami_story_life_support_up_request(
     state: &mut State,
     req: HonamiStoryLifeSupportUpRequest,
 ) -> Result<HonamiStoryLifeSupportUpResponse, String> {
-    let lv = state
-        .player_components
-        .progress
-        .info
-        .add_key_int("honami:ls_lv", 1) as i32;
+    let info = &mut state.player_components.progress.info;
+    let cur = info.get_key_int("honami:life").max(info.get_key_int("honami:ls_lv")).max(1);
+    let lv = (cur + 1) as i32;
+    info.set_key_int("honami:life", i64::from(lv));
+    info.set_key_int("honami:ls_lv", i64::from(lv));
     state
         .player_components
         .progress
@@ -1680,9 +1699,9 @@ pub fn handle_honami_story_limit_task_reward_request(
     state: &mut State,
     req: HonamiStoryLimitTaskRewardRequest,
 ) -> Result<HonamiStoryLimitTaskRewardResponse, String> {
-    claim_id_list(state, "honami_lt", "HonamiStoryLimitTask", &req.LimitTaskIds)?;
+    claim_id_list(state, "honami:lim", "HonamiStoryLimitTask", &req.LimitTaskIds)?;
     if req.LimitTaskId != 0 {
-        claim_one(state, "honami_lt", "HonamiStoryLimitTask", req.LimitTaskId)?;
+        claim_one(state, "honami:lim", "HonamiStoryLimitTask", req.LimitTaskId)?;
     }
     Ok(HonamiStoryLimitTaskRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
@@ -1695,7 +1714,7 @@ pub fn handle_honami_story_resident_task_reward_request(
 ) -> Result<HonamiStoryResidentTaskRewardResponse, String> {
     claim_id_list(
         state,
-        "honami_rt",
+        "honami:perm",
         "HonamiStoryResidentTask",
         &req.ResidentTaskIds,
     )?;
@@ -1725,7 +1744,7 @@ pub fn handle_honami_story_score_reward_request(
 ) -> Result<HonamiStoryScoreRewardResponse, String> {
     claim_id_list(
         state,
-        "honami_score",
+        "honami:score",
         "HonamiStoryScoreReward",
         &req.ScoreRewardId,
     )?;
@@ -2024,7 +2043,7 @@ pub fn handle_kurotato_limit_task_receive_request(
     state: &mut State,
     req: KurotatoLimitTaskReceiveRequest,
 ) -> Result<KurotatoLimitTaskReceiveResponse, String> {
-    claim_id_list(state, "kurotato_lt", "KurotatoLimitAward", &req.TaskIds)?;
+    claim_id_list(state, "kurotato:lim", "KurotatoLimitAward", &req.TaskIds)?;
     Ok(KurotatoLimitTaskReceiveResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -2034,7 +2053,7 @@ pub fn handle_kurotato_res_task_receive_request(
     state: &mut State,
     req: KurotatoResTaskReceiveRequest,
 ) -> Result<KurotatoResTaskReceiveResponse, String> {
-    claim_id_list(state, "kurotato_rt", "KurotatoResAward", &req.TaskIds)?;
+    claim_id_list(state, "kurotato:res", "KurotatoResAward", &req.TaskIds)?;
     Ok(KurotatoResTaskReceiveResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -2416,7 +2435,7 @@ pub fn handle_pinball_task_reward_request(
     state: &mut State,
     req: PinballTaskRewardRequest,
 ) -> Result<PinballTaskRewardResponse, String> {
-    claim_id_list(state, "pinball_task", "PinballTask", &req.TaskIds)?;
+    claim_id_list(state, "pinball:task", "PinballTask", &req.TaskIds)?;
     Ok(PinballTaskRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -2526,10 +2545,31 @@ pub fn handle_racing_bet_match_info_request(
     })
 }
 
+fn racing_bet_ensure_cash(info: &mut sonoro_gamesv_fs::progress_info::ProgressInfo) -> i32 {
+    if !info.has_claim("rb:cash_init") {
+        info.mark_claim("rb:cash_init");
+        if info.get_key_int("rb:cash") <= 0 {
+            info.set_key_int("rb:cash", 1000);
+        }
+    }
+    info.get_key_int("rb:cash").max(0) as i32
+}
+
 pub fn handle_racing_bet_match_action_request(
-    _state: &mut State,
+    state: &mut State,
     req: RacingBetMatchActionRequest,
 ) -> Result<RacingBetMatchActionResponse, String> {
+    let info = &mut state.player_components.progress.info;
+    let _ = racing_bet_ensure_cash(info);
+    let round_key = format!("rb:round:{}:{}", req.ActivityId, req.LegMatchId);
+    if info.get_key_int(&round_key) <= 0 {
+        info.set_key_int(&round_key, 1);
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     Ok(RacingBetMatchActionResponse {
         ActivityId: req.ActivityId,
         LegMatchId: req.LegMatchId,
@@ -2539,17 +2579,42 @@ pub fn handle_racing_bet_match_action_request(
 }
 
 pub fn handle_racing_bet_match_round_action_request(
-    _state: &mut State,
+    state: &mut State,
     req: RacingBetMatchRoundActionRequest,
 ) -> Result<RacingBetMatchRoundActionResponse, String> {
+    let info = &mut state.player_components.progress.info;
+    let cash = racing_bet_ensure_cash(info);
+    let round = req.Order.max(1);
+    let is_final = round >= 3;
+    info.set_key_int(
+        &format!("rb:round:{}:{}", req.ActivityId, req.LegMatchId),
+        i64::from(round),
+    );
+    let settle_claim = format!("rb:settled:{}:{}", req.ActivityId, req.LegMatchId);
+    if is_final && info.mark_claim(&settle_claim) {
+        let winner = ((req.LegMatchId.abs() % 6) + 1) as i32;
+        info.set_key_int(&format!("rb:winner:{}", req.LegMatchId), i64::from(winner));
+        let bet = info.get_key_int(&format!("rb:bet:{}:{}", req.LegMatchId, winner)).max(0);
+        if bet > 0 {
+            let odds = i64::from(200 + winner * 20);
+            let payout = (bet * odds) / 100;
+            info.set_key_int("rb:cash", i64::from(cash) + payout);
+            info.add_key_int("rb:hits", 1);
+        }
+    }
+    state
+        .player_components
+        .progress
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     Ok(RacingBetMatchRoundActionResponse {
         ErrorCode: Some(ErrorCode::Success),
         Rounds: Some(RacingBetsMatchRoundInfo {
-            RoundRank: req.Order,
-            IsFinalRound: req.Order >= 3,
+            RoundRank: round,
+            IsFinalRound: is_final,
             ..Default::default()
         }),
-        IsResultRound: req.Order >= 3,
+        IsResultRound: is_final,
         ..Default::default()
     })
 }
@@ -2591,19 +2656,31 @@ pub fn handle_racing_bets_gear_request(
     state: &mut State,
     req: RacingBetsGearRequest,
 ) -> Result<RacingBetsGearResponse, String> {
-    let cash = state
+    let info = &mut state.player_components.progress.info;
+    let mut cash = racing_bet_ensure_cash(info);
+    if req.Cash <= 0 || req.Cash > cash {
+        return Ok(RacingBetsGearResponse {
+            ErrorCode: Some(if req.Cash <= 0 {
+                ErrorCode::RequestParamError
+            } else {
+                ErrorCode::ErrItemNotEnough
+            }),
+            PlayerInfo: Some(RacingBetPlayerInfo {
+                CurCash: cash,
+                TotalCash: cash,
+                ..Default::default()
+            }),
+        });
+    }
+    cash -= req.Cash;
+    info.set_key_int("rb:cash", i64::from(cash));
+    let bet_key = format!("rb:bet:{}:{}", req.LegMatchId, req.DangoId);
+    info.add_key_int(&bet_key, i64::from(req.Cash));
+    state
         .player_components
         .progress
-        .info
-        .get_key_int("rb:cash")
-        .max(1000) as i32;
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("rb:bet:{}:{}", req.LegMatchId, req.DangoId),
-        i64::from(req.Cash),
-    )
-    .map_err(|e| e.to_string())?;
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     Ok(RacingBetsGearResponse {
         ErrorCode: Some(ErrorCode::Success),
         PlayerInfo: Some(RacingBetPlayerInfo {
@@ -2618,19 +2695,20 @@ pub fn handle_racing_bets_gear_refund_request(
     state: &mut State,
     req: RacingBetsGearRefundRequest,
 ) -> Result<RacingBetsGearRefundResponse, String> {
-    pb_kv::persist_int(
-        &state.fs,
-        &mut state.player_components.progress,
-        &format!("rb:bet:{}:{}", req.LegMatchId, req.DangoId),
-        0,
-    )
-    .map_err(|e| e.to_string())?;
-    let cash = state
+    let info = &mut state.player_components.progress.info;
+    let mut cash = racing_bet_ensure_cash(info);
+    let bet_key = format!("rb:bet:{}:{}", req.LegMatchId, req.DangoId);
+    let prev_bet = info.get_key_int(&bet_key).max(0) as i32;
+    if prev_bet > 0 {
+        cash = cash.saturating_add(prev_bet);
+        info.set_key_int("rb:cash", i64::from(cash));
+        info.set_key_int(&bet_key, 0);
+    }
+    state
         .player_components
         .progress
-        .info
-        .get_key_int("rb:cash")
-        .max(1000) as i32;
+        .save(&state.fs)
+        .map_err(|e| e.to_string())?;
     Ok(RacingBetsGearRefundResponse {
         ErrorCode: Some(ErrorCode::Success),
         PlayerInfo: Some(RacingBetPlayerInfo {
@@ -2642,9 +2720,10 @@ pub fn handle_racing_bets_gear_refund_request(
 }
 
 pub fn handle_racing_bets_match_info_request(
-    _state: &mut State,
+    state: &mut State,
     req: RacingBetsMatchInfoRequest,
 ) -> Result<RacingBetsMatchInfoResponse, String> {
+    let _cash = racing_bet_ensure_cash(&mut state.player_components.progress.info);
     Ok(RacingBetsMatchInfoResponse {
         MatchInfos: vec![RacingBetsGroupMatchesInfo {
             GroupMatchId: 1,
@@ -2797,7 +2876,7 @@ pub fn handle_regress_disposable_reward_request(
     state: &mut State,
     _req: RegressDisposableRewardRequest,
 ) -> Result<RegressDisposableRewardResponse, String> {
-    claim_one(state, "reg_disp", "RegressReward", 1)?;
+    claim_one(state, "reg_disp", "RegressDisposableReward", 1)?;
     Ok(RegressDisposableRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -2822,7 +2901,7 @@ pub fn handle_regress_task_request(
     state: &mut State,
     req: RegressTaskRequest,
 ) -> Result<RegressTaskResponse, String> {
-    claim_one(state, "reg_task", "RegressTask", req.TaskId)?;
+    claim_one(state, "regress:task", "RegressTask", req.TaskId)?;
     Ok(RegressTaskResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -2832,7 +2911,7 @@ pub fn handle_regress_repeated_task_request(
     state: &mut State,
     req: RegressRepeatedTaskRequest,
 ) -> Result<RegressRepeatedTaskResponse, String> {
-    claim_id_list(state, "reg_rtask", "RegressTask", &req.TaskId)?;
+    claim_id_list(state, "regress:task", "RegressTask", &req.TaskId)?;
     Ok(RegressRepeatedTaskResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -3010,6 +3089,11 @@ pub fn handle_rhythm_settle_request(
             .progress
             .info
             .set_key_int(&key, i64::from(best));
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int(&format!("rhythm:score:{}", req.SubLevelId), i64::from(best));
         dirty = true;
     }
     if let Some(p) = &req.Payload
@@ -3048,7 +3132,7 @@ pub fn handle_rhythm_task_one_key_reward_request(
     state: &mut State,
     req: RhythmTaskOneKeyRewardRequest,
 ) -> Result<RhythmTaskOneKeyRewardResponse, String> {
-    claim_id_list(state, "rhythm_task", "RhythmTask", &req.TaskId)?;
+    claim_id_list(state, "rhythm:task", "RhythmTask", &req.TaskId)?;
     Ok(RhythmTaskOneKeyRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -3252,7 +3336,7 @@ pub fn handle_spring_sign_draw_reward_request(
     state: &mut State,
     req: SpringSignDrawRewardRequest,
 ) -> Result<SpringSignDrawRewardResponse, String> {
-    claim_one(state, "ssign_rw", "SpringReward", req.Id)?;
+    claim_one(state, "spring_sign", "SpringReward", req.Id)?;
     Ok(SpringSignDrawRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -3292,7 +3376,7 @@ pub fn handle_spring_sign_skin_reward_request(
     state: &mut State,
     _req: SpringSignSkinRewardRequest,
 ) -> Result<SpringSignSkinRewardResponse, String> {
-    claim_one(state, "ssign_skin", "SpringReward", 1)?;
+    claim_one(state, "spring_sign:skin", "SpringReward", 1)?;
     Ok(SpringSignSkinRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -3333,7 +3417,7 @@ pub fn handle_survivors_normal_award_request(
     state: &mut State,
     req: SurvivorsNormalAwardRequest,
 ) -> Result<SurvivorsNormalAwardResponse, String> {
-    claim_id_list(state, "surv_norm", "SurvivorsTask", &req.Configs)?;
+    claim_id_list(state, "surv:task", "SurvivorsTask", &req.Configs)?;
     Ok(SurvivorsNormalAwardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -3473,7 +3557,7 @@ pub fn handle_tower_defence_instance_reward_request(
     state: &mut State,
     req: TowerDefenceInstanceRewardRequest,
 ) -> Result<TowerDefenceInstanceRewardResponse, String> {
-    claim_id_list(state, "td_inst", "TowerDefenceReward", &req.Ids)?;
+    claim_id_list(state, "td:inst", "TowerDefenceReward", &req.Ids)?;
     Ok(TowerDefenceInstanceRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -3483,7 +3567,7 @@ pub fn handle_tower_defence_score_reward_request(
     state: &mut State,
     req: TowerDefenceScoreRewardRequest,
 ) -> Result<TowerDefenceScoreRewardResponse, String> {
-    claim_id_list(state, "td_score", "TowerDefenceReward", &req.Ids)?;
+    claim_id_list(state, "td:score", "TowerDefenceReward", &req.Ids)?;
     Ok(TowerDefenceScoreRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -3731,7 +3815,7 @@ pub fn handle_trap_defense_get_reward_request(
     state: &mut State,
     req: TrapDefenseGetRewardRequest,
 ) -> Result<TrapDefenseGetRewardResponse, String> {
-    claim_id_list(state, "trap_rw", "TrapDefenseReward", &req.Ids)?;
+    claim_id_list(state, "trapdef:rw", "TrapDefenseReward", &req.Ids)?;
     Ok(TrapDefenseGetRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })

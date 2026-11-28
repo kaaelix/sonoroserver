@@ -36,7 +36,7 @@ use sonoro_proto::pb::{
     TimerInfoPb, TraceQuestNotify, TrampleActivateCtxPb, TrampleDeActiveCtxPb,
     TrampleGearTransitionNotify, TreeInfo, UpdateChildQuestNodeStatusNotify,
     UpdateGroupFormationNotify, UpdateNodeProgressNotify, UpdateNodeStatusNotify,
-    UseItemProgress,
+    UpdateTimerInfoNotify, UseItemProgress,
 };
 use sonoro_proto::wire::PbEnum;
 
@@ -46,7 +46,7 @@ use crate::helpers::condition;
 use crate::helpers::entity_proto;
 use crate::helpers::quest_actions;
 use crate::helpers::quest_types::{
-    QuestContext, json_bool, json_float, json_int, json_str, resolve_var_int_for_owner,
+    QuestContext, json_bool, json_float, json_int, json_str,
 };
 use crate::helpers::role;
 use crate::scene::{DynamicInteractKind, Scene, now_millis};
@@ -716,6 +716,15 @@ pub fn is_sync_play_flow_action(act: &Value) -> bool {
     json_str(obj.get("Name")) == Some("PlayFlow") && !is_play_flow_action_async(act)
 }
 
+pub fn next_action_slice_end(items: &[Value], start_idx: usize) -> (usize, bool) {
+    for (offset, act) in items[start_idx..].iter().enumerate() {
+        if is_sync_play_flow_action(act) {
+            return (start_idx + offset, true);
+        }
+    }
+    (items.len().saturating_sub(1), false)
+}
+
 pub fn has_async_play_flow_action(items: &[Value]) -> bool {
     let mut saw_play_flow = false;
     for act in items {
@@ -750,6 +759,34 @@ pub fn start_flow_with_mode<S: PushSink + ?Sized>(
     enqueue_if_busy: bool,
     is_async_override: Option<bool>,
 ) -> io::Result<()> {
+    let bt_type = if quest_id > 0
+        && ctx.quest_comp.info.find_active_quest(quest_id).is_none()
+        && ctx.assets.tables.level_play_data.get_data_by_id(&quest_id).is_some()
+    {
+        BtType::BtTypeLevelPlay
+    } else {
+        BtType::BtTypeQuest
+    };
+    start_flow_with_mode_bt(
+        ctx,
+        quest_id,
+        node_id,
+        bt_type,
+        obj,
+        enqueue_if_busy,
+        is_async_override,
+    )
+}
+
+pub fn start_flow_with_mode_bt<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    quest_id: i32,
+    node_id: i32,
+    bt_type: BtType,
+    obj: &Map<String, Value>,
+    enqueue_if_busy: bool,
+    is_async_override: Option<bool>,
+) -> io::Result<()> {
     let Some(flow_name) = json_str(obj.get("FlowListName")) else {
         return Ok(());
     };
@@ -759,14 +796,6 @@ pub fn start_flow_with_mode<S: PushSink + ?Sized>(
     let flow_id = json_int(obj.get("FlowId")).unwrap_or(1);
     let state_id = json_int(obj.get("StateId")).unwrap_or(1);
     let is_async = is_async_override.unwrap_or_else(|| json_bool(obj.get("Async")).unwrap_or(false));
-    let bt_type = if quest_id > 0
-        && ctx.quest_comp.info.find_active_quest(quest_id).is_none()
-        && ctx.assets.tables.level_play_data.get_data_by_id(&quest_id).is_some()
-    {
-        BtType::BtTypeLevelPlay
-    } else {
-        BtType::BtTypeQuest
-    };
     start_flow_params_bt(
         ctx,
         quest_id,
@@ -827,7 +856,14 @@ pub fn start_flow_params_bt<S: PushSink + ?Sized>(
         && scene.active_flow_inc_id != 0
     {
         if enqueue_if_busy {
-            scene.enqueue_pending_flow(quest_id, node_id, flow_name, flow_id, state_id);
+            scene.enqueue_pending_flow_with_bt(
+                bt_type,
+                quest_id,
+                node_id,
+                flow_name,
+                flow_id,
+                state_id,
+            );
         }
         return Ok(());
     }
@@ -835,8 +871,15 @@ pub fn start_flow_params_bt<S: PushSink + ?Sized>(
     let inc_id = ctx.quest_comp.info.alloc_flow_inc_id();
     if !is_async {
         if let Some(scene) = ctx.scene.as_deref_mut() {
-            scene.set_active_flow(inc_id, quest_id, node_id, flow_name, flow_id, state_id);
-            scene.active_flow_bt_type = bt_type;
+            scene.set_active_flow_for_bt(
+                inc_id,
+                bt_type,
+                quest_id,
+                node_id,
+                flow_name,
+                flow_id,
+                state_id,
+            );
             prepare_flow_state_entities(ctx, flow_name, flow_id, state_id);
         }
     } else if let Some(scene) = ctx.scene.as_deref_mut() {
@@ -844,8 +887,8 @@ pub fn start_flow_params_bt<S: PushSink + ?Sized>(
         prepare_flow_state_entities(ctx, flow_name, flow_id, state_id);
     }
 
-    let bt_inc_id = if quest_id != 0 {
-        i64::from(quest_id)
+    let bt_inc_id = if quest_id > 0 {
+        crate::helpers::quest_types::bt_tree_inc_id(bt_type, quest_id)
     } else {
         inc_id
     };
@@ -1401,6 +1444,62 @@ fn is_cross_map_finished_child_node<S: PushSink + ?Sized>(
     })
 }
 
+pub(super) fn child_quest_timer_type(cond: &Map<String, Value>) -> &str {
+    json_str(cond.get("TimerType"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or("WaitTime")
+}
+
+pub(super) fn quest_failed_timer_type(node_data: &Value) -> &str {
+    node_data
+        .get("FailedCondition")
+        .and_then(|fc| fc.get("Timer"))
+        .and_then(|t| t.get("TimerType"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("CountDownChallenge")
+}
+
+pub(super) fn push_bt_node_activate<S: PushSink + ?Sized>(
+    sink: &mut S,
+    bt_type: BtType,
+    owner_id: i32,
+    node_id: i32,
+) {
+    sink.push(
+        UpdateNodeStatusNotify::MSG_ID,
+        &UpdateNodeStatusNotify {
+            TreeOwnerId: owner_id,
+            TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id),
+            NodeId: node_id,
+            Status: Some(NodeStatus::Activate),
+        },
+    );
+}
+
+pub(super) fn push_bt_timer_info<S: PushSink + ?Sized>(
+    sink: &mut S,
+    bt_type: BtType,
+    owner_id: i32,
+    node_id: i32,
+    timer_type: &str,
+    due_ms: i64,
+) {
+    sink.push(
+        UpdateTimerInfoNotify::MSG_ID,
+        &UpdateTimerInfoNotify {
+            TreeOwnerId: owner_id,
+            TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id),
+            TimerInfo: Some(TimerInfoPb {
+                TimerType: timer_type.as_bytes().to_vec(),
+                NodeId: node_id,
+                EndTime: due_ms,
+                PauseTime: 0,
+            }),
+        },
+    );
+}
+
 pub fn build_tree_info<S: PushSink + ?Sized>(
     ctx: &QuestContext<'_, S>,
     aq: &ActiveQuest,
@@ -1467,13 +1566,17 @@ pub fn build_tree_info<S: PushSink + ?Sized>(
         if !seen.insert(nid) {
             continue;
         }
-        let progress =
-            find_node_by_id(&nodes, nid).and_then(|n| build_child_node_progress(ctx, aq, n));
+        let node_opt = find_node_by_id(&nodes, nid);
+        let progress = node_opt.and_then(|n| build_child_node_progress(ctx, aq, n));
         if let Some(scene) = ctx.scene.as_deref()
             && let Some(due_ms) = scene.quest_timers.get_due_ms(aq.quest_id, nid)
         {
+            let timer_type = node_opt
+                .and_then(|n| get_child_condition(&n.data))
+                .map(child_quest_timer_type)
+                .unwrap_or("WaitTime");
             timer_infos.push(TimerInfoPb {
-                TimerType: b"WaitTime".to_vec(),
+                TimerType: timer_type.as_bytes().to_vec(),
                 NodeId: nid,
                 EndTime: due_ms,
                 PauseTime: 0,
@@ -1491,6 +1594,32 @@ pub fn build_tree_info<S: PushSink + ?Sized>(
                 )),
             },
         );
+    }
+
+    if let Some(scene) = ctx.scene.as_deref() {
+        for entry in scene.fail_timers.entries() {
+            if entry.quest_id != aq.quest_id {
+                continue;
+            }
+            let Some(fnode) = find_node_by_id(&nodes, entry.node_id) else {
+                continue;
+            };
+            if seen.insert(entry.node_id) {
+                tree_nodes.insert(
+                    entry.node_id,
+                    NodeInfo {
+                        Status: Some(NodeStatus::Activate),
+                        ExtraInfo: None,
+                    },
+                );
+            }
+            timer_infos.push(TimerInfoPb {
+                TimerType: quest_failed_timer_type(&fnode.data).as_bytes().to_vec(),
+                NodeId: entry.node_id,
+                EndTime: entry.due_ms,
+                PauseTime: 0,
+            });
+        }
     }
 
     init_tree_info(aq.quest_id, tree_nodes, timer_infos)
@@ -1810,6 +1939,7 @@ fn is_play_flow_client_flow<S: PushSink + ?Sized>(ctx: &QuestContext<'_, S>, act
 const CLIENT_EXECUTABLE_BT_ACTIONS: &[&str] = &[
     "AddTrialCharacter",
     "AdjustPlayerCamera",
+    "AdjustPlayerCameraGravity",
     "BvbPlayDialog",
     "BvbPlayerOperationConstraint",
     "CameraLookAt",
@@ -1824,6 +1954,7 @@ const CLIENT_EXECUTABLE_BT_ACTIONS: &[&str] = &[
     "ClientSetPlayerPos",
     "ClientSetSeasonState",
     "ClientUnlockAchievementSystemItem",
+    "CloseWalkingOverlayMontage",
     "CommonTip",
     "CommonTip2",
     "CompleteGuide",
@@ -1838,12 +1969,14 @@ const CLIENT_EXECUTABLE_BT_ACTIONS: &[&str] = &[
     "EnableKey4Func",
     "EnableNearbyTracking",
     "EnableSplineMoveModel",
+    "EnableTakePhotoClip",
     "EndCommonTip",
     "EnterMovieCamera",
     "EnterMovieMode",
     "EnterOrbitalCamera",
     "EntityLookAt",
     "EntityTurnTo",
+    "ExecBpActorFunc",
     "ExecClientBattleAction",
     "ExitDungeon",
     "ExitMovieCamera",
@@ -1858,6 +1991,9 @@ const CLIENT_EXECUTABLE_BT_ACTIONS: &[&str] = &[
     "HideTargetRange",
     "LockEntity",
     "Log",
+    "ModifyActorMaterial",
+    "ModifyActorMedia",
+    "MotorSoarInWindField",
     "MoveSceneItem",
     "MoveWithSpline",
     "NewMoveWithSpline",
@@ -1873,10 +2009,13 @@ const CLIENT_EXECUTABLE_BT_ACTIONS: &[&str] = &[
     "PlayDynamicSettlement",
     "PlayEffect",
     "PlayEffect2",
+    "PlayLevelSequence",
     "PlayMontage",
     "PlayRegisteredMontage",
+    "PlayWalkingOverlayMontage",
     "PlayerInput",
     "PlayerLookAt",
+    "PlayerLookTowards",
     "PostAkEvent",
     "Preload",
     "Prompt",
@@ -1887,16 +2026,24 @@ const CLIENT_EXECUTABLE_BT_ACTIONS: &[&str] = &[
     "RestorePhantomFormation",
     "RestorePlayerCameraAdjustment",
     "RunActions",
+    "SendAiEvent",
+    "SendClientEvent",
+    "SendSceneActorsEvent",
     "SetBattleState",
     "SetEntityClientVisibleSave",
     "SetNpcGroupPerform",
     "SetRegionConfig",
+    "SetSkillButtonEffect",
     "SetSportsState",
     "SetSubScreenMode",
     "SetTimeScale",
     "SetWuYinQuState",
     "ShowTargetRange",
+    "SlidePerformStart",
     "SlideRailEnd",
+    "SlideRailStart",
+    "SpecialOpModifyActorMaterialParamBySplineProgress",
+    "StartMotorCruise",
     "StartRoadNetworkNavigation",
     "StopCameraLookAt",
     "StopNewMoveWithSpline",
@@ -1905,6 +2052,8 @@ const CLIENT_EXECUTABLE_BT_ACTIONS: &[&str] = &[
     "SwitchSubLevels",
     "TakePlotPhoto",
     "TeleportDungeon",
+    "TetrisThrowBlock",
+    "TetrisTriggerDelayFall",
     "ToggleAirWall",
     "ToggleDragActorPlay",
     "ToggleHighlightExploreUi",
@@ -1913,11 +2062,17 @@ const CLIENT_EXECUTABLE_BT_ACTIONS: &[&str] = &[
     "TrapDefenseChangeMiniMap",
     "TrapDefensePlayerOperationConstraint",
     "TriggerCameraShake",
+    "TriggerDeadeyeMode",
     "TriggerGamepadShake",
     "TriggerSpecificScanEffect",
     "UnlockEntity",
     "UsePhantomSkill",
+    "VehicleEnterNpc",
     "VehicleMoveWithPathLine",
+    "VehiclePlayPassengerVoice",
+    "VehicleSetSpeedImmediately",
+    "VehicleSprint",
+    "VehicleWaterfallClimbing",
     "Wait",
     "WaitBattleCondition",
     "WaitUntilLevelSequenceReachMark",
@@ -2039,7 +2194,16 @@ pub fn eval_inline_condition<S: PushSink + ?Sized>(
     owner_id: i32,
     cb: &Value,
 ) -> bool {
-    let eval_ctx = ctx.make_eval_context_for_quest(owner_id);
+    eval_inline_condition_bt(ctx, BtType::BtTypeQuest, owner_id, cb)
+}
+
+pub fn eval_inline_condition_bt<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    bt_type: BtType,
+    owner_id: i32,
+    cb: &Value,
+) -> bool {
+    let eval_ctx = ctx.make_eval_context_for_bt(bt_type, owner_id);
     condition::eval_inline_condition_block(&eval_ctx, cb)
 }
 
@@ -2049,6 +2213,15 @@ pub fn eval_child_condition_auto<S: PushSink + ?Sized>(
     node: &NodeEntry,
 ) -> bool {
     should_auto_complete_child_quest(ctx, owner_id, node)
+}
+
+pub fn eval_child_condition_auto_bt<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    bt_type: BtType,
+    owner_id: i32,
+    node: &NodeEntry,
+) -> bool {
+    should_auto_complete_child_quest_for_bt(ctx, bt_type, owner_id, node)
 }
 
 pub fn get_child_condition_pub(data: &Value) -> Option<&Map<String, Value>> {
@@ -2066,8 +2239,9 @@ pub fn push_bt_level_events_for_type<S: PushSink + ?Sized>(
     if actions.is_empty() {
         return Ok(());
     }
+    let tree_inc_id = crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id);
     let bt_ctx = BehaviorTreeCtxPb {
-        IncId: i64::from(owner_id),
+        IncId: tree_inc_id,
         BtType: Some(bt_type),
         BtId: owner_id,
         NodeId: node_id,
@@ -2620,7 +2794,7 @@ fn push_dynamic_interact_entry<S: PushSink + ?Sized>(
                 GameCtx: Some(GameCtxPb {
                     CtxType: Some(GameCtxType::BehaviorTree),
                     CtxInfo: Some(GameCtxPbCtxInfoOneof::BehaviorTree(BehaviorTreeCtxPb {
-                        IncId: i64::from(quest_id),
+                        IncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, quest_id),
                         BtType: Some(bt_type),
                         BtId: quest_id,
                         NodeId: node_id,
@@ -2680,7 +2854,7 @@ pub fn push_bt_child_node_status<S: PushSink + ?Sized>(
                     UpdateNodeStatusNotify::MSG_ID,
                     &UpdateNodeStatusNotify {
                         TreeOwnerId: owner_id,
-                        TreeIncId: i64::from(owner_id),
+                        TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id),
                         NodeId: node.id,
                         Status: Some(node_status),
                     },
@@ -2690,7 +2864,7 @@ pub fn push_bt_child_node_status<S: PushSink + ?Sized>(
                 UpdateChildQuestNodeStatusNotify::MSG_ID,
                 &UpdateChildQuestNodeStatusNotify {
                     TreeOwnerId: owner_id,
-                    TreeIncId: i64::from(owner_id),
+                    TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id),
                     NodeId: node.id,
                     Status: Some(msg_status),
                 },
@@ -2708,7 +2882,7 @@ pub fn push_bt_child_node_status<S: PushSink + ?Sized>(
             UpdateChildQuestNodeStatusNotify::MSG_ID,
             &UpdateChildQuestNodeStatusNotify {
                 TreeOwnerId: owner_id,
-                TreeIncId: i64::from(owner_id),
+                TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id),
                 NodeId: node.id,
                 Status: Some(child_status),
             },
@@ -2726,7 +2900,7 @@ pub fn push_bt_child_node_status<S: PushSink + ?Sized>(
             UpdateChildQuestNodeStatusNotify::MSG_ID,
             &UpdateChildQuestNodeStatusNotify {
                 TreeOwnerId: owner_id,
-                TreeIncId: i64::from(owner_id),
+                TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id),
                 NodeId: node.id,
                 Status: Some(child_status),
             },
@@ -2735,7 +2909,7 @@ pub fn push_bt_child_node_status<S: PushSink + ?Sized>(
             UpdateNodeStatusNotify::MSG_ID,
             &UpdateNodeStatusNotify {
                 TreeOwnerId: owner_id,
-                TreeIncId: i64::from(owner_id),
+                TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id),
                 NodeId: node.id,
                 Status: Some(node_status),
             },
@@ -2745,7 +2919,7 @@ pub fn push_bt_child_node_status<S: PushSink + ?Sized>(
             UpdateNodeStatusNotify::MSG_ID,
             &UpdateNodeStatusNotify {
                 TreeOwnerId: owner_id,
-                TreeIncId: i64::from(owner_id),
+                TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id),
                 NodeId: node.id,
                 Status: Some(node_status),
             },
@@ -2754,7 +2928,7 @@ pub fn push_bt_child_node_status<S: PushSink + ?Sized>(
             UpdateChildQuestNodeStatusNotify::MSG_ID,
             &UpdateChildQuestNodeStatusNotify {
                 TreeOwnerId: owner_id,
-                TreeIncId: i64::from(owner_id),
+                TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, owner_id),
                 NodeId: node.id,
                 Status: Some(child_status),
             },
@@ -3052,19 +3226,27 @@ pub fn handle_interact_option<S: PushSink + ?Sized>(
         let tstr = json_str(tval.get("Type")).unwrap_or("");
         if tstr == "Flow" {
             if let Some(Value::Object(fv)) = tval.get("Flow") {
-                if !json_bool(fv.get("Async")).unwrap_or(false)
+                let is_async = json_bool(fv.get("Async")).unwrap_or(false);
+                if !is_async
                     && let Some(scene) = ctx.scene.as_deref_mut()
                     && scene.active_flow_inc_id != 0
                 {
                     scene.clear_active_flow();
                 }
                 start_flow_from_obj(ctx, quest_id, node.id, fv)?;
-                if let Some(scene) = ctx.scene.as_deref_mut()
-                    && scene.active_flow_inc_id != 0
-                    && scene.active_flow_quest_id == quest_id
-                    && scene.active_flow_node_id == node.id
-                {
-                    scene.active_flow_owner_entity_id = entity_id;
+                if let Some(scene) = ctx.scene.as_deref_mut() {
+                    if scene.is_flow_active_for_node(BtType::BtTypeQuest, quest_id, node.id) {
+                        scene.active_flow_owner_entity_id = entity_id;
+                    } else if is_async
+                        && let Some(af) = scene.async_flows.iter_mut().rev().find(|af| {
+                            af.bt_type == BtType::BtTypeQuest
+                                && af.quest_id == quest_id
+                                && af.node_id == node.id
+                                && af.owner_entity_id == 0
+                        })
+                    {
+                        af.owner_entity_id = entity_id;
+                    }
                 }
                 return Ok(false);
             }
@@ -3083,6 +3265,18 @@ pub fn handle_interact_option<S: PushSink + ?Sized>(
                 scene.active_flow_owner_entity_id = prev_owner;
             }
             res?;
+            if let Some(scene) = ctx.scene.as_deref_mut()
+                && scene.has_pending_or_deferred_flow_for_bt_node(
+                    BtType::BtTypeQuest,
+                    quest_id,
+                    node.id,
+                )
+            {
+                if scene.is_flow_active_for_node(BtType::BtTypeQuest, quest_id, node.id) {
+                    scene.active_flow_owner_entity_id = entity_id;
+                }
+                return Ok(false);
+            }
         }
     }
 
@@ -3614,6 +3808,15 @@ pub fn eval_compare_var_list<S: PushSink + ?Sized>(
     owner_id: i32,
     cond: &Map<String, Value>,
 ) -> bool {
+    eval_compare_var_list_bt(ctx, BtType::BtTypeQuest, owner_id, cond)
+}
+
+pub fn eval_compare_var_list_bt<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    bt_type: BtType,
+    owner_id: i32,
+    cond: &Map<String, Value>,
+) -> bool {
     let Some(Value::Array(conds)) = cond.get("Conditions") else {
         return true;
     };
@@ -3621,7 +3824,7 @@ pub fn eval_compare_var_list<S: PushSink + ?Sized>(
         return true;
     }
     let needed = json_int(cond.get("Count")).unwrap_or(0);
-    let eval_ctx = ctx.make_eval_context_for_quest(owner_id);
+    let eval_ctx = ctx.make_eval_context_for_bt(bt_type, owner_id);
     let passed = conds
         .iter()
         .filter_map(|item| item.as_object())
@@ -3921,6 +4124,15 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
     quest_id: i32,
     node: &NodeEntry,
 ) -> bool {
+    should_auto_complete_child_quest_for_bt(ctx, BtType::BtTypeQuest, quest_id, node)
+}
+
+pub(super) fn should_auto_complete_child_quest_for_bt<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    bt_type: BtType,
+    quest_id: i32,
+    node: &NodeEntry,
+) -> bool {
     let Some(cond) = get_child_condition(&node.data) else {
         return true;
     };
@@ -3969,7 +4181,7 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
     }
 
     if let Some(delay_ms) = tree::parse_timer_delay_ms(cond) {
-        return ctx.scene.is_none() || delay_ms <= 0;
+        return delay_ms <= 0;
     }
 
     match ctype {
@@ -4003,7 +4215,7 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
             false
         }
         "CheckConditionGroup" | "CheckClientConditionGroup" => {
-            let eval_ctx = ctx.make_eval_context_for_quest(quest_id);
+            let eval_ctx = ctx.make_eval_context_for_bt(bt_type, quest_id);
             if let Some(sub) = cond.get("Condition") {
                 condition::eval_inline_condition_block(&eval_ctx, sub)
             } else if let Some(gid) = json_int(cond.get("GroupId")) {
@@ -4012,7 +4224,7 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
                 false
             }
         }
-        "CompareVar" => eval_compare_var_list(ctx, quest_id, cond),
+        "CompareVar" => eval_compare_var_list_bt(ctx, bt_type, quest_id, cond),
         "CheckLevelPlay" => is_level_play_satisfied(ctx, cond),
         "GetItem" => has_all_items(ctx, cond.get("Items")),
         "CheckEntityState" => is_check_entity_state_satisfied(ctx, cond),
@@ -4040,7 +4252,12 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
             } else if et_type == "VarValueChange"
                 && let Some(Value::Object(vobj)) = et.get("Var")
             {
-                let cur = resolve_var_int_for_owner(ctx, quest_id, Some(&Value::Object(vobj.clone())));
+                let cur = crate::helpers::quest_types::resolve_var_int_for_bt(
+                    ctx,
+                    bt_type,
+                    quest_id,
+                    Some(&Value::Object(vobj.clone())),
+                );
                 if let Some(want_v) = et.get("Value") {
                     return json_int(Some(want_v)).is_some_and(|w| w == cur);
                 }
@@ -4048,10 +4265,21 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
             }
             false
         }
-        "AwakeAndLoadEntity" => ctx
-            .progress_comp
-            .as_deref()
-            .is_some_and(|pc| pc.info.get_key_int(&format!("awake_node:{quest_id}")) == i64::from(node.id)),
+        "AwakeAndLoadEntity" => {
+            let awake_key = if bt_type == BtType::BtTypeLevelPlay {
+                format!("lp_awake_node:{quest_id}")
+            } else {
+                format!("awake_node:{quest_id}")
+            };
+            let inc_key = format!(
+                "awake_node:{}",
+                crate::helpers::quest_types::bt_tree_inc_id(bt_type, quest_id)
+            );
+            ctx.progress_comp.as_deref().is_some_and(|pc| {
+                pc.info.get_key_int(&awake_key) == i64::from(node.id)
+                    || pc.info.get_key_int(&inc_key) == i64::from(node.id)
+            })
+        }
         "CheckUiGame" => ctx
             .progress_comp
             .as_deref()
@@ -4168,9 +4396,21 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
             }),
         "CheckFinishLoading"
         | "CheckElementalBoxState"
+        | "CheckElementalWaterBoxStagnationSeq"
         | "CheckEntityBuffStack"
+        | "CheckEntityIsVisibility"
+        | "CheckEntityPrefabPerformanceType"
+        | "CheckEntityReward"
         | "CheckEntitySelfDirection"
+        | "CheckIsInDollGrabGamePlay"
         | "CheckIsInDragActorPlay"
+        | "CheckLevelPlayState"
+        | "CheckLevelPlayCompleteNumber"
+        | "CheckLevelPlayChildQuestFinished"
+        | "CompareQuestState"
+        | "CheckQuestState"
+        | "CheckChildQuestFinished"
+        | "CheckQuestFinished"
         | "CompareTeammateDie"
         | "CompareCost"
         | "IsCapableToEvolve"
@@ -4182,9 +4422,11 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
         | "CheckHasFollowShooter"
         | "CheckIsGramophonePlayingMusic"
         | "CheckPhotographCameraParam"
+        | "CheckPlayerCanJoinActivity"
         | "CheckPlayerUseSkill"
+        | "CheckRogueAbilitySelect"
         | "CheckRoverRogueAbilitySelect" => {
-            let eval_ctx = ctx.make_eval_context_for_quest(quest_id);
+            let eval_ctx = ctx.make_eval_context_for_bt(bt_type, quest_id);
             condition::eval_single_inline_condition_obj(&eval_ctx, cond)
         }
         _ => false,

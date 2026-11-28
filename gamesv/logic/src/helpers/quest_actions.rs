@@ -7,12 +7,14 @@ use sonoro_gamesv_data::Assets;
 use sonoro_gamesv_data::asset_indexes;
 use sonoro_gamesv_data::tables::entity_components::range::ShapeConfig;
 use sonoro_gamesv_data::tables::level_entity_config::LevelEntityConfig;
+use sonoro_gamesv_fs::cosmetic_info::CosmeticInfo;
+use sonoro_gamesv_fs::file_util;
 use sonoro_gamesv_fs::inventory_info::InventoryInfo;
 use sonoro_gamesv_fs::last_scene_info::LastSceneInfo;
 use sonoro_gamesv_fs::quest_info::{QuestInfo, append_unique_int, append_unique_str, remove_int_value, remove_str_value};
 use sonoro_proto::enums::{
     BtType, ChangeReason, ERemoveEntityType, ExitVehicleType, GameCtxType, GravityFlipType,
-    IllustratedType, LiftMoveType, MoveStatus, SuspendType, TeleportReason,
+    IllustratedType, LiftMoveType, MoveStatus, SuspendType, TeleportReason, TimerSetType,
 };
 use sonoro_proto::pb::{
     ActionResetPosPrePerformanceNotify, AddGuestNotify, AudioStatePb, AudioStateUpdateNotify,
@@ -37,15 +39,15 @@ use sonoro_proto::pb::{
     SceneTimeInfo, ShortMessageInfo, ShortMessageUpdateNotify, StateChangeActionCtxPb,
     SummonEntityNotify,
     SyncSceneTimeNotify, TeleportNotify, TeleportUpdateNotify, TemporaryTeleportAllInfoNotify,
-    TimeLockInfoNotify, TrialRoleItem, VarDefinePb, VarDefinePbValueOneof, Vector,
-    VehicleUpdateEntityNotify, VehicleUpdateNotify, WeatherNotify,
+    TimeLockInfoNotify, TimerInfoPb, TrialRoleItem, UpdateTimerInfoNotify, VarDefinePb,
+    VarDefinePbValueOneof, Vector, VehicleUpdateEntityNotify, VehicleUpdateNotify, WeatherNotify,
 };
 use sonoro_proto::wire::PbEnum;
 
 use crate::component::comp_util;
 use crate::component::entity::small::{EntityState, EntityType, LiftComponent, MoveSplineComponent};
 use crate::component::entity::tag::TagComponent;
-use crate::component::player::PlayerProgressComponent;
+use crate::component::player::{PlayerCosmeticComponent, PlayerProgressComponent};
 use crate::events::{BuffAdditionEntry, Event};
 use crate::fsm::types::wake_reason;
 use crate::handlers::tags as tags_handler;
@@ -54,8 +56,8 @@ use crate::helpers::condition::{
 };
 use crate::helpers::quest_types::{
     ActionCallbacks, DeferredBtVar, QuestContext, json_bool, json_float, json_i64, json_int,
-    json_str, parse_int_list, parse_str_list, resolve_var_int_for_owner, resolve_var_name,
-    scoped_var_key_with_owner,
+    json_str, parse_int_list, parse_str_list, resolve_var_int_for_bt, resolve_var_name,
+    scoped_var_key_with_bt,
 };
 use crate::helpers::reward::{self, RewardItem};
 use crate::helpers::{gameplay_tags, gravity, map as map_helper, morale, prologue_quest, spline_state, trial_roles};
@@ -88,21 +90,30 @@ fn screen_fade_delay_ms(act: &Value) -> i64 {
     let Some(obj) = act.as_object() else {
         return 0;
     };
-    let Some("FadeInScreen" | "FadeOutScreen") = json_str(obj.get("Name")) else {
+    let Some(name @ ("FadeInScreen" | "FadeOutScreen")) = json_str(obj.get("Name")) else {
         return 0;
     };
     let secs = obj
         .get("Params")
         .and_then(Value::as_object)
-        .and_then(|p| json_float(p.get("Duration")))
+        .and_then(|p| {
+            json_float(p.get("Duration")).or_else(|| {
+                p.get("Ease")
+                    .and_then(Value::as_object)
+                    .and_then(|e| json_float(e.get("Duration")))
+            })
+        })
         .unwrap_or(0.0);
     let dur_ms = if secs.is_finite() && secs > 0.0 {
         (f64::from(secs) * 1000.0).round() as i64
     } else {
         0
     };
-    // Client opens BlackScreenFadeView asynchronously during FadeIn/FadeOut; wait past completion.
-    (dur_ms + 180).clamp(180, 300_000)
+    // Client opens BlackScreenFadeView/CameraFade asynchronously (`OpenLoading` + `GuaranteeActionInfo`
+    // takes ~250-450ms on top of Ease.Duration); wait past completion so a follow-up node's
+    // FadeOutScreen never beats RemoveLoadingPerform registration.
+    let margin_ms = if name == "FadeInScreen" { 500 } else { 250 };
+    (dur_ms + margin_ms).clamp(margin_ms, 300_000)
 }
 
 #[derive(Clone, Copy)]
@@ -120,39 +131,21 @@ pub fn execute_action_list<S: PushSink + ?Sized>(
 ) -> io::Result<()> {
     let mut weather_defer: Option<WeatherDeferTarget> = None;
     let mut cumulative_wait_ms = 0i64;
+    let mut has_queued_wait_action = false;
 
-    for act in actions {
+    for (idx, act) in actions.iter().enumerate() {
         let can_defer = !callbacks.defer_flow_transition && ctx.scene.is_some();
-        let should_defer_behind_wait = matches!(weather_defer, Some(WeatherDeferTarget::Wait(_)))
-            && (is_deferred_weather_action(act) || is_deferred_wait_var_action(act));
-        let should_defer_behind_flow = matches!(weather_defer, Some(WeatherDeferTarget::Flow(_)))
-            && is_deferred_weather_action(act);
-        if can_defer
-            && (should_defer_behind_wait || should_defer_behind_flow)
-            && let Some(target) = weather_defer
-            && let Some(scene) = ctx.scene.as_deref_mut()
-        {
-            match target {
-                WeatherDeferTarget::Flow(flow_inc) => {
-                    scene.enqueue_post_flow_actions(
-                        flow_inc,
-                        callbacks.bt_type,
-                        quest_id,
-                        node_id,
-                        vec![act.clone()],
-                    );
-                }
-                WeatherDeferTarget::Wait(due_ms) => {
-                    scene.enqueue_wait_actions(
-                        due_ms,
-                        callbacks.bt_type,
-                        quest_id,
-                        node_id,
-                        vec![act.clone()],
-                    );
-                }
+        if can_defer && let Some(WeatherDeferTarget::Flow(flow_inc)) = weather_defer {
+            if let Some(scene) = ctx.scene.as_deref_mut() {
+                scene.enqueue_post_flow_actions(
+                    flow_inc,
+                    callbacks.bt_type,
+                    quest_id,
+                    node_id,
+                    actions[idx..].to_vec(),
+                );
             }
-            continue;
+            break;
         }
 
         let is_sync_flow =
@@ -164,22 +157,53 @@ pub fn execute_action_list<S: PushSink + ?Sized>(
             0
         };
 
+        if can_defer && let Some(WeatherDeferTarget::Wait(due_ms)) = weather_defer {
+            if step_delay_ms > 0 {
+                cumulative_wait_ms += step_delay_ms;
+                weather_defer = Some(WeatherDeferTarget::Wait(now_millis() + cumulative_wait_ms));
+                if !has_queued_wait_action {
+                    execute_action(ctx, callbacks, quest_id, node_id, act)?;
+                }
+                continue;
+            }
+            if is_sync_flow {
+                if let Some(scene) = ctx.scene.as_deref_mut() {
+                    scene.enqueue_wait_actions(
+                        due_ms,
+                        callbacks.bt_type,
+                        quest_id,
+                        node_id,
+                        actions[idx..].to_vec(),
+                    );
+                }
+                break;
+            }
+            if is_deferred_weather_action(act) || is_deferred_wait_var_action(act) {
+                if let Some(scene) = ctx.scene.as_deref_mut() {
+                    has_queued_wait_action = true;
+                    scene.enqueue_wait_actions(
+                        due_ms,
+                        callbacks.bt_type,
+                        quest_id,
+                        node_id,
+                        vec![act.clone()],
+                    );
+                }
+                continue;
+            }
+        }
+
         execute_action(ctx, callbacks, quest_id, node_id, act)?;
 
         if is_sync_flow && let Some(scene) = ctx.scene.as_deref() {
-            if scene.active_flow_inc_id != 0
-                && scene.active_flow_quest_id == quest_id
-                && scene.active_flow_node_id == node_id
-            {
+            if scene.is_flow_active_for_node(callbacks.bt_type, quest_id, node_id) {
                 weather_defer = Some(WeatherDeferTarget::Flow(Some(scene.active_flow_inc_id)));
-            } else if scene.has_pending_flow_for_node(quest_id, node_id) {
+            } else if scene.has_pending_flow_for_bt_node(callbacks.bt_type, quest_id, node_id) {
                 weather_defer = Some(WeatherDeferTarget::Flow(None));
             }
         } else if step_delay_ms > 0 {
             cumulative_wait_ms += step_delay_ms;
-            if !matches!(weather_defer, Some(WeatherDeferTarget::Flow(_))) {
-                weather_defer = Some(WeatherDeferTarget::Wait(now_millis() + cumulative_wait_ms));
-            }
+            weather_defer = Some(WeatherDeferTarget::Wait(now_millis() + cumulative_wait_ms));
         }
     }
     Ok(())
@@ -249,9 +273,17 @@ pub fn execute_action<S: PushSink + ?Sized>(
         "AddBuffToEntity" => apply_quest_buff_action(ctx, params, false, false),
         "RemoveBuffFromEntity" => apply_quest_buff_action(ctx, params, false, true),
         "PlayFlow" => {
-            if let Some(cb) = callbacks.start_flow {
+            if callbacks.start_flow.is_some() {
                 let act_async = json_bool(act_obj.get("Async"));
-                cb(ctx, quest_id, node_id, params, true, act_async)?;
+                crate::helpers::quest_engine::triggers::start_flow_with_mode_bt(
+                    ctx,
+                    quest_id,
+                    node_id,
+                    callbacks.bt_type,
+                    params,
+                    true,
+                    act_async,
+                )?;
             }
         }
         "ChangeState" => {
@@ -260,15 +292,18 @@ pub fn execute_action<S: PushSink + ?Sized>(
             {
                 if callbacks.defer_flow_transition {
                     scene.flow_next_state_id = sid;
-                } else if let Some(cb) = callbacks.start_flow_state
+                } else if callbacks.start_flow_state.is_some()
                     && !scene.active_flow_list_name.is_empty()
                 {
+                    let bt_type = scene.active_flow_bt_type;
                     let qid = scene.active_flow_quest_id;
                     let nid = scene.active_flow_node_id;
                     let fln = scene.active_flow_list_name.clone();
                     let fid = scene.active_flow_id;
                     scene.clear_active_flow();
-                    cb(ctx, qid, nid, &fln, fid, sid, false)?;
+                    crate::helpers::quest_engine::triggers::start_flow_params_bt(
+                        ctx, qid, nid, bt_type, &fln, fid, sid, false, false,
+                    )?;
                 }
             }
         }
@@ -401,13 +436,15 @@ pub fn execute_action<S: PushSink + ?Sized>(
             transition_to_scene(ctx, did, pos, None)?;
         }
         "ExitDungeon" => leave_current_dungeon(ctx, 0)?,
-        "SetAudioState" => apply_set_audio_state(ctx, quest_id, params),
+        "SetAudioState" => apply_set_audio_state(ctx, callbacks.bt_type, quest_id, params),
         "AddPlayBubble" => {
             let guid = json_str(act_obj.get("ActionGuid")).unwrap_or("");
             apply_add_play_bubble(ctx, params, guid);
         }
         "ClearPlayBubble" => apply_clear_play_bubble(ctx, params),
-        "AddFlowInteractOption" => apply_add_flow_interact_option(ctx, quest_id, node_id, params),
+        "AddFlowInteractOption" => {
+            apply_add_flow_interact_option(ctx, callbacks.bt_type, quest_id, node_id, params);
+        }
         "RemoveFlowInteractOption" => apply_remove_flow_interact_option(ctx, params),
         "SetEntityPos" => apply_set_entity_pos(ctx, params)?,
         "ResetEntityPos" => apply_reset_entity_pos(ctx, params)?,
@@ -417,7 +454,18 @@ pub fn execute_action<S: PushSink + ?Sized>(
         "UpdateTrialCharacter" => apply_update_trial_character(ctx, params)?,
         "RestoreTrialCharacter" => remove_trial_roles(ctx, &[])?,
         "FinishCondition" => {
-            if let Some(cb) = callbacks.on_finish_condition {
+            if callbacks.bt_type == BtType::BtTypeLevelPlay {
+                if quest_id > 0
+                    && node_id > 0
+                    && let Some(mut lp_ctx) = crate::helpers::level_play::LevelPlayContext::from_quest_ctx(ctx)
+                {
+                    let _ = crate::helpers::level_play::on_server_finish_level_play_condition(
+                        &mut lp_ctx,
+                        quest_id,
+                        node_id,
+                    )?;
+                }
+            } else if let Some(cb) = callbacks.on_finish_condition {
                 cb(ctx, quest_id, node_id)?;
             }
         }
@@ -520,7 +568,9 @@ pub fn execute_action<S: PushSink + ?Sized>(
         "DangoAbyssCreateRewardTreasureBox" => {
             super::quest_mode_actions::apply_dango_abyss_create_reward_box(ctx)?;
         }
-        "ChangeTimer" | "ToggleTimerPauseState" => apply_timer_action(ctx, name, params)?,
+        "ChangeTimer" | "ToggleTimerPauseState" => {
+            apply_timer_action(ctx, callbacks, quest_id, name, params)?
+        }
         "RecordDungeonEvent" => {
             let eid = json_int(params.get("EventConfig")).unwrap_or(0);
             record_progress_claim(ctx, &format!("inst:event:{eid}"))?;
@@ -942,7 +992,14 @@ pub fn execute_action<S: PushSink + ?Sized>(
             apply_ai_control_action(ctx, name, params)?;
         }
         "ManualOccupations" | "ForceOccupations" => {
-            apply_occupation_action(ctx, quest_id, node_id, name == "ForceOccupations", params)?;
+            apply_occupation_action(
+                ctx,
+                callbacks.bt_type,
+                quest_id,
+                node_id,
+                name == "ForceOccupations",
+                params,
+            )?;
         }
         "SetNpcGroupPerform" => apply_set_npc_group_perform(ctx, params)?,
         "RemoveNpcGroupPerform" => {
@@ -1121,8 +1178,6 @@ fn apply_unlock_system_item<S: PushSink + ?Sized>(
     if id <= 0 {
         return;
     }
-    ctx.quest_comp.info.unlock_system(id);
-    push_func_open(ctx);
     if sys_type == "AtlasSystem" {
         let utype = uopt_obj
             .and_then(|u| json_str(u.get("Type")))
@@ -1133,21 +1188,36 @@ fn apply_unlock_system_item<S: PushSink + ?Sized>(
             _ => None,
         };
         if let Some(it) = ill_type {
+            let player_id = ctx.basic_comp.player_id;
+            let cos_path = format!("player/{player_id}/{}", CosmeticInfo::DATA_PATH);
+            let mut cosmetic_info = file_util::load_zon::<CosmeticInfo>(ctx.fs, &cos_path)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let ill_code = it.to_i32();
+            let is_new = cosmetic_info.find_illustrated(ill_code, id).is_none();
+            let now_sec = u32::try_from(now_unix_secs().max(1)).unwrap_or(1);
+            let rec = cosmetic_info.unlock_illustrated(ill_code, id, now_sec);
+            let _ = PlayerCosmeticComponent::save(ctx.fs, player_id, &cosmetic_info);
             ctx.sink.push(
                 IllustratedUnlockNotify::MSG_ID,
                 &IllustratedUnlockNotify {
-                    IsNew: true,
+                    IsNew: is_new,
                     Type: Some(it),
                     Entry: Some(IllustratedEntry {
-                        Id: id,
-                        Num: 1,
-                        IsRead: false,
+                        Id: rec.id,
+                        CreateTime: rec.create_time,
+                        Num: rec.num,
+                        IsRead: rec.is_read,
                         ..Default::default()
                     }),
                 },
             );
         }
+        return;
     }
+    ctx.quest_comp.info.unlock_system(id);
+    push_func_open(ctx);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3826,6 +3896,7 @@ fn apply_enable_system_action<S: PushSink + ?Sized>(
         push_func_open(ctx);
         return;
     }
+    remove_int_value(&mut ctx.quest_comp.info.unlocked_systems, sys_id);
     ctx.sink.push(
         sonoro_proto::pb::FuncOpenNotify::MSG_ID,
         &sonoro_proto::pb::FuncOpenNotify {
@@ -4009,6 +4080,7 @@ fn emit_var_changed<S: PushSink + ?Sized>(
     if owner_id > 0 {
         if let Some(deferred) = callbacks.deferred_bt_vars.as_deref_mut() {
             deferred.push(DeferredBtVar {
+                bt_type: callbacks.bt_type,
                 owner_id,
                 var_name: var_name.to_string(),
                 var_define,
@@ -4018,7 +4090,10 @@ fn emit_var_changed<S: PushSink + ?Sized>(
                 BtVarUpdateNotify::MSG_ID,
                 &BtVarUpdateNotify {
                     TreeOwnerId: owner_id,
-                    TreeIncId: i64::from(owner_id),
+                    TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(
+                        callbacks.bt_type,
+                        owner_id,
+                    ),
                     VarName: var_name.as_bytes().to_vec(),
                     VarDefine: Some(var_define),
                 },
@@ -4064,8 +4139,16 @@ fn write_set_var_int_and_emit<S: PushSink + ?Sized>(
     is_global: bool,
 ) -> io::Result<()> {
     ctx.quest_comp.info.set_var_int(store_key, iv);
-    if is_global {
-        persist_global_var_int(ctx, base_name, raw_i64);
+    if !ctx.quest_comp.info.get_var_str(store_key).is_empty() {
+        ctx.quest_comp.info.set_var_str(store_key, "");
+    }
+    if is_global && let Some(pc) = ctx.progress_comp.as_deref_mut() {
+        let gk = format!("var:{base_name}");
+        pc.info.set_key_int(&gk, raw_i64);
+        if !pc.info.get_key_str(&gk).is_empty() {
+            pc.info.set_key_str(&gk, "");
+        }
+        let _ = pc.save(ctx.fs);
     }
     emit_var_changed(
         ctx,
@@ -4075,6 +4158,45 @@ fn write_set_var_int_and_emit<S: PushSink + ?Sized>(
         VarDefinePb {
             VarType: 1,
             Value: Some(VarDefinePbValueOneof::Int(raw_i64)),
+        },
+        is_global,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_set_var_float_and_emit<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    callbacks: &mut ActionCallbacks<'_, S>,
+    owner_id: i32,
+    base_name: &str,
+    store_key: &str,
+    f: f64,
+    is_global: bool,
+) -> io::Result<()> {
+    let f = if f.is_finite() { f } else { 0.0 };
+    let iv = f.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+    let f_str = f.to_string();
+    ctx.quest_comp.info.set_var_int(store_key, iv);
+    ctx.quest_comp.info.set_var_str(store_key, &f_str);
+    if is_global {
+        let scaled = (f * 1000.0)
+            .round()
+            .clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+        if let Some(pc) = ctx.progress_comp.as_deref_mut() {
+            let gk = format!("var:{base_name}");
+            pc.info.set_key_int(&gk, scaled);
+            pc.info.set_key_str(&gk, &f_str);
+            let _ = pc.save(ctx.fs);
+        }
+    }
+    emit_var_changed(
+        ctx,
+        callbacks,
+        owner_id,
+        base_name,
+        VarDefinePb {
+            VarType: 3,
+            Value: Some(VarDefinePbValueOneof::Float(f as f32)),
         },
         is_global,
     )
@@ -4099,10 +4221,11 @@ fn apply_set_var<S: PushSink + ?Sized>(
         return Ok(());
     };
 
+    let left_is_float = json_str(left.get("Type")) == Some("Float");
     let src = json_str(left.get("Source")).unwrap_or("Self");
     let is_global = src == "Global";
     let store_key = if !is_global {
-        scoped_var_key_with_owner(ctx.scene.as_deref(), owner_id, left, base_name)
+        scoped_var_key_with_bt(ctx.scene.as_deref(), callbacks.bt_type, owner_id, left, base_name)
             .unwrap_or_else(|| base_name.to_string())
     } else {
         base_name.to_string()
@@ -4129,27 +4252,14 @@ fn apply_set_var<S: PushSink + ?Sized>(
                 )?;
             }
             Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
+                if !left_is_float && let Some(i) = n.as_i64() {
                     let iv = i.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
                     write_set_var_int_and_emit(
                         ctx, callbacks, owner_id, base_name, &store_key, iv, i, is_global,
                     )?;
                 } else if let Some(f) = n.as_f64() {
-                    let iv = f.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
-                    ctx.quest_comp.info.set_var_int(&store_key, iv);
-                    if is_global {
-                        persist_global_var_int(ctx, base_name, (f * 1000.0) as i64);
-                    }
-                    emit_var_changed(
-                        ctx,
-                        callbacks,
-                        owner_id,
-                        base_name,
-                        VarDefinePb {
-                            VarType: 3,
-                            Value: Some(VarDefinePbValueOneof::Float(f as f32)),
-                        },
-                        is_global,
+                    write_set_var_float_and_emit(
+                        ctx, callbacks, owner_id, base_name, &store_key, f, is_global,
                     )?;
                 }
             }
@@ -4173,30 +4283,50 @@ fn apply_set_var<S: PushSink + ?Sized>(
             _ => {}
         }
     } else if json_str(right.get("Source")) == Some("System") {
-        let iv = crate::helpers::condition::eval_system_var(
-            &ctx.make_eval_context_for_quest(owner_id),
+        let val_f = crate::helpers::condition::eval_system_var(
+            &ctx.make_eval_context_for_bt(callbacks.bt_type, owner_id),
             right,
         )
-        .map_or(0, |f| f.round() as i32);
-        write_set_var_int_and_emit(
-            ctx,
-            callbacks,
-            owner_id,
-            base_name,
-            &store_key,
-            iv,
-            i64::from(iv),
-            is_global,
-        )?;
+        .unwrap_or(0.0);
+        if left_is_float {
+            write_set_var_float_and_emit(
+                ctx, callbacks, owner_id, base_name, &store_key, val_f, is_global,
+            )?;
+        } else {
+            let iv = val_f.round() as i32;
+            write_set_var_int_and_emit(
+                ctx,
+                callbacks,
+                owner_id,
+                base_name,
+                &store_key,
+                iv,
+                i64::from(iv),
+                is_global,
+            )?;
+        }
     } else if let Some(src_name) = resolve_var_name(right) {
         let src_type = json_str(right.get("Type")).unwrap_or("");
         let src_is_global = json_str(right.get("Source")) == Some("Global");
         if src_type == "String" {
-            let sk = scoped_var_key_with_owner(ctx.scene.as_deref(), owner_id, right, src_name)
+            let sk = scoped_var_key_with_bt(ctx.scene.as_deref(), callbacks.bt_type, owner_id, right, src_name)
                 .unwrap_or_else(|| src_name.to_string());
             let s1 = ctx.quest_comp.info.get_var_str(&sk);
             let sv = if !s1.is_empty() {
                 s1.to_string()
+            } else if callbacks.bt_type == BtType::BtTypeLevelPlay
+                && owner_id > 0
+                && !src_is_global
+                && !ctx
+                    .quest_comp
+                    .info
+                    .get_var_str(&format!("Self:{owner_id}:{src_name}"))
+                    .is_empty()
+            {
+                ctx.quest_comp
+                    .info
+                    .get_var_str(&format!("Self:{owner_id}:{src_name}"))
+                    .to_string()
             } else if src_is_global
                 && let Some(ps) = ctx
                     .progress_comp
@@ -4223,8 +4353,14 @@ fn apply_set_var<S: PushSink + ?Sized>(
                 },
                 is_global,
             )?;
+        } else if left_is_float || src_type == "Float" {
+            let eval_ctx = ctx.make_eval_context_for_bt(callbacks.bt_type, owner_id);
+            let fv = crate::helpers::condition::resolve_var_float(&eval_ctx, Some(right_val));
+            write_set_var_float_and_emit(
+                ctx, callbacks, owner_id, base_name, &store_key, fv, is_global,
+            )?;
         } else {
-            let iv = resolve_var_int_for_owner(ctx, owner_id, Some(right_val));
+            let iv = resolve_var_int_for_bt(ctx, callbacks.bt_type, owner_id, Some(right_val));
             write_set_var_int_and_emit(
                 ctx,
                 callbacks,
@@ -4255,16 +4391,48 @@ fn apply_calculate_var<S: PushSink + ?Sized>(
     let src = json_str(res_obj.get("Source")).unwrap_or("Self");
     let is_global = src == "Global";
     let store_key = if !is_global {
-        scoped_var_key_with_owner(ctx.scene.as_deref(), owner_id, res_obj, base_name)
-            .unwrap_or_else(|| base_name.to_string())
+        scoped_var_key_with_bt(
+            ctx.scene.as_deref(),
+            callbacks.bt_type,
+            owner_id,
+            res_obj,
+            base_name,
+        )
+        .unwrap_or_else(|| base_name.to_string())
     } else {
         base_name.to_string()
     };
 
-    let v1 = resolve_var_int_for_owner(ctx, owner_id, params.get("Var1"));
-    let v2 = resolve_var_int_for_owner(ctx, owner_id, params.get("Var2"));
     let op = json_str(params.get("Op")).unwrap_or("Add");
+    let is_float = json_str(res_obj.get("Type")) == Some("Float")
+        || params
+            .get("Var1")
+            .and_then(Value::as_object)
+            .and_then(|v| json_str(v.get("Type")))
+            == Some("Float")
+        || params
+            .get("Var2")
+            .and_then(Value::as_object)
+            .and_then(|v| json_str(v.get("Type")))
+            == Some("Float");
+    if is_float {
+        let eval_ctx = ctx.make_eval_context_for_bt(callbacks.bt_type, owner_id);
+        let f1 = crate::helpers::condition::resolve_var_float(&eval_ctx, params.get("Var1"));
+        let f2 = crate::helpers::condition::resolve_var_float(&eval_ctx, params.get("Var2"));
+        let out_f = match op {
+            "Add" => f1 + f2,
+            "Sub" => f1 - f2,
+            "Mul" | "Mut" => f1 * f2,
+            "Div" if f2.abs() > f64::EPSILON => f1 / f2,
+            _ => f1,
+        };
+        return write_set_var_float_and_emit(
+            ctx, callbacks, owner_id, base_name, &store_key, out_f, is_global,
+        );
+    }
 
+    let v1 = resolve_var_int_for_bt(ctx, callbacks.bt_type, owner_id, params.get("Var1"));
+    let v2 = resolve_var_int_for_bt(ctx, callbacks.bt_type, owner_id, params.get("Var2"));
     let out = match op {
         "Add" => v1.saturating_add(v2),
         "Sub" => v1.saturating_sub(v2),
@@ -4273,19 +4441,14 @@ fn apply_calculate_var<S: PushSink + ?Sized>(
         _ => v1,
     };
 
-    ctx.quest_comp.info.set_var_int(&store_key, out);
-    if is_global {
-        persist_global_var_int(ctx, base_name, i64::from(out));
-    }
-    emit_var_changed(
+    write_set_var_int_and_emit(
         ctx,
         callbacks,
         owner_id,
         base_name,
-        VarDefinePb {
-            VarType: 1,
-            Value: Some(VarDefinePbValueOneof::Int(i64::from(out))),
-        },
+        &store_key,
+        out,
+        i64::from(out),
         is_global,
     )
 }
@@ -4716,9 +4879,54 @@ fn apply_interact_collect_or_reward<S: PushSink + ?Sized>(
     }
 
     if let Some(lp_id) = completed_lp_id {
-        remove_int_value(&mut ctx.quest_comp.info.progress.entered_level_plays, lp_id);
-        ctx.quest_comp.info.mark_level_play_completed(lp_id);
-        record_progress_int(ctx, &format!("lp_state:{lp_id}"), 3, false)?;
+        if let Some(mut lp_ctx) = crate::helpers::level_play::LevelPlayContext::from_quest_ctx(ctx)
+        {
+            crate::helpers::level_play::complete_level_play(&mut lp_ctx, lp_id)?;
+        } else {
+            let was_completed = ctx.quest_comp.info.completed_level_plays.contains(&lp_id);
+            let was_entered =
+                remove_int_value(&mut ctx.quest_comp.info.progress.entered_level_plays, lp_id);
+            ctx.quest_comp.info.mark_level_play_completed(lp_id);
+            ctx.quest_comp.save(ctx.fs)?;
+            record_progress_int(ctx, &format!("lp_state:{lp_id}"), 3, false)?;
+            let reward_cnt = if cfg_id > 0 {
+                ctx.progress_comp
+                    .as_deref()
+                    .map_or(0, |pc| pc.info.get_key_int(&format!("lp:reward_cnt:{cfg_id}")))
+                    .clamp(0, i64::from(i32::MAX)) as i32
+            } else {
+                1
+            };
+            if was_entered && !was_completed {
+                ctx.sink.push(
+                    sonoro_proto::pb::LevelPlayFirstNotify::MSG_ID,
+                    &sonoro_proto::pb::LevelPlayFirstNotify { Id: lp_id },
+                );
+            }
+            ctx.sink.push(
+                LevelPlayStateNotify::MSG_ID,
+                &LevelPlayStateNotify {
+                    Id: lp_id,
+                    State: 3,
+                    CompleteNumber: 1,
+                },
+            );
+            ctx.sink.push(
+                sonoro_proto::pb::LevelPlayInfoNotify::MSG_ID,
+                &sonoro_proto::pb::LevelPlayInfoNotify {
+                    LevelPlayInfo: vec![sonoro_proto::pb::LevelPlayInfo {
+                        Id: lp_id,
+                        IsFirst: was_entered && !was_completed,
+                        State: 3,
+                        UpdateTime: 0,
+                        GetRewardCount: reward_cnt,
+                    }],
+                },
+            );
+            if !was_completed {
+                crate::helpers::quest_engine::events::on_level_play_completed(ctx, lp_id)?;
+            }
+        }
     }
 
     if is_lp_reward && cfg_id > 0 {
@@ -4840,29 +5048,71 @@ fn apply_reset_level_play_action<S: PushSink + ?Sized>(
         if remove_int_value(&mut ctx.quest_comp.info.progress.entered_level_plays, lpid) {
             dirty_q = true;
         }
-        record_progress_int(ctx, &format!("lp_state:{lpid}"), 0, false)?;
         if let Some(pc) = ctx.progress_comp.as_deref_mut() {
+            let prefix_act = format!("lp_act:{lpid}:");
             let prefix_kill = format!("lp_kill:{lpid}:");
             let prefix_node = format!("lp_node:{lpid}:");
+            let prefix_done = format!("lp_done:{lpid}:");
+            let prefix_fin = format!("lp_fin:{lpid}:");
+            let prefix_node_fin = format!("lp_node_fin:{lpid}:");
+            let prefix_interact = format!("lp_interact:{lpid}:");
+            let prefix_score = format!("lp_score:{lpid}:");
             let prefix_active = format!("lp_node_active:{lpid}:");
             let bt_key = format!("lp_bt:{lpid}");
+            let state_key = format!("lp_state:{lpid}");
+            let awake_key = format!("lp_awake_node:{lpid}");
             let claim_key = format!("lp_reward_claimed:{lpid}");
+            let matches_reset_key = |k: &str| {
+                k.starts_with(&prefix_act)
+                    || k.starts_with(&prefix_kill)
+                    || k.starts_with(&prefix_node)
+                    || k.starts_with(&prefix_done)
+                    || k.starts_with(&prefix_fin)
+                    || k.starts_with(&prefix_node_fin)
+                    || k.starts_with(&prefix_interact)
+                    || k.starts_with(&prefix_score)
+                    || k.starts_with(&prefix_active)
+                    || k == bt_key
+                    || k == state_key
+                    || k == awake_key
+                    || k == claim_key
+            };
             let before = pc.info.dynamic.claims.len();
-            pc.info.dynamic.claims.retain(|k| {
-                !k.starts_with(&prefix_kill)
-                    && !k.starts_with(&prefix_node)
-                    && !k.starts_with(&prefix_active)
-                    && k != &bt_key
-                    && k != &claim_key
-            });
+            pc.info.dynamic.claims.retain(|k| !matches_reset_key(k));
             if pc.info.dynamic.claims.len() != before {
                 dirty_p = true;
             }
             let before_ints = pc.info.dynamic.ints.len();
-            pc.info.dynamic.ints.retain(|kv| kv.key != claim_key);
+            pc.info.dynamic.ints.retain(|kv| !matches_reset_key(&kv.key));
             if pc.info.dynamic.ints.len() != before_ints {
                 dirty_p = true;
             }
+        }
+        if let Ok(nodes) = ctx.assets.level_play_nodes.get_owner_nodes(lpid) {
+            for node in nodes.iter() {
+                crate::helpers::quest_engine::remove_do_interact_options_for_bt_node(
+                    ctx,
+                    BtType::BtTypeLevelPlay,
+                    lpid,
+                    node.id,
+                );
+            }
+        }
+        if let Some(scene) = ctx.scene.as_deref_mut() {
+            scene.lp_timers.cancel_quest(lpid);
+            scene.lp_fail_timers.cancel_quest(lpid);
+            scene.remove_bt_timers_for_bt(BtType::BtTypeLevelPlay, lpid);
+            scene.clear_repeater_state_for_bt(BtType::BtTypeLevelPlay, lpid);
+            scene.clear_save_nodes_for_bt(BtType::BtTypeLevelPlay, lpid);
+            scene.clear_action_node_progress_for_bt(BtType::BtTypeLevelPlay, lpid);
+            scene.clear_deferred_actions_for_bt(BtType::BtTypeLevelPlay, lpid);
+            scene.clear_lp_killed_entities(lpid);
+            scene.sent_lp_bt_trees.remove(&lpid);
+            scene.release_occupations_for_tree_bt(
+                BtType::BtTypeLevelPlay,
+                lpid,
+                crate::helpers::quest_types::bt_tree_inc_id(BtType::BtTypeLevelPlay, lpid),
+            );
         }
         if let Some(lp) = ctx.assets.tables.level_play_data.get_data_by_id(&lpid)
             && let Some(rc) = &lp.Data.LevelPlayRewardConfig
@@ -5258,6 +5508,7 @@ fn move_spline_config_from_action(params: &Map<String, Value>) -> Option<MoveSpl
 
 fn apply_set_audio_state<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
+    bt_type: BtType,
     quest_id: i32,
     params: &Map<String, Value>,
 ) {
@@ -5276,7 +5527,7 @@ fn apply_set_audio_state<S: PushSink + ?Sized>(
         &AudioStateUpdateNotify {
             AudioStates: vec![AudioStatePb {
                 TreeOwnerId: quest_id,
-                TreeIncId: i64::from(quest_id),
+                TreeIncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, quest_id),
                 Group: group.as_bytes().to_vec(),
                 State: state.as_bytes().to_vec(),
             }],
@@ -5351,6 +5602,7 @@ fn apply_clear_play_bubble<S: PushSink + ?Sized>(
 
 fn apply_add_flow_interact_option<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
+    bt_type: BtType,
     quest_id: i32,
     node_id: i32,
     params: &Map<String, Value>,
@@ -5411,10 +5663,11 @@ fn apply_add_flow_interact_option<S: PushSink + ?Sized>(
         actions_json = "[]".to_string();
     }
 
-    scene.upsert_dynamic_interact_option(
+    scene.upsert_dynamic_interact_option_with_bt(
         guid,
         net_id,
         cfg_id,
+        bt_type,
         quest_id,
         node_id,
         kind,
@@ -5429,8 +5682,8 @@ fn apply_add_flow_interact_option<S: PushSink + ?Sized>(
         GameCtxPb {
             CtxType: Some(GameCtxType::BehaviorTree),
             CtxInfo: Some(GameCtxPbCtxInfoOneof::BehaviorTree(BehaviorTreeCtxPb {
-                IncId: i64::from(quest_id),
-                BtType: Some(BtType::BtTypeQuest),
+                IncId: crate::helpers::quest_types::bt_tree_inc_id(bt_type, quest_id),
+                BtType: Some(bt_type),
                 BtId: quest_id,
                 NodeId: node_id,
             })),
@@ -5734,28 +5987,174 @@ fn apply_settlement_dungeon<S: PushSink + ?Sized>(
 
 fn apply_timer_action<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
+    callbacks: &ActionCallbacks<'_, S>,
+    quest_id: i32,
     name: &str,
     params: &Map<String, Value>,
 ) -> io::Result<()> {
-    let is_pause = if name == "ToggleTimerPauseState" {
+    let timer_ty = json_str(params.get("TimerType")).unwrap_or("CountDownChallenge");
+    let timer_id = json_int(params.get("TimerId"))
+        .or_else(|| json_int(params.get("Id")))
+        .unwrap_or_else(|| match timer_ty {
+            "CountDownChallenge" => 0,
+            "GameStartCountDown" | "PlayStartCountDown" => 1,
+            "PublicTime" => 2,
+            "WaitTime" => 3,
+            "BehaviorTreeTimer1" => 4,
+            "BehaviorTreeTimer2" => 5,
+            "BehaviorTreeTimer3" => 6,
+            "BehaviorTreeTimer4" => 7,
+            "BehaviorTreeTimer5" => 8,
+            _ => 1,
+        });
+    let paused_key = format!("inst:timer:{timer_ty}:paused");
+    let remain_key = format!("inst:timer:{timer_ty}:remain");
+    let now_ms = now_millis();
+
+    let mut is_pause = if name == "ToggleTimerPauseState" {
         json_bool(params.get("IsPause")).unwrap_or(true)
     } else {
-        false
+        json_bool(params.get("IsPause")).unwrap_or_else(|| {
+            ctx.progress_comp
+                .as_deref()
+                .is_some_and(|pc| pc.info.get_key_int(&paused_key) != 0)
+        })
     };
-    let timer_ty = json_str(params.get("TimerType")).unwrap_or("Default");
-    record_progress_int(
-        ctx,
-        &format!("inst:timer:{timer_ty}:paused"),
-        i64::from(is_pause),
-        false,
-    )?;
+
+    let bt_remain_secs = ctx.scene.as_deref().and_then(|sc| {
+        sc.bt_timers
+            .iter()
+            .find(|t| (quest_id <= 0 || t.owner_id == quest_id) && t.timer_type == timer_ty)
+            .map(|t| {
+                let eff_now = if t.paused && t.pause_time_ms > 0 {
+                    t.pause_time_ms
+                } else {
+                    now_ms
+                };
+                ((t.end_time_ms - eff_now).max(0) / 1000) as i64
+            })
+    });
+
+    let cur_remain = ctx
+        .progress_comp
+        .as_deref()
+        .and_then(|pc| {
+            pc.info
+                .dynamic
+                .ints
+                .iter()
+                .find(|kv| kv.key == remain_key)
+                .map(|kv| kv.val)
+        })
+        .or(bt_remain_secs)
+        .unwrap_or(0);
+
+    let remain_tick = if name == "ChangeTimer" {
+        let ct = params.get("ChangeType").and_then(Value::as_object);
+        let op = ct.and_then(|c| json_str(c.get("Type"))).unwrap_or("Set");
+        let delta = ct
+            .and_then(|c| json_int(c.get("Time")))
+            .or_else(|| {
+                ct.and_then(|c| c.get("VarForTime"))
+                    .map(|v| resolve_var_int_for_bt(ctx, callbacks.bt_type, quest_id, Some(v)))
+            })
+            .or_else(|| json_int(params.get("Time")))
+            .or_else(|| json_int(params.get("RemainTick")))
+            .unwrap_or(0);
+        let new_remain = match op {
+            "Add" => (cur_remain + i64::from(delta)).max(0),
+            "Reduce" => (cur_remain - i64::from(delta)).max(0),
+            "Set" => i64::from(delta).max(0),
+            _ => i64::from(delta).max(0),
+        };
+        record_progress_int(ctx, &remain_key, new_remain, false)?;
+        let set_mode = match op {
+            "Add" => TimerSetType::Add,
+            "Reduce" => TimerSetType::Sub,
+            _ => TimerSetType::Set,
+        };
+        let mut updated_bt = None;
+        if let Some(scene) = ctx.scene.as_deref_mut()
+            && let Some(idx) = scene
+                .bt_timers
+                .iter()
+                .position(|t| (quest_id <= 0 || t.owner_id == quest_id) && t.timer_type == timer_ty)
+        {
+            let owner = scene.bt_timers[idx].owner_id;
+            let inc = scene.bt_timers[idx].inc_id;
+            let nid = scene.bt_timers[idx].node_id;
+            updated_bt = Some(scene.adjust_bt_timer(
+                owner, inc, nid, timer_ty, now_ms, delta, set_mode,
+            ));
+        }
+        if let Some(bt) = updated_bt {
+            ctx.sink.push(
+                UpdateTimerInfoNotify::MSG_ID,
+                &UpdateTimerInfoNotify {
+                    TreeOwnerId: bt.owner_id,
+                    TreeIncId: bt.inc_id,
+                    TimerInfo: Some(TimerInfoPb {
+                        TimerType: bt.timer_type.into_bytes(),
+                        NodeId: bt.node_id,
+                        EndTime: bt.end_time_ms,
+                        PauseTime: bt.pause_time_ms,
+                    }),
+                },
+            );
+        }
+        new_remain
+    } else {
+        if let Some(b) = json_bool(params.get("IsPause")) {
+            is_pause = b;
+        }
+        record_progress_int(ctx, &paused_key, i64::from(is_pause), false)?;
+        let mut updated_bt = None;
+        if let Some(scene) = ctx.scene.as_deref_mut()
+            && let Some(t) = scene
+                .bt_timers
+                .iter_mut()
+                .find(|t| (quest_id <= 0 || t.owner_id == quest_id) && t.timer_type == timer_ty)
+        {
+            if is_pause && !t.paused {
+                t.paused = true;
+                t.pause_time_ms = now_ms;
+            } else if !is_pause && t.paused {
+                if t.pause_time_ms > 0 {
+                    t.end_time_ms += (now_ms - t.pause_time_ms).max(0);
+                }
+                t.paused = false;
+                t.pause_time_ms = 0;
+            }
+            updated_bt = Some(t.clone());
+        }
+        if let Some(bt) = updated_bt {
+            ctx.sink.push(
+                UpdateTimerInfoNotify::MSG_ID,
+                &UpdateTimerInfoNotify {
+                    TreeOwnerId: bt.owner_id,
+                    TreeIncId: bt.inc_id,
+                    TimerInfo: Some(TimerInfoPb {
+                        TimerType: bt.timer_type.into_bytes(),
+                        NodeId: bt.node_id,
+                        EndTime: bt.end_time_ms,
+                        PauseTime: bt.pause_time_ms,
+                    }),
+                },
+            );
+        }
+        json_int(params.get("RemainTick"))
+            .or_else(|| json_int(params.get("Time")))
+            .map(i64::from)
+            .unwrap_or(cur_remain)
+    };
+
     let status = if is_pause { 2 } else { 1 };
     let mut timers = BTreeMap::new();
     timers.insert(
-        1,
+        timer_id,
         InstanceTimer {
             Status: status,
-            RemainTick: 60,
+            RemainTick: remain_tick.clamp(0, i64::from(i32::MAX)) as i32,
         },
     );
     ctx.sink.push(
@@ -5828,7 +6227,7 @@ fn apply_random_var<S: PushSink + ?Sized>(
     let src = json_str(rv.get("Source")).unwrap_or("Self");
     let is_global = src == "Global";
     let store_key = if !is_global {
-        scoped_var_key_with_owner(ctx.scene.as_deref(), owner_id, rv, base_name)
+        scoped_var_key_with_bt(ctx.scene.as_deref(), callbacks.bt_type, owner_id, rv, base_name)
             .unwrap_or_else(|| base_name.to_string())
     } else {
         base_name.to_string()
@@ -5892,14 +6291,24 @@ fn apply_change_other_state<S: PushSink + ?Sized>(
     node_id: i32,
     params: &Map<String, Value>,
 ) -> io::Result<()> {
-    if let Some(cb) = callbacks.start_flow_state
+    if callbacks.start_flow_state.is_some()
         && let Some(sv) = params.get("State").and_then(|v| v.as_object())
     {
         let fname = json_str(sv.get("FlowListName")).unwrap_or("");
         let fid = json_int(sv.get("FlowId")).unwrap_or(0);
         let sid = json_int(sv.get("StateId")).unwrap_or(1);
         if !fname.is_empty() && fid > 0 {
-            cb(ctx, quest_id, node_id, fname, fid, sid, true)?;
+            crate::helpers::quest_engine::triggers::start_flow_params_bt(
+                ctx,
+                quest_id,
+                node_id,
+                callbacks.bt_type,
+                fname,
+                fid,
+                sid,
+                true,
+                false,
+            )?;
         }
     }
     Ok(())
@@ -6292,6 +6701,7 @@ fn apply_ai_control_action<S: PushSink + ?Sized>(
 
 fn apply_occupation_action<S: PushSink + ?Sized>(
     ctx: &mut QuestContext<'_, S>,
+    bt_type: BtType,
     quest_id: i32,
     node_id: i32,
     is_force: bool,
@@ -6299,7 +6709,11 @@ fn apply_occupation_action<S: PushSink + ?Sized>(
 ) -> io::Result<()> {
     let otype = json_str(params.get("OccupationType")).unwrap_or("Request");
     let is_req = otype != "Release";
-    let inc_id = i64::from(quest_id);
+    let inc_id = if quest_id > 0 {
+        crate::helpers::quest_types::bt_tree_inc_id(bt_type, quest_id)
+    } else {
+        0
+    };
     let mut occ_names = Vec::new();
     if let Some(Value::Array(arr)) = params.get("Occupations") {
         for item in arr {
@@ -6317,7 +6731,10 @@ fn apply_occupation_action<S: PushSink + ?Sized>(
                     && let Some(prev) = scene
                         .bt_occupations
                         .iter()
-                        .find(|o| o.resource_name == *occ_name && (o.owner_id != quest_id || o.inc_id != inc_id))
+                        .find(|o| {
+                            o.resource_name == *occ_name
+                                && !(o.bt_type == bt_type && o.owner_id == quest_id && o.inc_id == inc_id)
+                        })
                         .cloned()
                 {
                     ctx.sink.push(
@@ -6336,20 +6753,14 @@ fn apply_occupation_action<S: PushSink + ?Sized>(
                         },
                     );
                 }
-                scene.upsert_occupation(
-                    BtType::BtTypeQuest,
-                    quest_id,
-                    inc_id,
-                    node_id,
-                    occ_name,
-                );
+                scene.upsert_occupation(bt_type, quest_id, inc_id, node_id, occ_name);
             }
         } else if !occ_names.is_empty() {
             scene
                 .bt_occupations
                 .retain(|o| !occ_names.iter().any(|n| n == &o.resource_name));
         } else if quest_id > 0 {
-            scene.release_occupations_for_node(quest_id, node_id);
+            scene.release_occupations_for_node_bt(bt_type, quest_id, node_id);
         }
     }
     record_progress_int(ctx, "world:occupation", i64::from(is_req), false)

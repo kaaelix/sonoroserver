@@ -146,6 +146,9 @@ fn process_login(
         }
     };
 
+    // Ensure account token is persisted on disk before gamesv verifies it.
+    fs.flush();
+
     LoginResult {
         code: 0,
         has_rpc: true,
@@ -271,6 +274,10 @@ mod tests {
         assert!(text.contains(r#""code":0"#));
         assert!(text.contains(r#""token":"tok123""#));
         assert!(text.contains(r#""port":13100"#));
+        assert!(
+            dir.join("account/12345").exists(),
+            "account file must be flushed to disk before HTTP login response returns"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

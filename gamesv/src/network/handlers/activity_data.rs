@@ -97,8 +97,65 @@ fn make_act_task(id: i32, taken: bool, done: bool, cur: i32, target: i32) -> Act
 }
 
 fn claim_matches_id(claims: &[String], prefix: &str, id: i32) -> bool {
-    let exact = format!("{prefix}{id}");
-    claims.iter().any(|c| c == &exact)
+    let prefixes: &[&str] = match prefix {
+        "gather:" => &["gather:", "gather_rw:"],
+        "role_trial:" => &["role_trial:", "trial_role_rw:"],
+        "skin_trial:" => &["skin_trial:", "trial_skin_rw:"],
+        "harvest_pt:" => &["harvest_pt:", "harv_pt:"],
+        "harvest_lv:" => &["harvest_lv:", "harv_lv:"],
+        "daily_adv:task:" => &["daily_adv:task:", "dadv_task:"],
+        "daily_adv:pt:" => &["daily_adv:pt:", "dadv_pt:"],
+        "longshan:task:" => &["longshan:task:", "longshan_task:"],
+        "longshan:score:" => &["longshan:score:", "longshan_sc:"],
+        "td:inst:" => &["td:inst:", "td_inst:"],
+        "td:score:" => &["td:score:", "td_score:"],
+        "time_pt:" => &["time_pt:", "tpa_rw:", "tpa_brw:"],
+        "risk:inst:" => &["risk:inst:", "rh_inst:"],
+        "risk:score:" => &["risk:score:", "rh_score:"],
+        "blackcoast:task:" => &["blackcoast:task:", "bc_task_rw:"],
+        "blackcoast:rw:" => &["blackcoast:rw:", "bc_act_rw:"],
+        "mow:clm:" => &["mow:clm:", "mow_rw:"],
+        "through_train:" => &["through_train:", "throughtrain:", "direct_train:fin:"],
+        "spring_sign:" => &["spring_sign:", "ssign_rw:"],
+        "spring_sign:skin:" => &["spring_sign:skin:", "ssign_skin:"],
+        "farmgold:pt:" => &["farmgold:pt:", "fg_pt:"],
+        "farmgold:lv:" => &["farmgold:lv:", "fg_lp:"],
+        "dango_mono:task:" => &["dango_mono:task:", "dmono_task_rw:"],
+        "avignon:task:" => &["avignon:task:", "avignon_rw:"],
+        "floro:task:" => &["floro:task:", "fr_task:"],
+        "trapdef:rw:" => &["trapdef:rw:", "trap_rw:", "trap_sp_rw:"],
+        "moon_phase:" => &["moon_phase:", "moon_phase_rw:"],
+        "honami:col:" => &["honami:col:", "honami_col:"],
+        "honami:perm:" => &["honami:perm:", "honami_rt:"],
+        "honami:lim:" => &["honami:lim:", "honami_lt:"],
+        "honami:score:" => &["honami:score:", "honami_score:"],
+        "surv:task:" => &["surv:task:", "surv_norm:"],
+        "photofight:" => &["photofight:", "pf_task:"],
+        "wuwu:pkg:" => &["wuwu:pkg:", "wuwu_pkg:"],
+        "wuwu:task:" => &["wuwu:task:", "wuwu_task:"],
+        "infr:task:" => &["infr:task:", "infr:theme:"],
+        "rhythm:task:" => &["rhythm:task:", "rhythm_task:"],
+        "kurotato:lim:" => &["kurotato:lim:", "kurotato_lt:"],
+        "kurotato:res:" => &["kurotato:res:", "kurotato_rt:"],
+        "pinball:task:" => &["pinball:task:", "pinball_task:"],
+        "edge:rw:" => &["edge:rw:", "er_task:"],
+        "linkage:norm:" => &["linkage:norm:", "link_rw:", "link_ci:"],
+        "role_gift:" => &["role_gift:", "role_gift_clm:"],
+        "realm:task:" => &["realm:task:", "realmbetween:task:"],
+        "db:score:" => &["db:score:", "db_score:"],
+        "qingxiao:" => &["qingxiao:", "qingxiao_rw:"],
+        "giant:rw:" => &["giant:rw:", "giant_sv:"],
+        "regress:task:" => &["regress:task:", "reg_task:"],
+        "trackmoon:task:" => &["trackmoon:task:", "trackmoon:target:", "trackmoon:act:"],
+        _ => {
+            let exact = format!("{prefix}{id}");
+            return claims.iter().any(|c| c == &exact);
+        }
+    };
+    prefixes.iter().any(|p| {
+        let exact = format!("{p}{id}");
+        claims.iter().any(|c| c == &exact)
+    })
 }
 
 fn cond_done(cond_ctx: Option<&EvalContext<'_>>, cond_group_id: i32) -> bool {
@@ -535,11 +592,20 @@ pub fn build_activity_data(
         }
         ActivityType::TurnTableActivity => {
             let awards = rows_for_activity(assets, "TurntableAwards", id);
+            let act_round_pfx = format!("turntable_rw:{id}:");
+            let canon_round_pfx = format!("turntable:rw:{id}:");
             let claimed_rewards: Vec<i32> = awards
                 .iter()
                 .filter_map(|o| {
                     let aid = j_i32(o, "Id");
-                    (aid > 0 && claim_matches_id(claims, "turntable:rw:", aid)).then_some(aid)
+                    let suffix = format!(":{aid}");
+                    let claimed = aid > 0
+                        && (claim_matches_id(claims, "turntable:rw:", aid)
+                            || claims.iter().any(|c| {
+                                (c.starts_with(&act_round_pfx) || c.starts_with(&canon_round_pfx))
+                                    && c.ends_with(&suffix)
+                            }));
+                    claimed.then_some(aid)
                 })
                 .collect();
             let tasks = act_task_list_from_rows(
@@ -675,9 +741,15 @@ pub fn build_activity_data(
                     continue;
                 }
                 let sc = info.get_key_int(&format!("cornice:score:{cid}")).max(0) as i32;
+                let cid_pfx = format!("cornice:{cid}:");
+                let rw_pfx = format!("cornice_rw:{cid}:");
                 let rw = claims
                     .iter()
-                    .filter_map(|c| c.strip_prefix("cornice:"))
+                    .filter_map(|c| {
+                        c.strip_prefix(&cid_pfx)
+                            .or_else(|| c.strip_prefix(&rw_pfx))
+                            .or_else(|| c.strip_prefix("cornice:"))
+                    })
                     .filter_map(|s| s.parse::<i32>().ok())
                     .collect();
                 entries.insert(
@@ -823,7 +895,8 @@ pub fn build_activity_data(
                     (nid > 0).then_some(PreheatSignNodeInfo {
                         PreheatNodeId: nid,
                         UnlockTime: begin_s,
-                        Rewarded: claim_matches_id(claims, "preheat:", nid),
+                        Rewarded: claim_matches_id(claims, "preheat:", nid)
+                            || claims.iter().any(|c| c == &format!("preheat:{nid}:{nid}")),
                     })
                 })
                 .collect();
@@ -1286,8 +1359,14 @@ pub fn build_activity_data(
                 }
             }
             ActivityDataDataOneof::ActivityDangoMonopolyData(ActivityDangoMonopolyData {
-                CurrentBoardId: info.get_key_int("dm:board").max(1) as i32,
-                CurrentGridId: info.get_key_int("dm:grid").max(1) as i32,
+                CurrentBoardId: info
+                    .get_key_int("dm:board")
+                    .max(info.get_key_int(&format!("dmono_board:{id}")))
+                    .max(1) as i32,
+                CurrentGridId: info
+                    .get_key_int("dm:grid")
+                    .max(info.get_key_int(&format!("dmono_grid:{id}")))
+                    .max(1) as i32,
                 DangoTaskConfig: tasks,
                 UnlockTime: begin_s,
                 BoardMap: boards,
@@ -1637,7 +1716,10 @@ pub fn build_activity_data(
                 PermanentTaskData: perm_tasks,
                 LimitTaskData: lim_tasks,
                 ScoreRewardInfo: scores,
-                LifeSupportLevel: info.get_key_int("honami:life").max(1) as i32,
+                LifeSupportLevel: info
+                    .get_key_int("honami:life")
+                    .max(info.get_key_int("honami:ls_lv"))
+                    .max(1) as i32,
                 TotalRevenue: info.get_key_int("honami:revenue").max(0) as i32,
                 ..Default::default()
             })
@@ -1931,13 +2013,24 @@ pub fn build_activity_data(
                     .filter(|s| j_i32(s, "LevelId") == lid)
                     .filter_map(|s| {
                         let sid = j_i32(s, "Id");
-                        let sc = info.get_key_int(&format!("rhythm:score:{sid}")).max(0) as i32;
+                        let sc = info
+                            .get_key_int(&format!("rhythm:score:{sid}"))
+                            .max(info.get_key_int(&format!("rhythm:best:{sid}")))
+                            .max(0) as i32;
+                        let best_rank = info.get_key_int(&format!("rhythm:rank:{sid}"));
                         (sid > 0).then_some(RhythmSubLevelPb {
                             SubLevelId: sid,
                             Cleared: sc > 0,
                             BestScore: sc,
                             BestAccuracy: if sc > 0 { 100 } else { 0 },
-                            BestRank: None,
+                            BestRank: match best_rank {
+                                1 => Some(sonoro_proto::enums::RhythmShipRank::SSS),
+                                2 => Some(sonoro_proto::enums::RhythmShipRank::SS),
+                                3 => Some(sonoro_proto::enums::RhythmShipRank::S),
+                                4 => Some(sonoro_proto::enums::RhythmShipRank::A),
+                                5 => Some(sonoro_proto::enums::RhythmShipRank::B),
+                                _ => None,
+                            },
                         })
                     })
                     .collect();
@@ -1994,7 +2087,10 @@ pub fn build_activity_data(
                         DropCatchId: did,
                         RewardStates: Vec::new(),
                         UnlockTime: begin_s,
-                        Score: info.get_key_int(&format!("dropcatch:score:{did}")).max(0) as i32,
+                        Score: info
+                            .get_key_int(&format!("dropcatch:score:{did}"))
+                            .max(info.get_key_int(&format!("dc:score:{did}")))
+                            .max(0) as i32,
                     })
                 })
                 .collect();
@@ -2026,7 +2122,8 @@ pub fn build_activity_data(
                         LevelId: lid,
                         IsUnlock: true,
                         UnlockTime: begin_s,
-                        IsFinished: info.get_key_int(&format!("kurotato:lv:{lid}")) > 0,
+                        IsFinished: info.get_key_int(&format!("kurotato:lv:{lid}")) > 0
+                            || info.get_key_int(&format!("kurotato:lvl:{lid}")) > 0,
                         ..Default::default()
                     })
                 })
@@ -2193,7 +2290,7 @@ pub fn build_activity_data(
             );
             ActivityDataDataOneof::RealmBetweenActivityInfo(RealmBetweenActivityInfo {
                 ActivityTasks: tasks,
-                RealmBetweenLevel: 1,
+                RealmBetweenLevel: info.get_key_int("realmbetween:lvl").max(1) as i32,
                 ..Default::default()
             })
         }

@@ -376,13 +376,16 @@ impl QuestInfo {
     }
 
     pub fn set_var_bool(&mut self, key: &str, val: bool) {
+        let int_val = i32::from(val);
         if let Some(v) = self.vars.iter_mut().find(|v| v.key == key) {
             v.bool_val = val;
+            v.int_val = int_val;
             return;
         }
         self.vars.push(QuestVar {
             key: key.to_string(),
             bool_val: val,
+            int_val,
             ..Default::default()
         });
     }

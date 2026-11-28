@@ -36,7 +36,8 @@ pub fn handle_forge_info_request(
         if unlocked || rec.is_some() {
             list.push(OneForgeInfo {
                 Id: row.Id,
-                LastRoleId: rec.map_or(0, |r| r.last_role_id),
+                LastRoleId: rec.as_ref().map_or(0, |r| r.last_role_id),
+                LimitForgeCount: rec.as_ref().map_or(0, |r| r.count),
                 ..Default::default()
             });
         }
@@ -201,12 +202,18 @@ pub fn handle_forge_item_request(
         }
     }
 
+    let forge_cnt = ProgressInfo::find_id_role_count(
+        &state.player_components.progress.info.craft.forge_counts,
+        row.Id,
+    )
+    .map_or(count, |r| r.count);
     state.conn.push(
         ForgeItemInfoUpdateNotify::MSG_ID,
         &ForgeItemInfoUpdateNotify {
             ForgeInfoList: vec![OneForgeInfo {
                 Id: row.Id,
                 LastRoleId: req.RoleId,
+                LimitForgeCount: forge_cnt,
                 ..Default::default()
             }],
         },
@@ -571,6 +578,14 @@ pub fn handle_batch_synthesis_item_request(
             .progress
             .save(&state.fs)
             .map_err(|e| e.to_string())?;
+        let mut q_events = EventQueue::new();
+        {
+            let mut qctx = state.quest_context(&mut q_events);
+            if let Err(err) = quest_engine::events::on_ui_action(&mut qctx, "Synthetic") {
+                tracing::warn!("on_ui_action(Synthetic) error: {err}");
+            }
+        }
+        super::drain_event_queue_best_effort(&mut q_events, state);
         if leveled {
             let craft_state = &state.player_components.progress.info.craft;
             state.conn.push(

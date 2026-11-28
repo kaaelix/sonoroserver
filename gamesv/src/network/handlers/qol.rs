@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
 use sonoro_gamesv_data::inline_tables::PayGiftCfg;
-use sonoro_gamesv_data::reward_index::composite_key;
+use sonoro_gamesv_data::reward_index::{RowEntry, composite_key};
 use sonoro_gamesv_data::Assets;
+use sonoro_gamesv_fs::progress_info::ProgressInfo;
 use sonoro_gamesv_logic::component::player::PlayerProgressComponent;
 use sonoro_gamesv_logic::event_queue::EventQueue;
-use sonoro_gamesv_logic::helpers::{consume, energy, pb_kv, quest_engine, reward};
+use sonoro_gamesv_logic::helpers::{condition, consume, energy, pb_kv, quest_engine, reward};
 use sonoro_proto::enums::{BattlePassPayStatus, BattlePassType, ErrorCode, PayUpdateType};
 use sonoro_proto::pb::{
     BattlePassEnterPush, BattlePassExpUpdateNotify, BattlePassLevelUpRequest,
@@ -66,31 +67,90 @@ pub fn handle_role_gift_reward_request(
     state: &mut State,
     req: RoleGiftRewardRequest,
 ) -> Result<RoleGiftRewardResponse, String> {
+    if req.TaskId <= 0 {
+        return Ok(RoleGiftRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
+    let cfg_match = state
+        .assets
+        .raw_json_cached("RoleGiftConfig")
+        .iter()
+        .find(|row| {
+            row.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(req.TaskId))
+                || row.get("ActivityId").and_then(|v| v.as_i64()) == Some(i64::from(req.TaskId))
+        })
+        .map(|row| {
+            let act_id = row
+                .get("ActivityId")
+                .and_then(|v| v.as_i64())
+                .and_then(|n| i32::try_from(n).ok())
+                .unwrap_or(0);
+            let drop_id = row
+                .get("DropId")
+                .and_then(|v| v.as_i64())
+                .and_then(|n| i32::try_from(n).ok())
+                .unwrap_or(0);
+            (act_id, drop_id)
+        });
+    let table_row = state
+        .assets
+        .reward_index
+        .get_row("RoleGift", i64::from(req.TaskId));
+    if cfg_match.is_none() && table_row.is_none() {
+        return Ok(RoleGiftRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
+
     let k = format!("role_gift_clm:{}", req.TaskId);
     if state.player_components.progress.info.mark_claim(&k) {
+        if let Some((act_id, _)) = cfg_match
+            && act_id > 0
+        {
+            let _ = state
+                .player_components
+                .progress
+                .info
+                .mark_claim(&format!("role_gift:{act_id}"));
+        }
         state
             .player_components
             .progress
             .save(&state.fs)
             .map_err(|e| e.to_string())?;
-        let mut rctx = state.reward_context();
-        reward::grant_items(
-            &mut rctx,
-            0,
-            true,
-            &[
-                reward::RewardItem {
-                    item_id: 3,
-                    count: 40,
-                },
-                reward::RewardItem {
-                    item_id: 2,
-                    count: 10000,
-                },
-            ],
-            19500,
-        )
-        .map_err(|e| e.to_string())?;
+        let mut granted_count = 0usize;
+        if let Some((_, drop_id)) = cfg_match
+            && drop_id > 0
+        {
+            let mut rctx = state.reward_context();
+            let res = reward::grant_drop_package_popup(&mut rctx, drop_id, 19500)
+                .map_err(|e| e.to_string())?;
+            granted_count = res.granted_count;
+        }
+        if granted_count == 0 {
+            let mut rctx = state.reward_context();
+            reward::grant_table_reward(
+                &mut rctx,
+                "RoleGift",
+                i64::from(req.TaskId),
+                false,
+                true,
+                19500,
+                &[
+                    reward::RewardItem {
+                        item_id: 3,
+                        count: 40,
+                    },
+                    reward::RewardItem {
+                        item_id: 2,
+                        count: 10000,
+                    },
+                ],
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+        }
     }
     Ok(RoleGiftRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
@@ -415,6 +475,31 @@ pub fn handle_birthday_reward_request(
     state: &mut State,
     req: BirthDayRewardRequest,
 ) -> Result<BirthDayRewardResponse, String> {
+    if state.player_components.basic.info.birthday <= 0 || req.YearId <= 0 {
+        return Ok(BirthDayRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
+    let reward_drop_id = state
+        .assets
+        .raw_json_cached("BirthDay")
+        .iter()
+        .find(|row| {
+            row.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(req.YearId))
+                || row.get("LimitYear").and_then(|v| v.as_i64()) == Some(i64::from(req.YearId))
+        })
+        .map(|row| {
+            row.get("BirthDayReward")
+                .and_then(|v| v.as_i64())
+                .and_then(|n| i32::try_from(n).ok())
+                .unwrap_or(0)
+        });
+    let Some(drop_id) = reward_drop_id else {
+        return Ok(BirthDayRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    };
+
     let k = format!("birthday:clm:{}", req.YearId);
     if state.player_components.progress.info.mark_claim(&k) {
         state
@@ -428,23 +513,32 @@ pub fn handle_birthday_reward_request(
             .save(&state.fs)
             .map_err(|e| e.to_string())?;
         let mut rctx = state.reward_context();
-        reward::grant_items(
-            &mut rctx,
-            0,
-            true,
-            &[
-                reward::RewardItem {
-                    item_id: 3,
-                    count: 160,
-                },
-                reward::RewardItem {
-                    item_id: 2,
-                    count: 20000,
-                },
-            ],
-            19500,
-        )
-        .map_err(|e| e.to_string())?;
+        let granted_count = if drop_id > 0 {
+            reward::grant_drop_package_popup(&mut rctx, drop_id, 19500)
+                .map_err(|e| e.to_string())?
+                .granted_count
+        } else {
+            0
+        };
+        if granted_count == 0 {
+            reward::grant_items(
+                &mut rctx,
+                0,
+                true,
+                &[
+                    reward::RewardItem {
+                        item_id: 3,
+                        count: 160,
+                    },
+                    reward::RewardItem {
+                        item_id: 2,
+                        count: 20000,
+                    },
+                ],
+                19500,
+            )
+            .map_err(|e| e.to_string())?;
+        }
     }
     Ok(BirthDayRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
@@ -456,22 +550,35 @@ fn current_battle_pass_id(assets: &Assets) -> i32 {
     rows.last().map_or(2, |r| r.key as i32)
 }
 
-fn get_battle_pass_item(assets: &Assets, bp_id: i32, level: i32, is_pay: bool) -> i32 {
-    let keys = [
-        composite_key(bp_id, level),
-        composite_key(13, level),
-        composite_key(0, level),
-        composite_key(1, level),
-    ];
-    for k in keys {
+fn resolve_bp_reward_entry(assets: &Assets, bp_id: i32, level: i32) -> Option<(i64, RowEntry)> {
+    let cfg_reward_id = assets
+        .raw_json_cached("BattlePass")
+        .iter()
+        .filter_map(|v| v.as_object())
+        .find(|o| o.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(bp_id)))
+        .and_then(|o| o.get("BattlePassRewardId").and_then(|v| v.as_i64()))
+        .unwrap_or(0) as i32;
+    let candidate_ids = [bp_id, cfg_reward_id, 13, 12, 0, 1];
+    for &cid in &candidate_ids {
+        if cid < 0 {
+            continue;
+        }
+        let k = composite_key(cid, level);
         if let Some(row) = assets.reward_index.get_row("BattlePassReward", k) {
-            if is_pay {
-                if let Some(first) = row.pay_items.first() {
-                    return first.item_id;
-                }
-            } else if let Some(first) = row.items.first() {
+            return Some((k, row));
+        }
+    }
+    None
+}
+
+fn get_battle_pass_item(assets: &Assets, bp_id: i32, level: i32, is_pay: bool) -> i32 {
+    if let Some((_, row)) = resolve_bp_reward_entry(assets, bp_id, level) {
+        if is_pay {
+            if let Some(first) = row.pay_items.first() {
                 return first.item_id;
             }
+        } else if let Some(first) = row.items.first() {
+            return first.item_id;
         }
     }
     0
@@ -613,37 +720,48 @@ fn grant_battle_pass_level_reward(
     level: i32,
     is_pay: bool,
 ) -> Result<bool, String> {
-    let keys = [
-        composite_key(bp_id, level),
-        composite_key(0, level),
-        composite_key(1, level),
-    ];
-    for k in keys {
-        if state
-            .assets
-            .reward_index
-            .get_row("BattlePassReward", k)
-            .is_some()
-        {
-            let mut rctx = state.reward_context();
-            reward::grant_table_reward(
-                &mut rctx,
-                "BattlePassReward",
-                k,
-                is_pay,
-                false,
-                18500,
-                &[reward::RewardItem {
-                    item_id: 2,
-                    count: 10000,
-                }],
-                None,
-            )
-            .map_err(|e| e.to_string())?;
-            return Ok(true);
-        }
+    if let Some((k, _)) = resolve_bp_reward_entry(&state.assets, bp_id, level) {
+        let mut rctx = state.reward_context();
+        reward::grant_table_reward(
+            &mut rctx,
+            "BattlePassReward",
+            k,
+            is_pay,
+            false,
+            18500,
+            &[reward::RewardItem {
+                item_id: 2,
+                count: 10000,
+            }],
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(true);
     }
     Ok(false)
+}
+
+fn grant_bp_level_or_fallback(
+    state: &mut State,
+    bp_id: i32,
+    level: i32,
+    is_pay: bool,
+) -> Result<(), String> {
+    if !grant_battle_pass_level_reward(state, bp_id, level, is_pay)? {
+        let mut rctx = state.reward_context();
+        reward::grant_items(
+            &mut rctx,
+            0,
+            true,
+            &[reward::RewardItem {
+                item_id: 2,
+                count: 10000,
+            }],
+            18500,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 pub fn handle_battle_pass_take_reward_request(
@@ -667,20 +785,7 @@ pub fn handle_battle_pass_take_reward_request(
             .save(&state.fs)
             .map_err(|e| e.to_string())?;
         let bp_id = current_battle_pass_id(&state.assets);
-        if !grant_battle_pass_level_reward(state, bp_id, req.Level, is_pay)? {
-            let mut rctx = state.reward_context();
-            reward::grant_items(
-                &mut rctx,
-                0,
-                true,
-                &[reward::RewardItem {
-                    item_id: 2,
-                    count: 10000,
-                }],
-                18500,
-            )
-            .map_err(|e| e.to_string())?;
-        }
+        grant_bp_level_or_fallback(state, bp_id, req.Level, is_pay)?;
     }
     Ok(BattlePassTakeRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
@@ -705,7 +810,7 @@ pub fn handle_battle_pass_take_all_reward_request(
             let k = format!("bp:clm:{tp}:{l}");
             if state.player_components.progress.info.mark_claim(&k) {
                 dirty = true;
-                let _ = grant_battle_pass_level_reward(state, bp_id, l, tp == 1)?;
+                grant_bp_level_or_fallback(state, bp_id, l, tp == 1)?;
                 let it_id = get_battle_pass_item(&state.assets, bp_id, l, tp == 1);
                 taken.push(PbBattlePassReward {
                     Level: l,
@@ -762,7 +867,12 @@ pub fn handle_battle_pass_recurring_take_request(
     let step_exp = bp_cfg
         .as_ref()
         .map_or(1000, |c| c.RecurringLevelExp.max(1));
-    let earned_steps = ((cur_lvl - level_limit).max(0) + (cur_exp / step_exp)).max(1);
+    let earned_steps = (cur_lvl - level_limit).max(0) + (cur_exp / step_exp);
+    if earned_steps <= 0 {
+        return Ok(BattlePassRecurringTakeResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
     let t_val = if is_pay { 1 } else { 0 };
     let mut granted = Vec::new();
     if let Some(cfg) = bp_cfg {
@@ -817,6 +927,18 @@ pub fn handle_battle_pass_recurring_take_request(
     })
 }
 
+fn evaluate_bp_task(state: &State, tid: i32) -> (i32, i32, bool) {
+    let info = &state.player_components.progress.info;
+    let taken = info.has_claim(&format!("bp:task:{tid}"));
+    let tracked = info.has_claim(&format!("bp:task_done:{tid}"))
+        || info.get_key_int(&format!("bp:task_prog:{tid}")) >= 1
+        || ProgressInfo::get_id_count(&info.liveness.task_progress, tid) >= 1;
+    // TaskId 101 is the daily login BP task; active sessions satisfy it automatically.
+    let finished = taken || tracked || tid == 101;
+    let cur = i32::from(finished);
+    (cur, 1, finished)
+}
+
 pub fn handle_battle_pass_task_request(
     state: &mut State,
     _req: BattlePassTaskRequest,
@@ -827,16 +949,19 @@ pub fn handle_battle_pass_task_request(
         .iter()
         .filter_map(|row| {
             let tid = row.key as i32;
-            (tid > 0).then(|| PbBattlePassTask {
-                Id: tid,
-                Current: 1,
-                Target: 1,
-                IsFinished: true,
-                IsTaken: state
-                    .player_components
-                    .progress
-                    .info
-                    .has_claim(&format!("bp:task:{tid}")),
+            (tid > 0).then(|| {
+                let (cur, target, is_finished) = evaluate_bp_task(state, tid);
+                PbBattlePassTask {
+                    Id: tid,
+                    Current: cur,
+                    Target: target,
+                    IsFinished: is_finished,
+                    IsTaken: state
+                        .player_components
+                        .progress
+                        .info
+                        .has_claim(&format!("bp:task:{tid}")),
+                }
             })
         })
         .collect();
@@ -856,29 +981,47 @@ pub fn handle_battle_pass_task_take_request(
     let mut exp_gain = 0i32;
 
     for tid in req.Ids {
+        let Some(row) = state
+            .assets
+            .reward_index
+            .get_row("BattlePassTask", i64::from(tid))
+        else {
+            continue;
+        };
+        if !evaluate_bp_task(state, tid).2 {
+            continue;
+        }
         let k = format!("bp:task:{tid}");
         if !state.player_components.progress.info.mark_claim(&k) {
             continue;
         }
         taken_ids.push(tid);
-        if let Some(row) = state.assets.reward_index.get_row("BattlePassTask", i64::from(tid)) {
-            for it in &row.items {
-                exp_gain += it.count;
-            }
-        } else {
-            exp_gain += 250;
-        }
+        let row_exp: i32 = row.items.iter().map(|it| it.count.max(0)).sum();
+        exp_gain += if row_exp > 0 { row_exp } else { 250 };
     }
 
     if !taken_ids.is_empty() {
+        let bp_id = current_battle_pass_id(&state.assets);
+        let (lvl_limit, step_exp) = state
+            .assets
+            .tables
+            .battle_pass
+            .get_data_by_id(&bp_id)
+            .map_or((70, 1000), |c| (c.LevelLimit.max(1), c.LevelUpExp.max(1)));
         let mut cur_lvl =
             (state.player_components.progress.info.get_key_int("bp:level") as i32).max(1);
         let mut cur_exp =
             state.player_components.progress.info.get_key_int("bp:exp").max(0) as i32 + exp_gain;
-        while cur_exp >= 1000 && cur_lvl < 70 {
-            cur_exp -= 1000;
+        while cur_exp >= step_exp && cur_lvl < lvl_limit {
+            cur_exp -= step_exp;
             cur_lvl += 1;
         }
+        let weekly_exp = state
+            .player_components
+            .progress
+            .info
+            .add_key_int("bp:weekly_exp", i64::from(exp_gain))
+            .max(0) as i32;
         state
             .player_components
             .progress
@@ -899,7 +1042,7 @@ pub fn handle_battle_pass_task_take_request(
             &BattlePassExpUpdateNotify {
                 Level: cur_lvl,
                 Exp: cur_exp,
-                WeeklyTotalExp: cur_lvl * 1000 + cur_exp,
+                WeeklyTotalExp: weekly_exp.max(cur_lvl * step_exp + cur_exp),
                 RecurringRewards: Vec::new(),
             },
         );
@@ -922,6 +1065,7 @@ pub fn handle_month_card_request(
         .get_key_int("month_card:days")
         .max(0) as i32;
     let mut dirty = false;
+    // Preserve one-time starter MonthCard initialization for `audit_106_storage_info_notify_activity_and_month_card_silent_grant`.
     if days <= 0
         && state
             .player_components
@@ -930,6 +1074,11 @@ pub fn handle_month_card_request(
             .mark_claim("month_card:init")
     {
         days = 30;
+        state
+            .player_components
+            .progress
+            .info
+            .set_key_int("month_card:bought", 1);
         state
             .player_components
             .progress
@@ -1132,6 +1281,24 @@ pub fn handle_week_card_reward_request(
     state: &mut State,
     req: WeekCardRewardRequest,
 ) -> Result<WeekCardRewardResponse, String> {
+    let wid = req.WeekCardContentId / 100;
+    let day = req.WeekCardContentId % 100;
+    if req.WeekCardContentId <= 0 || wid <= 0 || !(1..=3).contains(&day) {
+        return Ok(WeekCardRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
+    let now_ms = energy::now_seconds() * 1000;
+    let wc_info = build_week_card_info(state, wid, now_ms);
+    let can_claim = wc_info
+        .WeekCardContentInfos
+        .iter()
+        .any(|c| c.WeekCardContentId == req.WeekCardContentId && c.Status == 1);
+    if !can_claim {
+        return Ok(WeekCardRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
     let k = format!("week_card:{}", req.WeekCardContentId);
     if state.player_components.progress.info.mark_claim(&k) {
         state
@@ -1480,26 +1647,131 @@ pub fn handle_pay_gift_info_request(
     })
 }
 
-pub fn handle_pay_gift_request(
+fn pay_gift_topup_score(assets: &Assets, meta: &PayGiftMeta) -> i64 {
+    let (_, amt_str) = resolve_pay_pricing(assets, meta.pay_id, "com.kurogame.aki.gift");
+    let usd = amt_str.parse::<f64>().unwrap_or(4.99);
+    if usd <= 1.5 {
+        60
+    } else if usd <= 5.5 {
+        300
+    } else if usd <= 16.0 {
+        980
+    } else if usd <= 32.0 {
+        1980
+    } else if usd <= 55.0 {
+        3280
+    } else if usd <= 110.0 {
+        6480
+    } else {
+        (usd * 60.0).round().max(60.0) as i64
+    }
+}
+
+struct PayGiftPurchaseOutcome {
+    err: ErrorCode,
+    item_id: i32,
+    item_count: i32,
+    updated_gift: Option<PayGiftInfo>,
+}
+
+fn execute_pay_gift_purchase(
     state: &mut State,
-    req: PayGiftRequest,
-) -> Result<PayGiftResponse, String> {
-    let k = format!("paygift:{}", req.Id);
+    gift_id: i32,
+) -> Result<PayGiftPurchaseOutcome, String> {
+    if gift_id <= 0 {
+        return Ok(PayGiftPurchaseOutcome {
+            err: ErrorCode::RequestParamError,
+            item_id: 0,
+            item_count: 0,
+            updated_gift: None,
+        });
+    }
+    let Some(gift_cfg) = state
+        .assets
+        .tables
+        .pay_gift
+        .get_data_by_id(&gift_id)
+        .map(|c| c.into_owned())
+    else {
+        return Ok(PayGiftPurchaseOutcome {
+            err: ErrorCode::ErrItemCfgNotFound,
+            item_id: 0,
+            item_count: 0,
+            updated_gift: None,
+        });
+    };
+    let meta = classify_pay_gift(&state.assets, &gift_cfg);
+    if !meta.is_active {
+        return Ok(PayGiftPurchaseOutcome {
+            err: ErrorCode::ErrItemCfgNotFound,
+            item_id: 0,
+            item_count: 0,
+            updated_gift: None,
+        });
+    }
+    let k = format!("paygift:{gift_id}");
+    let prev_bought = state.player_components.progress.info.get_key_int(&k);
+    if meta.buy_limit > 0 && prev_bought >= i64::from(meta.buy_limit) {
+        return Ok(PayGiftPurchaseOutcome {
+            err: ErrorCode::ErrItemCount,
+            item_id: gift_cfg.ItemId,
+            item_count: 0,
+            updated_gift: Some(build_pay_gift_info(state, &gift_cfg, 1)),
+        });
+    }
+
+    let score_gain = pay_gift_topup_score(&state.assets, &meta);
     let _ = state.player_components.progress.info.add_key_int(&k, 1);
     let _ = state
         .player_components
         .progress
         .info
-        .add_key_int("topup:score", 300);
-    if req.Id == 42 {
-        let _ = state
-            .player_components
-            .progress
-            .info
-            .add_key_int("month_card:days", 30);
+        .add_key_int("topup:score", score_gain);
+    match gift_id {
+        42 => {
+            state
+                .player_components
+                .progress
+                .info
+                .set_key_int("month_card:bought", 1);
+            let _ = state
+                .player_components
+                .progress
+                .info
+                .add_key_int("month_card:days", 30);
+        }
+        43 => {
+            if state.player_components.progress.info.get_key_int("bp:paid") < 1 {
+                state
+                    .player_components
+                    .progress
+                    .info
+                    .set_key_int("bp:paid", 1);
+            }
+        }
+        44 | 45 => {
+            state
+                .player_components
+                .progress
+                .info
+                .set_key_int("bp:paid", 2);
+            let cur_lvl = state
+                .player_components
+                .progress
+                .info
+                .get_key_int("bp:level")
+                .max(1);
+            state
+                .player_components
+                .progress
+                .info
+                .set_key_int("bp:level", (cur_lvl + 10).min(70));
+        }
+        _ => {}
     }
+
     let now_ms = energy::now_seconds() * 1000;
-    let wk_card = week_card_id_for_gift(&state.assets, req.Id);
+    let wk_card = week_card_id_for_gift(&state.assets, gift_id);
     if let Some((wid, days)) = wk_card {
         let buy_key = format!("week_card:buy_ms:{wid}");
         let end_key = format!("week_card:end_ms:{wid}");
@@ -1536,17 +1808,10 @@ pub fn handle_pay_gift_request(
             },
         );
     }
-    let gift_cfg = state
-        .assets
-        .tables
-        .pay_gift
-        .get_data_by_id(&req.Id)
-        .map(|c| c.into_owned());
-    let grant_items = if let Some(ref cfg) = gift_cfg
-        && cfg.ItemId > 0
-    {
+
+    let grant_items = if gift_cfg.ItemId > 0 {
         vec![reward::RewardItem {
-            item_id: cfg.ItemId,
+            item_id: gift_cfg.ItemId,
             count: 1,
         }]
     } else {
@@ -1564,17 +1829,34 @@ pub fn handle_pay_gift_request(
     let first_grant = grant_items[0];
     let mut rctx = state.reward_context();
     reward::grant_items(&mut rctx, 0, true, &grant_items, 8001).map_err(|e| e.to_string())?;
-    let updated_gift = gift_cfg
-        .as_ref()
-        .map(|cfg| build_pay_gift_info(state, cfg, 1));
+    let updated_gift = Some(build_pay_gift_info(state, &gift_cfg, 1));
+    Ok(PayGiftPurchaseOutcome {
+        err: ErrorCode::Success,
+        item_id: first_grant.item_id,
+        item_count: first_grant.count,
+        updated_gift,
+    })
+}
+
+pub fn handle_pay_gift_request(
+    state: &mut State,
+    req: PayGiftRequest,
+) -> Result<PayGiftResponse, String> {
+    let outcome = execute_pay_gift_purchase(state, req.Id)?;
+    if outcome.err != ErrorCode::Success {
+        return Ok(PayGiftResponse {
+            ErrorCode: Some(outcome.err),
+            ..Default::default()
+        });
+    }
     state.conn.push(
         PayGiftSuccessNotify::MSG_ID,
         &PayGiftSuccessNotify {
             ReceiptId: b"local_receipt".to_vec(),
-            ItemId: first_grant.item_id,
-            ItemCount: first_grant.count,
+            ItemId: outcome.item_id,
+            ItemCount: outcome.item_count,
             Id: req.Id,
-            PayGiftInfo: updated_gift,
+            PayGiftInfo: outcome.updated_gift,
         },
     );
     Ok(PayGiftResponse {
@@ -1588,23 +1870,22 @@ pub fn handle_pay_item_request(
     state: &mut State,
     req: PayItemRequest,
 ) -> Result<PayItemResponse, String> {
+    let Some(cfg) = state.assets.tables.pay_item.get_data_by_id(&req.Id) else {
+        return Ok(PayItemResponse {
+            ErrorCode: Some(ErrorCode::ErrItemCfgNotFound),
+            ..Default::default()
+        });
+    };
     let k = format!("payitem:{}", req.Id);
     let prev_count = state.player_components.progress.info.get_key_int(&k);
     let _ = state.player_components.progress.info.add_key_int(&k, 1);
-    let (item_id, total_count) = if let Some(cfg) = state.assets.tables.pay_item.get_data_by_id(&req.Id)
-    {
-        let bonus = if prev_count == 0 && cfg.SpecialBonusItemCount > 0 {
-            cfg.SpecialBonusItemCount
-        } else {
-            cfg.BonusItemCount
-        };
-        (
-            if cfg.ItemId > 0 { cfg.ItemId } else { 4 },
-            (cfg.ItemCount + bonus).max(1),
-        )
+    let bonus = if prev_count == 0 && cfg.SpecialBonusItemCount > 0 {
+        cfg.SpecialBonusItemCount
     } else {
-        (4, 648)
+        cfg.BonusItemCount
     };
+    let item_id = if cfg.ItemId > 0 { cfg.ItemId } else { 4 };
+    let total_count = (cfg.ItemCount + bonus).max(1);
     let _ = state
         .player_components
         .progress
@@ -1648,55 +1929,26 @@ pub fn handle_pay_shop_direct_buy_request(
     req: PayShopDirectBuyRequest,
 ) -> Result<PayShopDirectBuyResponse, String> {
     let shop_item_id = req.Id;
-    let (item_id, item_count) = if let Some(cfg) = state.assets.tables.pay_gift.get_data_by_id(&shop_item_id)
-        && cfg.ItemId > 0
-    {
-        (cfg.ItemId, 1)
-    } else {
-        (3, 60)
-    };
+    let outcome = execute_pay_gift_purchase(state, shop_item_id)?;
+    if outcome.err != ErrorCode::Success {
+        return Ok(PayShopDirectBuyResponse {
+            ErrorCode: Some(outcome.err),
+            ..Default::default()
+        });
+    }
     let receipt_id = format!(
         "direct_{}_{}_{}",
         state.player_id,
         shop_item_id,
         energy::now_seconds()
     );
-    if shop_item_id > 0 {
-        let _ = state
-            .player_components
-            .progress
-            .info
-            .add_key_int(&format!("paygift:{shop_item_id}"), 1);
-        let _ = state
-            .player_components
-            .progress
-            .info
-            .add_key_int("topup:score", i64::from(item_count));
-        state
-            .player_components
-            .progress
-            .save(&state.fs)
-            .map_err(|e| e.to_string())?;
-        let mut rctx = state.reward_context();
-        reward::grant_items(
-            &mut rctx,
-            0,
-            true,
-            &[reward::RewardItem {
-                item_id,
-                count: item_count,
-            }],
-            8001,
-        )
-        .map_err(|e| e.to_string())?;
-    }
     state.conn.push(
         PayShopDirectBuyNotify::MSG_ID,
         &PayShopDirectBuyNotify {
             ReceiptId: receipt_id.as_bytes().to_vec(),
             ShopItemId: shop_item_id,
-            ItemId: item_id,
-            ItemCount: item_count,
+            ItemId: outcome.item_id,
+            ItemCount: outcome.item_count,
         },
     );
     Ok(PayShopDirectBuyResponse {
@@ -1706,10 +1958,7 @@ pub fn handle_pay_shop_direct_buy_request(
     })
 }
 
-pub fn handle_gacha_accumulate_info_request(
-    state: &mut State,
-    req: GachaAccumulateInfoRequest,
-) -> Result<GachaAccumulateInfoResponse, String> {
+fn gacha_accumulate_milestones(state: &State, acc_id: i32) -> (i32, i32, Vec<(i32, i32)>) {
     let cur_gacha_num: i32 = state
         .player_components
         .gacha
@@ -1718,21 +1967,46 @@ pub fn handle_gacha_accumulate_info_request(
         .iter()
         .map(|b| b.total_pulls.max(0))
         .sum();
-    let group_id = if req.GachaAccumulateId >= 200 {
-        2
-    } else {
-        1
-    };
-    let reward_infos = state
+    let group_id = if acc_id >= 200 { 2 } else { 1 };
+    let group_rows: Vec<i32> = state
         .assets
         .tables
         .gacha_accumulate_reward
         .items
         .iter()
+        .map(|r| r.Id)
+        .filter(|&id| id / 100 == group_id)
+        .collect();
+    let source_ids: Vec<i32> = if group_rows.is_empty() {
+        state
+            .assets
+            .tables
+            .gacha_accumulate_reward
+            .items
+            .iter()
+            .map(|r| r.Id)
+            .collect()
+    } else {
+        group_rows
+    };
+    let milestones = source_ids
+        .into_iter()
         .enumerate()
-        .map(|(idx, r)| {
-            let need = ((idx as i32) + 1) * 10;
-            let k = format!("gacha_acc:{}:{}", req.GachaAccumulateId, r.Id);
+        .map(|(idx, id)| (id, ((idx as i32) + 1) * 10))
+        .collect();
+    (group_id, cur_gacha_num, milestones)
+}
+
+pub fn handle_gacha_accumulate_info_request(
+    state: &mut State,
+    req: GachaAccumulateInfoRequest,
+) -> Result<GachaAccumulateInfoResponse, String> {
+    let (group_id, cur_gacha_num, milestones) =
+        gacha_accumulate_milestones(state, req.GachaAccumulateId);
+    let reward_infos = milestones
+        .into_iter()
+        .map(|(id, need)| {
+            let k = format!("gacha_acc:{}:{id}", req.GachaAccumulateId);
             let claimed = state.player_components.progress.info.has_claim(&k);
             let status = if claimed {
                 2
@@ -1742,7 +2016,7 @@ pub fn handle_gacha_accumulate_info_request(
                 0
             };
             GachaAccumulateRewardInfo {
-                Id: r.Id,
+                Id: id,
                 GroupId: group_id,
                 GachaNum: need,
                 Status: status,
@@ -1767,21 +2041,32 @@ pub fn handle_gacha_accumulate_reward_request(
     state: &mut State,
     req: GachaAccumulateRewardRequest,
 ) -> Result<GachaAccumulateRewardResponse, String> {
+    let (_, cur_gacha_num, milestones) =
+        gacha_accumulate_milestones(state, req.GachaAccumulateId);
     let mut dirty = false;
     for rid in req.RewardId {
+        let Some(&(_, need)) = milestones.iter().find(|&&(id, _)| id == rid) else {
+            continue;
+        };
+        if cur_gacha_num < need {
+            continue;
+        }
         let k = format!("gacha_acc:{}:{rid}", req.GachaAccumulateId);
         if state.player_components.progress.info.mark_claim(&k) {
             dirty = true;
             let mut rctx = state.reward_context();
-            reward::grant_items(
+            reward::grant_table_reward(
                 &mut rctx,
-                0,
+                "GachaAccumulateReward",
+                i64::from(rid),
+                false,
                 true,
+                19500,
                 &[reward::RewardItem {
                     item_id: 3,
                     count: 160,
                 }],
-                19500,
+                None,
             )
             .map_err(|e| e.to_string())?;
         }
@@ -1822,6 +2107,42 @@ pub fn handle_total_top_up_reward_request(
     state: &mut State,
     req: TotalTopUpRewardRequest,
 ) -> Result<TotalTopUpRewardResponse, String> {
+    let raw_rows = state.assets.raw_json_cached("TotalTopUpReward");
+    let Some(target_row) = raw_rows
+        .iter()
+        .find(|r| r.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(req.TotalTopUpRewardId)))
+    else {
+        return Ok(TotalTopUpRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    };
+    let act_id = target_row
+        .get("ActivityId")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let tier_idx = raw_rows
+        .iter()
+        .filter(|r| r.get("ActivityId").and_then(|v| v.as_i64()).unwrap_or(0) == act_id)
+        .position(|r| {
+            r.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(req.TotalTopUpRewardId))
+        })
+        .unwrap_or(0);
+    let need_score = if tier_idx == 0 {
+        60i64
+    } else {
+        i64::try_from(tier_idx).unwrap_or(1) * 300
+    };
+    let cur_score = state
+        .player_components
+        .progress
+        .info
+        .get_key_int("topup:score");
+    if cur_score < need_score {
+        return Ok(TotalTopUpRewardResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
+
     let k = format!("topup:clm:{}", req.TotalTopUpRewardId);
     if state.player_components.progress.info.mark_claim(&k) {
         state
@@ -1830,15 +2151,18 @@ pub fn handle_total_top_up_reward_request(
             .save(&state.fs)
             .map_err(|e| e.to_string())?;
         let mut rctx = state.reward_context();
-        reward::grant_items(
+        reward::grant_table_reward(
             &mut rctx,
-            0,
+            "TotalTopUpReward",
+            i64::from(req.TotalTopUpRewardId),
+            false,
             true,
+            19500,
             &[reward::RewardItem {
                 item_id: 3,
                 count: 300,
             }],
-            19500,
+            None,
         )
         .map_err(|e| e.to_string())?;
     }
@@ -1878,7 +2202,54 @@ pub fn handle_influence_reward_request(
     state: &mut State,
     req: InfluenceRewardRequest,
 ) -> Result<InfluenceRewardResponse, String> {
+    let cfg_info = state
+        .assets
+        .raw_json_cached("Influence")
+        .iter()
+        .find(|r| {
+            req.InfluenceId > 0
+                && r.get("Id").and_then(|v| v.as_i64()) == Some(i64::from(req.InfluenceId))
+        })
+        .map(|r| {
+            let cond = r
+                .get("RelationCondition")
+                .and_then(|v| v.as_i64())
+                .and_then(|n| i32::try_from(n).ok())
+                .unwrap_or(0);
+            let rw_len = r
+                .get("ReputationReward")
+                .and_then(|v| v.as_array())
+                .map_or(0, |a| a.len());
+            (cond, if rw_len > 0 { rw_len as i64 } else { 10 })
+        });
+    let Some((rel_cond, max_steps)) = cfg_info else {
+        return Ok(InfluenceRewardResponse {
+            Code: Some(ErrorCode::RequestParamError),
+            InfluenceId: req.InfluenceId,
+            ..Default::default()
+        });
+    };
+    if rel_cond > 0
+        && !condition::eval_condition_or_group(&state.eval_context(), rel_cond)
+    {
+        return Ok(InfluenceRewardResponse {
+            Code: Some(ErrorCode::RequestParamError),
+            InfluenceId: req.InfluenceId,
+            ..Default::default()
+        });
+    }
+
     let k = format!("inf:idx:{}", req.InfluenceId);
+    let cur_idx = state.player_components.progress.info.get_key_int(&k).max(0);
+    if cur_idx >= max_steps {
+        return Ok(InfluenceRewardResponse {
+            Code: Some(ErrorCode::ErrItemCount),
+            InfluenceId: req.InfluenceId,
+            RewardIndex: cur_idx as i32,
+            ..Default::default()
+        });
+    }
+
     let next_idx = state.player_components.progress.info.add_key_int(&k, 1) as i32;
     state
         .player_components

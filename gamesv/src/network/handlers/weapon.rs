@@ -2,26 +2,21 @@ use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sonoro_gamesv_data::Assets;
-use sonoro_gamesv_data::data_tables::create_buff_information;
 use sonoro_gamesv_data::tables::weapon_breach::WeaponBreach;
 use sonoro_gamesv_fs::weapon_item::WeaponItem;
 use sonoro_gamesv_logic::component::comp_util;
 use sonoro_gamesv_logic::component::player::PlayerWeaponComponent;
 use sonoro_gamesv_logic::event_queue::EventQueue;
-use sonoro_gamesv_logic::events::Event;
+use sonoro_gamesv_logic::events::{BuffAdditionEntry, Event};
 use sonoro_gamesv_logic::fsm::types::wake_reason;
-use sonoro_gamesv_logic::helpers::{
-    buff as buff_helper, condition, consume, quest_engine, reward, role_attribute_sync,
-};
-use sonoro_gamesv_logic::schedulers::BuffTimerScheduler;
-use sonoro_proto::enums::{ApplyGEType, EquipPos, ErrorCode};
+use sonoro_gamesv_logic::handlers::buff as buff_handlers;
+use sonoro_gamesv_logic::helpers::{condition, consume, quest_engine, reward, role_attribute_sync};
+use sonoro_proto::enums::{EquipPos, ErrorCode};
 use sonoro_proto::pb::{
-    ApplyBuffS2cRequestNotify, CombatCommon, CombatNotifyData, CombatNotifyDataMessageOneof,
-    CombatReceiveData, CombatReceiveDataMessageOneof, CombatReceivePackNotify,
     EntityEquipChangeNotify, EquipTakeOnNotify, EquipTakeOnRequest, EquipTakeOnResponse,
-    RemoveBuffS2cRequestNotify, RoleLoadEquipData, WeaponBreachRequest, WeaponBreachResponse,
-    WeaponItemRequest, WeaponItemResponse, WeaponItemRemoveNotify, WeaponLevelUpRequest,
-    WeaponLevelUpResponse, WeaponResonUpRequest, WeaponResonUpResponse,
+    RoleLoadEquipData, WeaponBreachRequest, WeaponBreachResponse, WeaponItemRemoveNotify,
+    WeaponItemRequest, WeaponItemResponse, WeaponLevelUpRequest, WeaponLevelUpResponse,
+    WeaponResonUpRequest, WeaponResonUpResponse,
 };
 
 use super::State;
@@ -59,7 +54,7 @@ fn find_weapon_breach_entry(
 
 fn sync_weapon_passive_buffs(
     state: &mut State,
-    _events: &mut EventQueue,
+    events: &mut EventQueue,
     role_id: i32,
     remove_ids: &[i64],
     add_ids: &[i64],
@@ -84,123 +79,73 @@ fn sync_weapon_passive_buffs(
         return false;
     };
     let net_id = scene.entities[idx].net_id;
+    let Some(handle) = scene.entity_handle(net_id) else {
+        return false;
+    };
     buff_timers.ensure_entity_registered(scene, assets, net_id, now_ms_val);
 
-    let mut notify_data: Vec<CombatReceiveData> = Vec::new();
+    let remove_handles: Vec<i32> = scene.entities[idx]
+        .buffs
+        .as_ref()
+        .map(|buffs| {
+            remove_ids
+                .iter()
+                .filter_map(|&buff_id| buffs.get_by_buff_id(buff_id).map(|b| b.HandleId))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    for &buff_id in remove_ids {
-        let Some((handle_id, stack_count)) = scene.entities[idx]
-            .buffs
-            .as_ref()
-            .and_then(|b| b.get_by_buff_id(buff_id))
-            .map(|b| (b.HandleId, b.StackCount))
-        else {
-            continue;
-        };
-        buff_timers.cancel_handle(net_id, handle_id);
-        scene.entities[idx]
-            .buffs
-            .as_mut()
-            .expect("buffs checked")
-            .remove_by_handle(handle_id);
-        notify_data.push(CombatReceiveData {
-            Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
-                CombatNotifyData {
-                    CombatCommon: Some(CombatCommon {
-                        EntityId: net_id,
-                        ..Default::default()
-                    }),
-                    Message: Some(CombatNotifyDataMessageOneof::RemoveBuffS2cRequestNotify(
-                        RemoveBuffS2cRequestNotify {
-                            Handle: handle_id,
-                            StackCount: stack_count,
-                            Reason: 41,
-                            InstigatorId: net_id,
-                        },
-                    )),
-                },
-            )),
-        });
-    }
-
-    for &buff_id in add_ids {
-        if scene.entities[idx]
-            .buffs
-            .as_ref()
-            .is_some_and(|b| b.get_by_buff_id(buff_id).is_some())
-        {
-            continue;
-        }
-        let Some(buff_data) = assets
-            .tables
-            .buff
-            .get_data_by_id(&buff_id)
-            .map(|r| r.into_owned())
-        else {
-            continue;
-        };
-        scene.instance.buff_handle += 1;
-        let buff_info = create_buff_information(
-            scene.instance.buff_handle,
-            buff_id,
-            net_id,
-            net_id,
-            true,
+    let mut changed = false;
+    if !remove_handles.is_empty() {
+        buff_handlers::remove_buff_handles_with_sync(
+            handle,
+            &remove_handles,
+            Some(scene),
+            Some(assets),
+            conn,
+            events,
+            buff_timers,
         );
-        scene.entities[idx]
-            .buffs
-            .as_mut()
-            .expect("buffs checked")
-            .buffs
-            .push(buff_info.clone());
-        buff_timers.schedule_new_buff(&buff_info, &buff_data, net_id, now_ms_val);
-        notify_data.push(CombatReceiveData {
-            Message: Some(CombatReceiveDataMessageOneof::CombatNotifyData(
-                CombatNotifyData {
-                    CombatCommon: Some(CombatCommon {
-                        EntityId: net_id,
-                        MessageId: -1,
-                        PreMessageId: -1,
-                        ..Default::default()
-                    }),
-                    Message: Some(CombatNotifyDataMessageOneof::ApplyBuffS2cRequestNotify(
-                        ApplyBuffS2cRequestNotify {
-                            Id: buff_id,
-                            Level: buff_info.Level,
-                            InstigatorId: net_id,
-                            ApplyType: Some(buff_info.ApplyType.unwrap_or(ApplyGEType::Common)),
-                            ServerId: buff_info.ServerId,
-                            StackCount: buff_info.StackCount,
-                            IsIterable: true,
-                            Reason: 12,
-                            Time: None,
-                        },
-                    )),
-                },
-            )),
-        });
-
-        let disposition =
-            BuffTimerScheduler::application_disposition(&buff_data, true, false, true);
-        if disposition.execute_periodic_now {
-            let _ = scene.save_entity_by_net_id(fs, net_id);
-            buff_helper::execute_periodic_buff_effects(
-                &mut notify_data,
-                net_id,
-                net_id,
-                &buff_data,
-                scene,
-            );
-        }
+        changed = true;
     }
 
-    if notify_data.is_empty() {
+    let add_entries: Vec<BuffAdditionEntry> = add_ids
+        .iter()
+        .filter_map(|&buff_id| {
+            let already_present = scene.entities[idx]
+                .buffs
+                .as_ref()
+                .is_some_and(|b| b.get_by_buff_id(buff_id).is_some());
+            if already_present || assets.tables.buff.get_data_by_id(&buff_id).is_none() {
+                return None;
+            }
+            Some(BuffAdditionEntry {
+                id: buff_id,
+                is_active: true,
+                notify_client: true,
+                ..Default::default()
+            })
+        })
+        .collect();
+
+    if !add_entries.is_empty() {
+        buff_handlers::add_buff_to_entity(
+            conn,
+            events,
+            scene,
+            buff_timers,
+            assets,
+            handle,
+            handle,
+            &add_entries,
+        );
+        changed = true;
+    }
+
+    if !changed {
         return false;
     }
-    conn.push(
-        CombatReceivePackNotify::MSG_ID,
-        &CombatReceivePackNotify { Data: notify_data },
-    );
+    let _ = scene.save_entity_by_net_id(fs, net_id);
     scene.mark_fsm_dirty(net_id, wake_reason::BUFF);
     true
 }

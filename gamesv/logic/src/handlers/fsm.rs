@@ -32,11 +32,40 @@ use crate::sink::PushSink;
 pub fn handle_fsm_wake<S: PushSink + ?Sized>(
     now_ms: i64,
     qctx: &mut QuestContext<'_, S>,
-    assets: &Assets,
+    _assets: &Assets,
     role_comp: &mut PlayerRoleComponent,
-    fs: &FileSystem,
+    _fs: &FileSystem,
     buff_timers: &mut BuffTimerScheduler,
 ) {
+    let mut sub_qctx = QuestContext {
+        assets: qctx.assets,
+        fs: qctx.fs,
+        sink: qctx.sink,
+        scene: qctx.scene.as_deref_mut(),
+        scene_comp: qctx.scene_comp.as_deref_mut(),
+        events: qctx.events,
+        basic_comp: qctx.basic_comp,
+        inventory_comp: qctx.inventory_comp,
+        weapon_comp: qctx.weapon_comp,
+        echo_comp: qctx.echo_comp,
+        map_comp: qctx.map_comp,
+        quest_comp: qctx.quest_comp,
+        role_comp: Some(qctx.role_comp.as_deref_mut().unwrap_or(role_comp)),
+        guide_comp: qctx.guide_comp.as_deref_mut(),
+        mail_comp: qctx.mail_comp.as_deref_mut(),
+        progress_comp: qctx.progress_comp.as_deref_mut(),
+        activity_notify: qctx.activity_notify,
+    };
+    handle_fsm_wake_qctx(now_ms, &mut sub_qctx, buff_timers);
+}
+
+pub fn handle_fsm_wake_qctx<S: PushSink + ?Sized>(
+    now_ms: i64,
+    qctx: &mut QuestContext<'_, S>,
+    buff_timers: &mut BuffTimerScheduler,
+) {
+    let assets = qctx.assets;
+    let fs = qctx.fs;
     let mut data: Vec<CombatReceiveData> = Vec::new();
 
     loop {
@@ -125,6 +154,7 @@ pub fn handle_fsm_wake<S: PushSink + ?Sized>(
                     }
                     if cfg.entity_type == EntityType::Player
                         && cfg.config_type == crate::component::entity::small::ConfigType::Character
+                        && let Some(role_comp) = qctx.role_comp.as_deref_mut()
                         && let Some(ri) = role_comp.role_map.get_mut(&cfg.config_id)
                     {
                         ri.current_hp = Some(0);

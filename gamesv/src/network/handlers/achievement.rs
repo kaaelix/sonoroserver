@@ -52,11 +52,14 @@ pub fn handle_achievement_info_request(
             continue;
         }
         let mut entries = Vec::new();
-        let mut all_finished = false;
+        let mut all_finished = true;
+        let mut has_any = false;
+        let mut max_finish_time = 0u32;
         for ach in &state.assets.tables.achievement.items {
             if ach.GroupId != grp.Id {
                 continue;
             }
+            has_any = true;
             if let Some(rec) = progress
                 .achievement
                 .entries
@@ -65,9 +68,12 @@ pub fn handle_achievement_info_request(
             {
                 entries.push(entry_to_pb(rec));
                 if rec.finish_time > 0 {
-                    all_finished = true;
+                    max_finish_time = max_finish_time.max(rec.finish_time);
+                } else {
+                    all_finished = false;
                 }
             } else {
+                all_finished = false;
                 entries.push(AchievementEntry {
                     Id: ach.Id,
                     FinishTime: 0,
@@ -79,11 +85,12 @@ pub fn handle_achievement_info_request(
                 });
             }
         }
+        let group_done = has_any && all_finished;
         let group_received = progress.achievement.claimed_groups.contains(&grp.Id);
         groups.push(AchievementGroupInfo {
             AchievementGroupEntry: Some(AchievementGroupEntry {
                 Id: grp.Id,
-                FinishTime: u32::from(all_finished),
+                FinishTime: if group_done { max_finish_time.max(1) } else { 0 },
                 IsReceive: group_received,
             }),
             AchievementEntryList: entries,
@@ -121,15 +128,33 @@ pub fn handle_achievement_finish_request(
     state: &mut State,
     req: AchievementFinishRequest,
 ) -> Result<AchievementFinishResponse, String> {
-    if state
+    let Some(cfg) = state
         .assets
         .tables
         .achievement
         .get_data_by_id(&req.Id)
-        .is_none()
-    {
+        .map(|c| c.into_owned())
+    else {
         return Ok(AchievementFinishResponse {
             ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    };
+    if !cfg.ClientTrigger {
+        return Ok(AchievementFinishResponse {
+            ErrorCode: Some(ErrorCode::RequestParamError),
+        });
+    }
+    if state
+        .player_components
+        .progress
+        .info
+        .achievement
+        .entries
+        .iter()
+        .any(|r| r.id == req.Id && r.finish_time > 0)
+    {
+        return Ok(AchievementFinishResponse {
+            ErrorCode: Some(ErrorCode::Success),
         });
     }
     let now_u32 = energy::now_seconds().clamp(1, i64::from(u32::MAX)) as u32;
@@ -183,6 +208,29 @@ fn claim_single_achievement(
             .claimed_groups
             .contains(&id)
         {
+            return Ok(false);
+        }
+        let group_ids: Vec<i32> = state
+            .assets
+            .tables
+            .achievement
+            .items
+            .iter()
+            .filter(|a| a.GroupId == id)
+            .map(|a| a.Id)
+            .collect();
+        let all_finished = !group_ids.is_empty()
+            && group_ids.iter().all(|&aid| {
+                state
+                    .player_components
+                    .progress
+                    .info
+                    .achievement
+                    .entries
+                    .iter()
+                    .any(|r| r.id == aid && r.finish_time > 0)
+            });
+        if !all_finished {
             return Ok(false);
         }
         ProgressInfo::append_unique_id(

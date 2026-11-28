@@ -143,6 +143,22 @@ impl FsmComponent {
         transition_engine::mark_root_dirty(self, fsm_id, reason)
     }
 
+    pub fn mark_root_dirty_all(&mut self, reason: WakeMask) {
+        transition_engine::mark_dirty(self, reason);
+    }
+
+    pub fn set_custom_blackboard_int(&mut self, key: &str, value: i32) {
+        if let Some((_, existing)) = self
+            .custom_blackboards
+            .iter_mut()
+            .find(|(k, _)| k == key)
+        {
+            *existing = value;
+        } else {
+            self.custom_blackboards.push((key.to_string(), value));
+        }
+    }
+
     pub fn any_root_dirty(&self) -> bool {
         self.runtime_nodes.iter().any(|r| r.dirty_reasons != 0)
     }

@@ -590,37 +590,76 @@ pub fn grant_items<S: PushSink + ?Sized>(
             .phantom_item
             .get_data_by_id(&entry.item_id)
         {
-            result.granted_count += 1;
             if echo_info::valid_default_owned_item(ctx.assets, &phantom_cfg) {
-                let fetter = phantom_cfg.FetterGroup[0];
-                for _ in 0..entry.count {
-                    let incr_id = special_item_incr::next(ctx.fs, ctx.echo_comp.player_id)?;
-                    let new_echo = echo_info::build_default_echo(ctx.assets, &phantom_cfg, fetter);
-                    add_echoes.push(new_echo.to_proto(incr_id));
-                    let e_path = format!(
-                        "player/{}/{}/{incr_id}",
-                        ctx.echo_comp.player_id,
-                        echo_info::EchoInfo::DATA_DIR
-                    );
-                    comp_util::save_struct(ctx.fs, &new_echo, &e_path)?;
-                    ctx.echo_comp.echo_map.insert(incr_id, new_echo);
-                    reward_infos.push(RewardItemInfo {
-                        ShowPlanId: 0,
-                        ItemId: entry.item_id,
-                        Count: 1,
-                        IncrId: incr_id,
-                    });
+                let valid_fetters: Vec<i32> = phantom_cfg
+                    .FetterGroup
+                    .iter()
+                    .copied()
+                    .filter(|fid| {
+                        *fid > 0
+                            && ctx
+                                .assets
+                                .tables
+                                .phantom_fetter_group
+                                .get_data_by_id(fid)
+                                .is_some()
+                    })
+                    .collect();
+                let fallback_fetters: Vec<i32> = if valid_fetters.is_empty() {
+                    phantom_cfg
+                        .FetterGroup
+                        .iter()
+                        .copied()
+                        .filter(|&fid| fid > 0)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let fetter_pool = if valid_fetters.is_empty() {
+                    &fallback_fetters[..]
+                } else {
+                    &valid_fetters[..]
+                };
+                if !fetter_pool.is_empty() {
+                    let seed = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(1, |d| d.as_nanos() as u64)
+                        ^ (u64::from(entry.item_id as u32))
+                        ^ (u64::from(ctx.echo_comp.player_id as u32) << 32)
+                        ^ (ctx.echo_comp.echo_map.len() as u64);
+                    let mut rng = echo_info::ZigDefaultPrng::init(seed);
+                    for _ in 0..entry.count {
+                        let fetter = fetter_pool[rng.less_than_usize(fetter_pool.len())];
+                        let incr_id = special_item_incr::next(ctx.fs, ctx.echo_comp.player_id)?;
+                        let new_echo =
+                            echo_info::build_default_echo(ctx.assets, &phantom_cfg, fetter);
+                        add_echoes.push(new_echo.to_proto(incr_id));
+                        let e_path = format!(
+                            "player/{}/{}/{incr_id}",
+                            ctx.echo_comp.player_id,
+                            echo_info::EchoInfo::DATA_DIR
+                        );
+                        comp_util::save_struct(ctx.fs, &new_echo, &e_path)?;
+                        ctx.echo_comp.echo_map.insert(incr_id, new_echo);
+                        reward_infos.push(RewardItemInfo {
+                            ShowPlanId: 0,
+                            ItemId: entry.item_id,
+                            Count: 1,
+                            IncrId: incr_id,
+                        });
+                        result.granted_count += 1;
 
-                    let discovery = calabash::record_echo_discovery(
-                        ctx.assets,
-                        ctx.echo_comp,
-                        phantom_cfg.MonsterId,
-                        phantom_cfg.QualityId,
-                    );
-                    if discovery.changed {
-                        calabash_dirty = true;
+                        let discovery = calabash::record_echo_discovery(
+                            ctx.assets,
+                            ctx.echo_comp,
+                            phantom_cfg.MonsterId,
+                            phantom_cfg.QualityId,
+                        );
+                        if discovery.changed {
+                            calabash_dirty = true;
+                        }
+                        bonus_union_exp += discovery.union_exp;
                     }
-                    bonus_union_exp += discovery.union_exp;
                 }
             }
         } else if entry.item_id == morale::DEFAULT_KEEP_ITEM_ID

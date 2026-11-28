@@ -7,7 +7,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+
+const MAX_WRITEBACK_RETRIES: u32 = 3;
+const WRITEBACK_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Operation forwarded to an optional persistence sync hook (e.g., SQLite mirroring).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +42,7 @@ struct FileEntry {
     content: Option<Vec<u8>>,
     mtime: Option<SystemTime>,
     dirty: bool,
+    write_failed: bool,
     revision: u64,
 }
 
@@ -46,11 +50,13 @@ struct PendingWrite {
     full_path: PathBuf,
     content: Vec<u8>,
     revision: u64,
+    attempts: u32,
 }
 
 #[derive(Default)]
 struct WritebackState {
     pending: HashMap<String, PendingWrite>,
+    inflight_key: Option<String>,
     flushing: bool,
     closed: bool,
 }
@@ -61,11 +67,120 @@ struct WritebackCoordinator {
     idle_cv: Condvar,
 }
 
+#[derive(Default)]
+struct KeyOpState {
+    active_keys: HashMap<String, usize>,
+    deleting_trees: Vec<String>,
+}
+
+#[derive(Default)]
+struct KeyOpGate {
+    state: Mutex<KeyOpState>,
+    cv: Condvar,
+}
+
+struct KeyOpGuard<'a> {
+    gate: &'a KeyOpGate,
+    key: String,
+}
+
+impl Drop for KeyOpGuard<'_> {
+    fn drop(&mut self) {
+        let mut st = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(count) = st.active_keys.get_mut(&self.key) {
+            if *count <= 1 {
+                st.active_keys.remove(&self.key);
+            } else {
+                *count -= 1;
+            }
+        }
+        self.gate.cv.notify_all();
+    }
+}
+
+struct TreeDeleteGuard<'a> {
+    gate: &'a KeyOpGate,
+    tree_key: String,
+}
+
+impl Drop for TreeDeleteGuard<'_> {
+    fn drop(&mut self) {
+        let mut st = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(pos) = st.deleting_trees.iter().position(|p| p == &self.tree_key) {
+            st.deleting_trees.swap_remove(pos);
+        }
+        self.gate.cv.notify_all();
+    }
+}
+
+impl KeyOpGate {
+    fn acquire_key(&self, key: &str) -> KeyOpGuard<'_> {
+        let mut st = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while st.deleting_trees.iter().any(|p| matches_tree(key, p)) {
+            st = self
+                .cv
+                .wait(st)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *st.active_keys.entry(key.to_string()).or_insert(0) += 1;
+        KeyOpGuard {
+            gate: self,
+            key: key.to_string(),
+        }
+    }
+
+    fn acquire_tree(&self, tree_key: &str) -> TreeDeleteGuard<'_> {
+        let mut st = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while st
+            .deleting_trees
+            .iter()
+            .any(|p| matches_tree(p, tree_key) || matches_tree(tree_key, p))
+            || st.active_keys.keys().any(|k| matches_tree(k, tree_key))
+        {
+            st = self
+                .cv
+                .wait(st)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        st.deleting_trees.push(tree_key.to_string());
+        TreeDeleteGuard {
+            gate: self,
+            tree_key: tree_key.to_string(),
+        }
+    }
+}
+
+fn matches_tree(key: &str, tree_key: &str) -> bool {
+    key == tree_key
+        || key
+            .strip_prefix(tree_key)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn is_newer_revision(new_rev: u64, old_rev: u64) -> bool {
+    new_rev != old_rev && new_rev.wrapping_sub(old_rev) < (u64::MAX / 2)
+}
+
 /// Cross-platform cached state filesystem rooted at `state_dir`.
 pub struct FileSystem {
     root_dir: PathBuf,
     entries: Arc<RwLock<HashMap<String, Arc<Mutex<FileEntry>>>>>,
     sync_hook: RwLock<Option<SyncHook>>,
+    key_gate: KeyOpGate,
     writeback: Arc<WritebackCoordinator>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
@@ -98,6 +213,7 @@ impl FileSystem {
             root_dir,
             entries,
             sync_hook: RwLock::new(None),
+            key_gate: KeyOpGate::default(),
             writeback,
             worker: Mutex::new(Some(handle)),
         })
@@ -114,12 +230,18 @@ impl FileSystem {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = st.pending.get(&key)
+            && !is_newer_revision(revision, existing.revision)
+        {
+            return;
+        }
         st.pending.insert(
             key,
             PendingWrite {
                 full_path,
                 content,
                 revision,
+                attempts: 0,
             },
         );
         self.writeback.work_cv.notify_one();
@@ -235,6 +357,7 @@ impl FileSystem {
     /// Reads a file relative to the state root, using an mtime-validated in-memory cache.
     pub fn read_file(&self, rel_path: &str) -> io::Result<Option<Vec<u8>>> {
         let (key, full_path) = self.resolve_relative(rel_path)?;
+        let _op_guard = self.key_gate.acquire_key(&key);
         let entry_arc = match self.get_entry(&key) {
             Some(entry) => entry,
             None => match fs::metadata(&full_path) {
@@ -291,12 +414,14 @@ impl FileSystem {
     /// Queues `content` for coalesced atomic write-behind, skipping identical writes.
     pub fn write_file(&self, rel_path: &str, content: &[u8]) -> io::Result<()> {
         let (key, full_path) = self.resolve_relative(rel_path)?;
+        let _op_guard = self.key_gate.acquire_key(&key);
         let entry_arc = self.get_or_create_entry(&key);
         let mut entry = entry_arc
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        if let Some(existing) = entry.content.as_deref()
+        if !entry.write_failed
+            && let Some(existing) = entry.content.as_deref()
             && existing == content
         {
             return Ok(());
@@ -308,10 +433,11 @@ impl FileSystem {
         entry.content = Some(owned.clone());
         entry.mtime = Some(SystemTime::now());
         entry.dirty = true;
+        entry.write_failed = false;
         entry.revision = entry.revision.wrapping_add(1);
         let revision = entry.revision;
-        drop(entry);
 
+        // Keep enqueue_write and notify_hook under the entry lock so revision ordering is atomic.
         self.enqueue_write(key.clone(), full_path, owned, revision);
         self.notify_hook(SyncOp::Write, &key, content);
         Ok(())
@@ -323,6 +449,7 @@ impl FileSystem {
         F: FnOnce(Option<&[u8]>) -> io::Result<(Option<Vec<u8>>, R)>,
     {
         let (key, full_path) = self.resolve_relative(rel_path)?;
+        let _op_guard = self.key_gate.acquire_key(&key);
         let entry_arc = self.get_or_create_entry(&key);
         let mut entry = entry_arc
             .lock()
@@ -368,15 +495,15 @@ impl FileSystem {
 
         let (next_opt, ret) = f(current.as_deref())?;
         if let Some(next_bytes) = next_opt
-            && entry.content.as_deref() != Some(next_bytes.as_slice())
+            && (entry.write_failed || entry.content.as_deref() != Some(next_bytes.as_slice()))
         {
             validate_writable_target(&full_path)?;
             entry.content = Some(next_bytes.clone());
             entry.mtime = Some(SystemTime::now());
             entry.dirty = true;
+            entry.write_failed = false;
             entry.revision = entry.revision.wrapping_add(1);
             let revision = entry.revision;
-            drop(entry);
             self.enqueue_write(key.clone(), full_path, next_bytes.clone(), revision);
             self.notify_hook(SyncOp::Write, &key, &next_bytes);
         }
@@ -386,15 +513,31 @@ impl FileSystem {
     /// Deletes a single file relative to the state root, ignoring missing files.
     pub fn delete_file(&self, rel_path: &str) -> io::Result<()> {
         let (key, full_path) = self.resolve_relative(rel_path)?;
-        self.flush_writeback();
-        if let Some(entry_arc) = self.get_entry(&key) {
-            let mut entry = entry_arc
+        let _op_guard = self.key_gate.acquire_key(&key);
+        let entry_arc = self.get_or_create_entry(&key);
+        let mut entry = entry_arc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        entry.content = None;
+        entry.mtime = None;
+        entry.dirty = false;
+        entry.write_failed = false;
+        entry.revision = entry.revision.wrapping_add(1);
+
+        {
+            let mut st = self
+                .writeback
+                .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            entry.content = None;
-            entry.mtime = None;
-            entry.dirty = false;
-            entry.revision = entry.revision.wrapping_add(1);
+            st.pending.remove(&key);
+            while st.inflight_key.as_deref() == Some(key.as_str()) {
+                st = self
+                    .writeback
+                    .idle_cv
+                    .wait(st)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
         }
 
         match fs::remove_file(&full_path) {
@@ -410,15 +553,14 @@ impl FileSystem {
     /// Recursively deletes a directory tree relative to the state root.
     pub fn delete_tree(&self, rel_path: &str) -> io::Result<()> {
         let (key, full_path) = self.resolve_relative(rel_path)?;
-        self.flush_writeback();
+        let _tree_guard = self.key_gate.acquire_tree(&key);
         let matching: Vec<Arc<Mutex<FileEntry>>> = {
-            let prefix = format!("{key}/");
             let map = self
                 .entries
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             map.iter()
-                .filter(|(k, _)| *k == &key || k.starts_with(&prefix))
+                .filter(|(k, _)| matches_tree(k, &key))
                 .map(|(_, v)| v.clone())
                 .collect()
         };
@@ -430,7 +572,28 @@ impl FileSystem {
             entry.content = None;
             entry.mtime = None;
             entry.dirty = false;
+            entry.write_failed = false;
             entry.revision = entry.revision.wrapping_add(1);
+        }
+
+        {
+            let mut st = self
+                .writeback
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            st.pending.retain(|k, _| !matches_tree(k, &key));
+            while st
+                .inflight_key
+                .as_deref()
+                .is_some_and(|k| matches_tree(k, &key))
+            {
+                st = self
+                    .writeback
+                    .idle_cv
+                    .wait(st)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
         }
 
         match fs::remove_dir_all(&full_path) {
@@ -494,7 +657,14 @@ fn validate_writable_target(full_path: &Path) -> io::Result<()> {
             "target path is a directory",
         )),
         Ok(_) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
         Err(err) => Err(err),
     }
 }
@@ -504,34 +674,78 @@ fn writeback_loop(
     entries: Arc<RwLock<HashMap<String, Arc<Mutex<FileEntry>>>>>,
 ) {
     loop {
-        let batch = {
+        let (key, mut op) = {
             let mut st = wb.state.lock().unwrap_or_else(|p| p.into_inner());
-            while st.pending.is_empty() && !st.closed {
+            loop {
+                if let Some(k) = st.pending.keys().next().cloned() {
+                    let op = st
+                        .pending
+                        .remove(&k)
+                        .expect("key selected from pending map must exist");
+                    st.flushing = true;
+                    st.inflight_key = Some(k.clone());
+                    break (k, op);
+                }
+                st.flushing = false;
+                wb.idle_cv.notify_all();
+                if st.closed {
+                    return;
+                }
                 st = wb.work_cv.wait(st).unwrap_or_else(|p| p.into_inner());
             }
-            if st.pending.is_empty() && st.closed {
-                wb.idle_cv.notify_all();
-                break;
-            }
-            st.flushing = true;
-            std::mem::take(&mut st.pending)
         };
 
-        for (key, op) in batch {
-            if atomic_write(&op.full_path, &op.content).is_ok()
-                && let Some(entry_arc) = entries.read().ok().and_then(|m| m.get(&key).cloned())
-            {
-                let mut entry = entry_arc.lock().unwrap_or_else(|p| p.into_inner());
-                if entry.revision == op.revision {
-                    entry.dirty = false;
+        let write_res = atomic_write(&op.full_path, &op.content);
+        let is_closed = {
+            let mut st = wb.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.inflight_key = None;
+            wb.idle_cv.notify_all();
+            st.closed
+        };
+
+        match write_res {
+            Ok(()) => {
+                if let Some(entry_arc) = entries.read().ok().and_then(|m| m.get(&key).cloned()) {
+                    let mut entry = entry_arc.lock().unwrap_or_else(|p| p.into_inner());
+                    if entry.revision == op.revision {
+                        entry.dirty = false;
+                        entry.write_failed = false;
+                    }
                 }
             }
-        }
-
-        let mut st = wb.state.lock().unwrap_or_else(|p| p.into_inner());
-        st.flushing = false;
-        if st.pending.is_empty() {
-            wb.idle_cv.notify_all();
+            Err(err) => {
+                eprintln!(
+                    "fs writeback error for {} (attempt {}, rev {}): {err}",
+                    op.full_path.display(),
+                    op.attempts + 1,
+                    op.revision
+                );
+                let should_retry = !is_closed && op.attempts < MAX_WRITEBACK_RETRIES;
+                if should_retry {
+                    std::thread::sleep(WRITEBACK_RETRY_DELAY);
+                }
+                if let Some(entry_arc) = entries.read().ok().and_then(|m| m.get(&key).cloned()) {
+                    let mut entry = entry_arc.lock().unwrap_or_else(|p| p.into_inner());
+                    if entry.revision == op.revision {
+                        if should_retry {
+                            op.attempts += 1;
+                            let mut st = wb.state.lock().unwrap_or_else(|p| p.into_inner());
+                            if !st.closed {
+                                let keep = st.pending.get(&key).is_none_or(|cur| {
+                                    is_newer_revision(op.revision, cur.revision)
+                                });
+                                if keep {
+                                    st.pending.insert(key, op);
+                                }
+                            } else {
+                                entry.write_failed = true;
+                            }
+                        } else {
+                            entry.write_failed = true;
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -647,6 +861,67 @@ mod tests {
         let disk_bytes = fs::read(dir.join("player/100000001/scene")).expect("disk bytes");
         assert_eq!(disk_bytes, b"v2");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_delete_does_not_resurrect_stale_writes() {
+        let dir = temp_dir("delete_race");
+        let fs_state = Arc::new(FileSystem::open(&dir).expect("open fs"));
+
+        for i in 0..40 {
+            let key = format!("player/99/item_{i}");
+            fs_state.write_file(&key, b"payload").expect("write");
+            fs_state.delete_file(&key).expect("delete");
+            fs_state.flush();
+            assert!(!dir.join(&key).exists(), "deleted file {key} resurrected");
+            assert!(
+                fs_state.read_file(&key).expect("read after del").is_none(),
+                "cache for {key} should be None"
+            );
+        }
+
+        fs_state
+            .write_file("player/88/bag", b"bag")
+            .expect("write bag");
+        fs_state.delete_tree("player/88").expect("delete tree");
+        fs_state.flush();
+        assert!(!dir.join("player/88").exists());
+        assert!(
+            fs_state
+                .read_file("player/88/bag")
+                .expect("read tree child")
+                .is_none()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_writeback_preserves_dirty_state_without_hanging_flush() {
+        let dir = temp_dir("writeback_err");
+        fs::write(dir.join("blocked"), b"not a directory").expect("create regular file");
+        let fs_state = FileSystem::open(&dir).expect("open fs");
+
+        fs_state
+            .write_file("blocked/child", b"dirty-data")
+            .expect("queue write");
+        fs_state.flush();
+
+        assert_eq!(
+            fs_state.read_file("blocked/child").expect("read dirty"),
+            Some(b"dirty-data".to_vec())
+        );
+
+        let entry_arc = fs_state
+            .get_entry("blocked/child")
+            .expect("entry must exist");
+        let entry = entry_arc.lock().expect("lock entry");
+        assert!(entry.dirty);
+        assert!(entry.write_failed);
+        drop(entry);
+
+        drop(fs_state);
         let _ = fs::remove_dir_all(&dir);
     }
 }

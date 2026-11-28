@@ -212,16 +212,26 @@ pub fn handle_phantom_battle_card_out_look_up_request(
 }
 
 pub fn handle_phantom_battle_check_card_skill_unlock_request(
-    _state: &mut State,
+    state: &mut State,
     req: PhantomBattleCheckCardSkillUnlockRequest,
 ) -> Result<PhantomBattleCheckCardSkillUnlockResponse, String> {
-    let n = req.CardConfig.len() as i32;
+    let info = &state.player_components.progress.info;
+    let total = req.CardConfig.len() as i32;
+    let cur_num = req
+        .CardConfig
+        .iter()
+        .filter(|&&cid| {
+            info.has_claim(&format!("pb_card:{cid}"))
+                || info.has_claim(&format!("pb_card_skill:{cid}"))
+        })
+        .count() as i32;
+    let is_unlock = total > 0 && cur_num >= total;
     Ok(PhantomBattleCheckCardSkillUnlockResponse {
-        IsUnlock: true,
+        IsUnlock: is_unlock,
         CardConfig: req.CardConfig,
         ErrorCode: Some(ErrorCode::Success),
-        CurNum: n,
-        TargetNum: n,
+        CurNum: cur_num,
+        TargetNum: total,
     })
 }
 
@@ -334,12 +344,13 @@ pub fn handle_phantom_battle_round_over_request(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())?;
-    let is_final = round >= 3 || active_ch > 0;
+    let is_final = round >= 3;
+    let npc_cur_life = (30 - (round.clamp(0, 3) as i32) * 10).max(0);
     let _ = state.conn.push_msg(
         PhantomBattleBvBSettleNotify::MSG_ID,
         &PhantomBattleBvBSettleNotify {
             NpcOriginalDamage: 10,
-            NpcCurLife: if is_final { 0 } else { 10 },
+            NpcCurLife: npc_cur_life,
             IsFinalSettle: is_final,
             IsWin: is_final,
             PlayerDeductLife: 0,
@@ -733,11 +744,12 @@ pub fn handle_phantom_battle_select_target_request(
     })
 }
 
-fn claim_pb_reward_ids(
+fn claim_pb_reward_ids_with_fallback(
     state: &mut State,
     prefix: &str,
     table: &str,
     ids: &[i32],
+    fallback: &[reward::RewardItem],
 ) -> Result<(), String> {
     for &id in ids {
         if state
@@ -754,7 +766,7 @@ fn claim_pb_reward_ids(
                 false,
                 true,
                 1,
-                &[],
+                fallback,
                 None,
             )
             .map_err(|e| e.to_string())?;
@@ -765,6 +777,15 @@ fn claim_pb_reward_ids(
         .progress
         .save(&state.fs)
         .map_err(|e| e.to_string())
+}
+
+fn claim_pb_reward_ids(
+    state: &mut State,
+    prefix: &str,
+    table: &str,
+    ids: &[i32],
+) -> Result<(), String> {
+    claim_pb_reward_ids_with_fallback(state, prefix, table, ids, &[])
 }
 
 pub fn handle_phantom_battle_badge_reward_request(
@@ -801,7 +822,34 @@ pub fn handle_phantom_battle_guide_reward_request(
     state: &mut State,
     _req: PhantomBattleGuideRewardRequest,
 ) -> Result<PhantomBattleGuideRewardResponse, String> {
-    claim_pb_reward_ids(state, "pb_guide_rw", "PhantomBattleCardReward", &[1])?;
+    const FALLBACK: &[reward::RewardItem] = &[
+        reward::RewardItem {
+            item_id: 3,
+            count: 40,
+        },
+        reward::RewardItem {
+            item_id: 2,
+            count: 10_000,
+        },
+    ];
+    let guide_ids: Vec<i32> = state
+        .assets
+        .read_raw_json_array("PhantomBattleGuide")
+        .into_iter()
+        .filter_map(|v| v.get("Id").and_then(|x| x.as_i64()).and_then(|n| i32::try_from(n).ok()))
+        .filter(|&id| id > 0)
+        .collect();
+    if guide_ids.is_empty() {
+        claim_pb_reward_ids_with_fallback(state, "pb_guide_rw", "PhantomBattleGuide", &[1], FALLBACK)?;
+    } else {
+        claim_pb_reward_ids_with_fallback(
+            state,
+            "pb_guide_rw",
+            "PhantomBattleGuide",
+            &guide_ids,
+            FALLBACK,
+        )?;
+    }
     Ok(PhantomBattleGuideRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
@@ -821,7 +869,43 @@ pub fn handle_phantom_battle_repeated_task_reward_request(
     state: &mut State,
     req: PhantomBattleRepeatedTaskRewardRequest,
 ) -> Result<PhantomBattleRepeatedTaskRewardResponse, String> {
-    claim_pb_reward_ids(state, "pb_rtask", "PhantomBattleTask", &req.TaskId)?;
+    let mut dirty = false;
+    for &tid in &req.TaskId {
+        if tid <= 0 {
+            continue;
+        }
+        let done_cnt = state
+            .player_components
+            .progress
+            .info
+            .get_key_int(&format!("pb:rtask_done:{tid}"));
+        let clm_key = format!("pb:rtask_cnt:{tid}");
+        let claimed_cnt = state.player_components.progress.info.get_key_int(&clm_key);
+        if done_cnt > 0 && claimed_cnt >= done_cnt {
+            continue;
+        }
+        state.player_components.progress.info.add_key_int(&clm_key, 1);
+        dirty = true;
+        let mut rctx = state.reward_context();
+        reward::grant_table_reward(
+            &mut rctx,
+            "PhantomBattleTask",
+            i64::from(tid),
+            false,
+            true,
+            1,
+            &[],
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if dirty {
+        state
+            .player_components
+            .progress
+            .save(&state.fs)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(PhantomBattleRepeatedTaskRewardResponse {
         ErrorCode: Some(ErrorCode::Success),
     })
