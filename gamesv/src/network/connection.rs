@@ -645,7 +645,102 @@ fn register_online_coop(coop: &CoopService, s: &State, player_id: i32) {
     });
 }
 
-async fn process_inbound_message(
+fn dispatch_single_state_message(
+    st: &mut State,
+    conn: &Connection,
+    ready_message: &Message,
+) -> bool {
+    match handlers::dispatch_message(st, ready_message) {
+        Ok(()) => true,
+        Err(handlers::DispatchError::HandlerNotFound) => {
+            let msg_id = ready_message.header.message_id();
+            let rpc_id = match ready_message.header {
+                Header::Request(h) => h.rpc_id,
+                _ => 0,
+            };
+            let is_request = matches!(ready_message.header, Header::Request(_));
+            if is_request {
+                if let Some(response_id) = response_id_for(msg_id) {
+                    if conn
+                        .respond_with_msg_id(rpc_id, response_id, &HeartbeatResponse {})
+                        .is_err()
+                    {
+                        return false;
+                    }
+                    if let Some(name) = msg_name(msg_id) {
+                        tracing::warn!(
+                            "sent mapped empty response (msg_id: {}) for unhandled {} (msg_id: {}, rpc_id: {})",
+                            response_id,
+                            name,
+                            msg_id,
+                            rpc_id
+                        );
+                    } else {
+                        tracing::warn!(
+                            "sent mapped empty response (msg_id: {}) for unmapped-name request (msg_id: {}, rpc_id: {})",
+                            response_id,
+                            msg_id,
+                            rpc_id
+                        );
+                    }
+                } else {
+                    log_unknown_message_once(msg_id, rpc_id, true, &ready_message.payload);
+                }
+            } else if let Some(name) = msg_name(msg_id) {
+                tracing::warn!(
+                    "no handler for {} (msg_id: {}, len: {})",
+                    name,
+                    msg_id,
+                    ready_message.payload.len()
+                );
+            } else {
+                log_unknown_message_once(msg_id, 0, false, &ready_message.payload);
+            }
+            true
+        }
+        Err(handlers::DispatchError::Closed) => false,
+        Err(handlers::DispatchError::Message(err)) => {
+            tracing::error!(
+                "failed to dispatch application message: {}, disconnecting",
+                err
+            );
+            false
+        }
+    }
+}
+
+fn dispatch_state_batch(
+    mut st: State,
+    handle: &ConnectionHandle,
+    conn: &Connection,
+    batch: Vec<Vec<u8>>,
+) -> (State, bool) {
+    for owned_bytes in batch {
+        if handle.close_reason() != CloseReason::Active {
+            return (st, false);
+        }
+        let mut ready_message = match Message::decode(&owned_bytes) {
+            Ok(m) => m,
+            Err(err) => {
+                tracing::error!("failed to decode application message: {}, disconnecting", err);
+                return (st, false);
+            }
+        };
+        if let Some(key) = conn.session_key()
+            && let Err(err) = ready_message.decrypt(&key)
+        {
+            tracing::error!("failed to decrypt application message: {}, disconnecting", err);
+            return (st, false);
+        }
+        if !dispatch_single_state_message(&mut st, conn, &ready_message) {
+            return (st, false);
+        }
+        conn.record_client_seq_no(&ready_message.header);
+    }
+    (st, true)
+}
+
+async fn process_auth_inbound_message(
     handle: &Arc<ConnectionHandle>,
     session_manager: &Arc<SessionManager>,
     fs: &Arc<FileSystem>,
@@ -654,86 +749,53 @@ async fn process_inbound_message(
     auth: &mut AuthSessionState,
     owned_bytes: Vec<u8>,
 ) -> bool {
-    let mut ready_message = match Message::decode(&owned_bytes) {
-        Ok(m) => m,
-        Err(err) => {
-            tracing::error!("failed to decode application message: {}, disconnecting", err);
-            return false;
-        }
-    };
-    if let Some(key) = gameplay.connection.session_key()
-        && let Err(err) = ready_message.decrypt(&key)
-    {
-        tracing::error!("failed to decrypt application message: {}, disconnecting", err);
-        return false;
-    }
-
-    if let Some(s) = gameplay.state.as_mut() {
-        match handlers::dispatch_message(s, &ready_message) {
-            Ok(()) => {}
-            Err(handlers::DispatchError::HandlerNotFound) => {
-                let msg_id = ready_message.header.message_id();
-                let rpc_id = match ready_message.header {
-                    Header::Request(h) => h.rpc_id,
-                    _ => 0,
-                };
-                let is_request = matches!(ready_message.header, Header::Request(_));
-                if is_request {
-                    if let Some(response_id) = response_id_for(msg_id) {
-                        if gameplay
-                            .connection
-                            .respond_with_msg_id(rpc_id, response_id, &HeartbeatResponse {})
-                            .is_err()
-                        {
-                            return false;
-                        }
-                        if let Some(name) = msg_name(msg_id) {
-                            tracing::warn!(
-                                "sent mapped empty response (msg_id: {}) for unhandled {} (msg_id: {}, rpc_id: {})",
-                                response_id,
-                                name,
-                                msg_id,
-                                rpc_id
-                            );
-                        } else {
-                            tracing::warn!(
-                                "sent mapped empty response (msg_id: {}) for unmapped-name request (msg_id: {}, rpc_id: {})",
-                                response_id,
-                                msg_id,
-                                rpc_id
-                            );
-                        }
-                    } else {
-                        log_unknown_message_once(msg_id, rpc_id, true, &ready_message.payload);
-                    }
-                } else if let Some(name) = msg_name(msg_id) {
-                    tracing::warn!(
-                        "no handler for {} (msg_id: {}, len: {})",
-                        name,
-                        msg_id,
-                        ready_message.payload.len()
+    let mut conn = gameplay.connection.clone();
+    let key = conn.session_key();
+    let fs_auth = Arc::clone(fs);
+    let mut moved_auth = std::mem::replace(
+        auth,
+        AuthSessionState {
+            player_id: None,
+            enter: false,
+            pending_reconnect: None,
+        },
+    );
+    let Ok((returned_conn, returned_auth, auth_ok)) =
+        tokio::task::spawn_blocking(move || {
+            let mut ready_message = match Message::decode(&owned_bytes) {
+                Ok(m) => m,
+                Err(err) => {
+                    tracing::error!(
+                        "failed to decode application message: {}, disconnecting",
+                        err
                     );
-                } else {
-                    log_unknown_message_once(msg_id, 0, false, &ready_message.payload);
+                    return (conn, moved_auth, false);
                 }
-            }
-            Err(handlers::DispatchError::Closed) => return false,
-            Err(handlers::DispatchError::Message(err)) => {
+            };
+            if let Some(key) = key
+                && let Err(err) = ready_message.decrypt(&key)
+            {
                 tracing::error!(
-                    "failed to dispatch application message: {}, disconnecting",
+                    "failed to decrypt application message: {}, disconnecting",
                     err
                 );
-                return false;
+                return (conn, moved_auth, false);
             }
-        }
-        gameplay
-            .connection
-            .record_client_seq_no(&ready_message.header);
-        return true;
-    }
-
-    if let Err(err) = handle_auth_group_request(&ready_message, &mut gameplay.connection, fs, auth) {
-        tracing::error!("failed to handle auth request: {}, disconnecting", err);
+            if let Err(err) =
+                handle_auth_group_request(&ready_message, &mut conn, &fs_auth, &mut moved_auth)
+            {
+                tracing::error!("failed to handle auth request: {}, disconnecting", err);
+                return (conn, moved_auth, false);
+            }
+            (conn, moved_auth, true)
+        })
+        .await
+    else {
+        return false;
+    };
+    gameplay.connection = returned_conn;
+    *auth = returned_auth;
+    if !auth_ok {
         return false;
     }
 
@@ -814,77 +876,143 @@ async fn process_inbound_message(
             }
         }
 
-        if is_reconnect {
-            let mut handoff = maybe_handoff.expect("checked permit_silent_login above");
-            handoff.state.conn = gameplay.connection.clone();
-            handoff.state.coop_service = Some(Arc::clone(&session_manager.coop));
-            register_online_coop(&session_manager.coop, &handoff.state, id);
-            tracing::info!(
-                "player({}) preserved live scene state on silent reconnect (seq={})",
-                id,
-                gameplay.connection.seq()
-            );
-
-            let mut events = EventQueue::new();
-            events.enqueue(Event::ReconnectResync {
-                player_id: id,
-                reason: "reconnect".to_string(),
-            });
-            if let Err(err) = drain_event_queue(&mut events, &mut handoff.state) {
-                tracing::error!(
-                    "failed to execute reconnect resync event chain: {}, disconnecting",
-                    err
+        let conn_clone = gameplay.connection.clone();
+        let sm_clone = Arc::clone(session_manager);
+        let fs_clone = Arc::clone(fs);
+        let assets_clone = Arc::clone(assets);
+        let Ok(st_opt) = tokio::task::spawn_blocking(move || -> Option<State> {
+            if is_reconnect {
+                let mut handoff = maybe_handoff.expect("checked permit_silent_login above");
+                handoff.state.conn = conn_clone;
+                handoff.state.coop_service = Some(Arc::clone(&sm_clone.coop));
+                register_online_coop(&sm_clone.coop, &handoff.state, id);
+                tracing::info!(
+                    "player({}) preserved live scene state on silent reconnect (seq={})",
+                    id,
+                    handoff.state.conn.seq()
                 );
-                handoff.state.cleanup();
-                return false;
-            }
-            gameplay.state = Some(handoff.state);
-        } else {
-            if let Some(mut h) = maybe_handoff {
-                h.state.cleanup();
-            }
-            let pcs = match PlayerComponentStorage::init(fs, assets, id) {
-                Ok(pcs) => pcs,
-                Err(err) => {
+
+                let mut events = EventQueue::new();
+                events.enqueue(Event::ReconnectResync {
+                    player_id: id,
+                    reason: "reconnect".to_string(),
+                });
+                if let Err(err) = drain_event_queue(&mut events, &mut handoff.state) {
                     tracing::error!(
-                        "failed to init player component storage: {}, disconnecting",
+                        "failed to execute reconnect resync event chain: {}, disconnecting",
                         err
                     );
-                    return false;
+                    handoff.state.cleanup();
+                    return None;
                 }
-            };
-            let mut st = State::new(
-                Arc::clone(fs),
-                gameplay.connection.clone(),
-                Arc::clone(assets),
-                pcs,
-                id,
-            );
-            st.coop_service = Some(Arc::clone(&session_manager.coop));
-            register_online_coop(&session_manager.coop, &st, id);
-
-            let mut events = EventQueue::new();
-            events.enqueue(Event::EnterGame { player_id: id });
-            if let Err(err) = drain_event_queue(&mut events, &mut st) {
-                tracing::error!(
-                    "failed to execute initial event chain: {}, disconnecting",
-                    err
+                Some(handoff.state)
+            } else {
+                if let Some(mut h) = maybe_handoff {
+                    h.state.cleanup();
+                }
+                let pcs = match PlayerComponentStorage::init(&fs_clone, &assets_clone, id) {
+                    Ok(pcs) => pcs,
+                    Err(err) => {
+                        tracing::error!(
+                            "failed to init player component storage: {}, disconnecting",
+                            err
+                        );
+                        return None;
+                    }
+                };
+                let mut st = State::new(
+                    fs_clone,
+                    conn_clone,
+                    assets_clone,
+                    pcs,
+                    id,
                 );
-                st.cleanup();
-                return false;
+                st.coop_service = Some(Arc::clone(&sm_clone.coop));
+                register_online_coop(&sm_clone.coop, &st, id);
+
+                let mut events = EventQueue::new();
+                events.enqueue(Event::EnterGame { player_id: id });
+                if let Err(err) = drain_event_queue(&mut events, &mut st) {
+                    tracing::error!(
+                        "failed to execute initial event chain: {}, disconnecting",
+                        err
+                    );
+                    st.cleanup();
+                    return None;
+                }
+                Some(st)
             }
-            gameplay.state = Some(st);
-        }
+        })
+        .await
+        else {
+            return false;
+        };
+
+        let Some(st) = st_opt else {
+            return false;
+        };
+        gameplay.state = Some(st);
     }
 
     true
 }
 
-fn run_gm_job(gameplay: &mut GameplayState, session_manager: &SessionManager, job: GmJob) {
-    if let Some(live_state) = gameplay.state.as_mut() {
-        gm_http::execute_session_job(live_state, session_manager, job);
-    } else {
+async fn run_gm_job_offloaded(
+    gameplay: &mut GameplayState,
+    session_manager: &Arc<SessionManager>,
+    job: GmJob,
+) {
+    let Some(mut st) = gameplay.state.take() else {
         job.fail_and_signal("Session is not logged in");
+        return;
+    };
+    let sm = Arc::clone(session_manager);
+    if let Ok(st_back) = tokio::task::spawn_blocking(move || {
+        gm_http::execute_session_job(&mut st, &sm, job);
+        st
+    })
+    .await
+    {
+        gameplay.state = Some(st_back);
+    }
+}
+
+async fn run_state_batch_offloaded(
+    handle: &Arc<ConnectionHandle>,
+    gameplay: &mut GameplayState,
+    batch: Vec<Vec<u8>>,
+) -> bool {
+    let Some(st) = gameplay.state.take() else {
+        return false;
+    };
+    let conn = gameplay.connection.clone();
+    let h_clone = Arc::clone(handle);
+    match tokio::task::spawn_blocking(move || dispatch_state_batch(st, &h_clone, &conn, batch))
+        .await
+    {
+        Ok((st_back, keep_going)) => {
+            gameplay.state = Some(st_back);
+            keep_going
+        }
+        Err(_) => false,
+    }
+}
+
+async fn run_deadlines_offloaded(gameplay: &mut GameplayState, now_ms: i64) -> bool {
+    let Some(mut st) = gameplay.state.take() else {
+        return false;
+    };
+    match tokio::task::spawn_blocking(move || {
+        let progressed = drain_gameplay_deadlines(&mut st, now_ms);
+        (st, progressed)
+    })
+    .await
+    {
+        Ok((st_back, progressed)) => {
+            gameplay.state = Some(st_back);
+            progressed
+        }
+        Err(_) => false,
     }
 }
 
@@ -913,37 +1041,48 @@ pub async fn run_gameplay(
                 job.fail_and_signal("session closed");
                 return;
             }
-            run_gm_job(gameplay, session_manager, job);
+            run_gm_job_offloaded(gameplay, session_manager, job).await;
         }
 
-        let mut drained = 0usize;
-        while drained < INBOUND_BATCH_LIMIT {
-            match inbound_rx.try_recv() {
-                Ok(msg) => {
-                    drained += 1;
-                    handle.transport_work.notify_one();
-                    if handle.close_reason() != CloseReason::Active {
-                        return;
+        if gameplay.state.is_some() {
+            let mut batch = Vec::new();
+            while batch.len() < INBOUND_BATCH_LIMIT {
+                match inbound_rx.try_recv() {
+                    Ok(msg) => {
+                        handle.transport_work.notify_one();
+                        batch.push(msg);
                     }
-                    if !process_inbound_message(
-                        handle,
-                        session_manager,
-                        fs,
-                        assets,
-                        gameplay,
-                        &mut auth,
-                        msg,
-                    )
-                    .await
-                    {
-                        return;
-                    }
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => return,
                 }
-                Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => return,
             }
-        }
-        if drained > 0 {
+            if !batch.is_empty() {
+                if handle.close_reason() != CloseReason::Active {
+                    return;
+                }
+                if !run_state_batch_offloaded(handle, gameplay, batch).await {
+                    return;
+                }
+                continue;
+            }
+        } else if let Ok(msg) = inbound_rx.try_recv() {
+            handle.transport_work.notify_one();
+            if handle.close_reason() != CloseReason::Active {
+                return;
+            }
+            if !process_auth_inbound_message(
+                handle,
+                session_manager,
+                fs,
+                assets,
+                gameplay,
+                &mut auth,
+                msg,
+            )
+            .await
+            {
+                return;
+            }
             continue;
         }
 
@@ -953,17 +1092,15 @@ pub async fn run_gameplay(
 
         let now_ms = now_millis();
         let mut delay_ms = next_gameplay_wake_delay_ms(gameplay.state.as_ref(), now_ms);
-        if delay_ms.is_some_and(|d| d <= 0)
-            && let Some(s) = gameplay.state.as_mut()
-        {
-            let progressed = drain_gameplay_deadlines(s, now_ms);
+        if delay_ms.is_some_and(|d| d <= 0) && gameplay.state.is_some() {
+            let progressed = run_deadlines_offloaded(gameplay, now_ms).await;
             if handle.close_reason() != CloseReason::Active {
                 return;
             }
             if progressed {
                 continue;
             }
-            delay_ms = next_gameplay_wake_delay_ms(Some(s), now_millis());
+            delay_ms = next_gameplay_wake_delay_ms(gameplay.state.as_ref(), now_millis());
         }
 
         let wait_ms = normalize_wait_delay_ms(delay_ms);
@@ -978,7 +1115,7 @@ pub async fn run_gameplay(
             _ = handle.closed_notify.notified() => return,
             maybe_job = gm_inbox_rx.recv() => {
                 match maybe_job {
-                    Some(job) => run_gm_job(gameplay, session_manager, job),
+                    Some(job) => run_gm_job_offloaded(gameplay, session_manager, job).await,
                     None => return,
                 }
             }
@@ -986,7 +1123,22 @@ pub async fn run_gameplay(
                 match maybe_msg {
                     Some(msg) => {
                         handle.transport_work.notify_one();
-                        if !process_inbound_message(
+                        if gameplay.state.is_some() {
+                            let mut batch = vec![msg];
+                            while batch.len() < INBOUND_BATCH_LIMIT {
+                                match inbound_rx.try_recv() {
+                                    Ok(next_msg) => {
+                                        handle.transport_work.notify_one();
+                                        batch.push(next_msg);
+                                    }
+                                    Err(mpsc::error::TryRecvError::Empty) => break,
+                                    Err(mpsc::error::TryRecvError::Disconnected) => return,
+                                }
+                            }
+                            if !run_state_batch_offloaded(handle, gameplay, batch).await {
+                                return;
+                            }
+                        } else if !process_auth_inbound_message(
                             handle,
                             session_manager,
                             fs,
@@ -994,7 +1146,9 @@ pub async fn run_gameplay(
                             gameplay,
                             &mut auth,
                             msg,
-                        ).await {
+                        )
+                        .await
+                        {
                             return;
                         }
                     }
@@ -1005,8 +1159,8 @@ pub async fn run_gameplay(
                 if handle.close_reason() != CloseReason::Active {
                     return;
                 }
-                if let Some(s) = gameplay.state.as_mut() {
-                    let _ = drain_gameplay_deadlines(s, now_millis());
+                if gameplay.state.is_some() {
+                    let _ = run_deadlines_offloaded(gameplay, now_millis()).await;
                 }
             }
         }

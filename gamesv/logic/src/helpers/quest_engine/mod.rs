@@ -994,6 +994,7 @@ pub fn destroy_quest<S: PushSink + ?Sized>(
         return Ok(());
     }
     if let Some(scene) = ctx.scene.as_deref_mut() {
+        scene.session_destroyed_quests.insert(quest_id);
         scene.quest_timers.cancel_quest(quest_id);
         scene.fail_timers.cancel_quest(quest_id);
         scene.release_occupations_for_tree(quest_id, i64::from(quest_id));

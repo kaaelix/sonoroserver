@@ -78,6 +78,33 @@ fn is_deferred_weather_action(act: &Value) -> bool {
     )
 }
 
+fn is_deferred_wait_var_action(act: &Value) -> bool {
+    act.as_object()
+        .and_then(|obj| json_str(obj.get("Name")))
+        .is_some_and(|n| matches!(n, "SetVar" | "CalculateVar"))
+}
+
+fn screen_fade_delay_ms(act: &Value) -> i64 {
+    let Some(obj) = act.as_object() else {
+        return 0;
+    };
+    let Some("FadeInScreen" | "FadeOutScreen") = json_str(obj.get("Name")) else {
+        return 0;
+    };
+    let secs = obj
+        .get("Params")
+        .and_then(Value::as_object)
+        .and_then(|p| json_float(p.get("Duration")))
+        .unwrap_or(0.0);
+    let dur_ms = if secs.is_finite() && secs > 0.0 {
+        (f64::from(secs) * 1000.0).round() as i64
+    } else {
+        0
+    };
+    // Client opens BlackScreenFadeView asynchronously during FadeIn/FadeOut; wait past completion.
+    (dur_ms + 180).clamp(180, 300_000)
+}
+
 #[derive(Clone, Copy)]
 enum WeatherDeferTarget {
     Flow(Option<i64>),
@@ -96,8 +123,12 @@ pub fn execute_action_list<S: PushSink + ?Sized>(
 
     for act in actions {
         let can_defer = !callbacks.defer_flow_transition && ctx.scene.is_some();
+        let should_defer_behind_wait = matches!(weather_defer, Some(WeatherDeferTarget::Wait(_)))
+            && (is_deferred_weather_action(act) || is_deferred_wait_var_action(act));
+        let should_defer_behind_flow = matches!(weather_defer, Some(WeatherDeferTarget::Flow(_)))
+            && is_deferred_weather_action(act);
         if can_defer
-            && is_deferred_weather_action(act)
+            && (should_defer_behind_wait || should_defer_behind_flow)
             && let Some(target) = weather_defer
             && let Some(scene) = ctx.scene.as_deref_mut()
         {
@@ -126,8 +157,9 @@ pub fn execute_action_list<S: PushSink + ?Sized>(
 
         let is_sync_flow =
             can_defer && crate::helpers::quest_engine::triggers::is_sync_play_flow_action(act);
-        let wait_ms = if can_defer && !is_sync_flow {
-            crate::helpers::quest_types::wait_action_delay_ms(act)
+        let step_delay_ms = if can_defer && !is_sync_flow {
+            let w = crate::helpers::quest_types::wait_action_delay_ms(act);
+            if w > 0 { w } else { screen_fade_delay_ms(act) }
         } else {
             0
         };
@@ -143,8 +175,8 @@ pub fn execute_action_list<S: PushSink + ?Sized>(
             } else if scene.has_pending_flow_for_node(quest_id, node_id) {
                 weather_defer = Some(WeatherDeferTarget::Flow(None));
             }
-        } else if wait_ms > 0 {
-            cumulative_wait_ms += wait_ms;
+        } else if step_delay_ms > 0 {
+            cumulative_wait_ms += step_delay_ms;
             if !matches!(weather_defer, Some(WeatherDeferTarget::Flow(_))) {
                 weather_defer = Some(WeatherDeferTarget::Wait(now_millis() + cumulative_wait_ms));
             }

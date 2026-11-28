@@ -349,7 +349,7 @@ pub fn eval_condition_record(ctx: &EvalContext<'_>, cond: &Condition) -> bool {
             };
             let want = get_param_int(lp, "ActivityState").unwrap_or(2);
             let op = get_param_str(lp, "Compare").unwrap_or("Eq");
-            let cur = if is_activity_open(ctx, aid) { 2 } else { 0 };
+            let cur = eval_activity_state(ctx, aid);
             compare_ints(cur, want, op)
         }
         "ReadMail" => {
@@ -2119,7 +2119,7 @@ pub fn eval_single_inline_condition_obj(ctx: &EvalContext<'_>, obj: &Map<String,
             };
             let want = json_int(obj.get("ActivityState")).unwrap_or(2);
             let cmp = obj.get("Compare").and_then(Value::as_str).unwrap_or("Eq");
-            let cur = if is_activity_open(ctx, aid) { 2 } else { 0 };
+            let cur = eval_activity_state(ctx, aid);
             compare_ints(cur, want, cmp)
         }
         "CheckPlayerGender" => eval_player_gender(ctx, obj.get("Gender")),
@@ -4574,6 +4574,15 @@ pub fn is_activity_open(ctx: &EvalContext<'_>, activity_id: i32) -> bool {
     }
     ctx.assets
         .is_some_and(|a| a.tables.activity.get_data_by_id(&activity_id).is_some())
+}
+
+/// Maps server activity availability to client `EActivityState` (`1 = Open`, `2 = Close`).
+pub fn eval_activity_state(ctx: &EvalContext<'_>, activity_id: i32) -> i32 {
+    if is_activity_open(ctx, activity_id) {
+        1
+    } else {
+        2
+    }
 }
 
 fn scoped_var_name(ctx: &EvalContext<'_>, var_obj: &Map<String, Value>, name: &str) -> String {

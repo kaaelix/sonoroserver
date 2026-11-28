@@ -81,6 +81,8 @@ async fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // Warm world-controller cache for Map 8 so the very first login never stalls 1-2s.
+    let _ = assets.world_controller_entities(8);
 
     let bind_address: SocketAddr = match args.bind_address.parse() {
         Ok(addr) => addr,

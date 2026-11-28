@@ -1608,13 +1608,23 @@ pub fn build_ready_quest_list<S: PushSink + ?Sized>(ctx: &QuestContext<'_, S>) -
 }
 
 pub fn push_ready_quest_list<S: PushSink + ?Sized>(ctx: &mut QuestContext<'_, S>) {
-    let Some(scene) = ctx.scene.as_deref() else {
+    let Some(join_pushed) = ctx.scene.as_deref().map(|s| s.join_scene_pushed) else {
         return;
     };
-    if !scene.join_scene_pushed {
+    if !join_pushed {
         return;
     }
     let ready_list = build_ready_quest_list(ctx);
+    if ctx
+        .scene
+        .as_deref()
+        .is_some_and(|s| s.last_ready_quest_list.as_ref() == Some(&ready_list))
+    {
+        return;
+    }
+    if let Some(scene) = ctx.scene.as_deref_mut() {
+        scene.last_ready_quest_list = Some(ready_list.clone());
+    }
     if !ready_list.is_empty() {
         ctx.sink.push(
             QuestReadyListNotify::MSG_ID,
@@ -2142,10 +2152,8 @@ pub fn push_entity_level_events<S: PushSink + ?Sized>(
     ctx_info: GameCtxPbCtxInfoOneof,
     actions: &[Value],
 ) {
-    if !actions
-        .iter()
-        .any(|act| is_client_executable_entity_action(ctx, act))
-    {
+    let spans = collect_client_action_spans(ctx, actions, is_client_executable_entity_action);
+    if spans.is_empty() {
         return;
     }
     let Some(inc_id) = ctx.scene.as_deref_mut().map(Scene::alloc_action_inc_id) else {
@@ -2155,24 +2163,15 @@ pub fn push_entity_level_events<S: PushSink + ?Sized>(
         CtxType: Some(ctx_type),
         CtxInfo: Some(ctx_info),
     };
-    push_level_event_ranges_with(
-        ctx,
-        inc_id,
-        &game_ctx,
-        actions,
-        is_client_executable_entity_action,
-    );
+    emit_level_event_spans(ctx, inc_id, &game_ctx, actions.len() as i32, &spans);
 }
 
-fn push_level_event_ranges_with<S: PushSink + ?Sized>(
-    ctx: &mut QuestContext<'_, S>,
-    inc_id: i32,
-    game_ctx: &GameCtxPb,
+fn collect_client_action_spans<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
     actions: &[Value],
     is_forwarded: fn(&QuestContext<'_, S>, &Value) -> bool,
-) {
-    let total_count = actions.len() as i32;
-    let player_id = ctx.basic_comp.player_id;
+) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
     let mut i = 0usize;
     while i < actions.len() {
         if !is_forwarded(ctx, &actions[i]) {
@@ -2184,6 +2183,29 @@ fn push_level_event_ranges_with<S: PushSink + ?Sized>(
             i += 1;
         }
         let end_idx = i - 1;
+        // Standalone Wait spans only run client `LevelEventWaitTime` (`ForceReleaseInput`),
+        // which disrupts player movement every tick in looping LevelPlays (e.g. 200700001).
+        // Paired spans such as `[FadeInScreen, Wait]` still include non-Wait actions and emit.
+        if actions[start_idx..=end_idx]
+            .iter()
+            .all(|act| json_str(act.get("Name")) == Some("Wait"))
+        {
+            continue;
+        }
+        spans.push((start_idx, end_idx));
+    }
+    spans
+}
+
+fn emit_level_event_spans<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    inc_id: i32,
+    game_ctx: &GameCtxPb,
+    total_count: i32,
+    spans: &[(usize, usize)],
+) {
+    let player_id = ctx.basic_comp.player_id;
+    for &(start_idx, end_idx) in spans {
         ctx.sink.push(
             LevelEventNotify::MSG_ID,
             &LevelEventNotify {
@@ -2197,6 +2219,17 @@ fn push_level_event_ranges_with<S: PushSink + ?Sized>(
             },
         );
     }
+}
+
+fn push_level_event_ranges_with<S: PushSink + ?Sized>(
+    ctx: &mut QuestContext<'_, S>,
+    inc_id: i32,
+    game_ctx: &GameCtxPb,
+    actions: &[Value],
+    is_forwarded: fn(&QuestContext<'_, S>, &Value) -> bool,
+) {
+    let spans = collect_client_action_spans(ctx, actions, is_forwarded);
+    emit_level_event_spans(ctx, inc_id, game_ctx, actions.len() as i32, &spans);
 }
 
 pub fn push_bt_level_events<S: PushSink + ?Sized>(
@@ -4033,11 +4066,7 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
             };
             let want = json_int(cond.get("ActivityState")).unwrap_or(2);
             let cmp = json_str(cond.get("Compare")).unwrap_or("Eq");
-            let cur = if condition::is_activity_open(&ctx.make_eval_context(), aid) {
-                2
-            } else {
-                0
-            };
+            let cur = condition::eval_activity_state(&ctx.make_eval_context(), aid);
             if cmp == "Ne" || cmp == "NotEq" {
                 cur != want
             } else {

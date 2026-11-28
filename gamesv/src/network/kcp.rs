@@ -257,10 +257,7 @@ impl Kcp {
         }
 
         let count = buf.len().div_ceil(self.mss);
-        if count >= IKCP_WND_RCV as usize {
-            if self.stream && sent > 0 {
-                return Ok(sent);
-            }
+        if !self.stream && count >= IKCP_WND_RCV as usize {
             return Err(KcpError::TooManyFragments);
         }
 
@@ -498,6 +495,18 @@ impl Kcp {
             (self.rcv_wnd - len).min(u32::from(u16::MAX)) as u16
         } else {
             0
+        }
+    }
+
+    pub fn advance_clock(&mut self, current: u32) {
+        if !self.updated {
+            self.updated = true;
+            self.current = current;
+            self.ts_flush = current;
+            return;
+        }
+        if current.wrapping_sub(self.current) as i32 > 0 {
+            self.current = current;
         }
     }
 

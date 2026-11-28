@@ -3456,26 +3456,31 @@ pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut LevelPlayContext<'_, S>) ->
             }
             continue;
         }
-        ctx.sink.push(
-            LevelPlayStateNotify::MSG_ID,
-            &LevelPlayStateNotify {
-                State: 2,
-                CompleteNumber: 0,
-                Id: lp_id,
-            },
-        );
-        ctx.sink.push(
-            EnterLevelPlayNotify::MSG_ID,
-            &EnterLevelPlayNotify {
-                CanGetReward: true,
-                State: 2,
-                Id: lp_id,
-            },
-        );
+        let already_synced = ctx.scene.sent_lp_bt_trees.contains(&lp_id);
+        if !already_synced {
+            ctx.sink.push(
+                LevelPlayStateNotify::MSG_ID,
+                &LevelPlayStateNotify {
+                    State: 2,
+                    CompleteNumber: 0,
+                    Id: lp_id,
+                },
+            );
+            ctx.sink.push(
+                EnterLevelPlayNotify::MSG_ID,
+                &EnterLevelPlayNotify {
+                    CanGetReward: true,
+                    State: 2,
+                    Id: lp_id,
+                },
+            );
+        }
         if let Ok(nodes) = ctx.assets.level_play_nodes.get_owner_nodes(lp_id)
             && !nodes.is_empty()
         {
-            let _ = push_level_play_behavior_tree_info(ctx, lp_id, &nodes);
+            if !already_synced {
+                let _ = push_level_play_behavior_tree_info(ctx, lp_id, &nodes);
+            }
             for node in nodes.iter() {
                 if is_lp_node_active(ctx.progress_comp.as_deref(), lp_id, node.id) {
                     let _ = quest_engine::push_do_interact_options_for_bt_node(
@@ -3489,6 +3494,8 @@ pub fn sync_on_login<S: PushSink + ?Sized>(ctx: &mut LevelPlayContext<'_, S>) ->
                 }
             }
             step_level_play_tree(ctx, lp_id, &nodes, true, pos)?;
+        } else if !already_synced {
+            ctx.scene.sent_lp_bt_trees.insert(lp_id);
         }
     }
     if dirty_entered {

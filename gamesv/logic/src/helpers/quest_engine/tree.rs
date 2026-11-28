@@ -546,6 +546,15 @@ pub fn is_eligible_quest<S: PushSink + ?Sized>(
         return false;
     }
 
+    if auto_only
+        && ctx
+            .scene
+            .as_deref()
+            .is_some_and(|s| s.session_destroyed_quests.contains(&d.Id))
+    {
+        return false;
+    }
+
     if auto_only {
         let is_sys = d.DistributeType == "System";
         let is_passive = d.DistributeType == "Passive";

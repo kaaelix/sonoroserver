@@ -299,10 +299,12 @@ struct Session {
 impl Session {
     fn new(handle: Arc<ConnectionHandle>, outbound_rx: mpsc::Receiver<Vec<u8>>, now_ms: i64) -> Self {
         let mut kcp = Kcp::new(handle.conv_id);
-        kcp.dead_link = 40;
+        kcp.stream = true;
+        let _ = kcp.set_mtu(1000);
+        kcp.dead_link = 60;
         kcp.set_nodelay(1, 5, 2, true);
-        kcp.rx_minrto = 20;
-        kcp.set_wnd_size(1024, 1024);
+        kcp.rx_minrto = 40;
+        kcp.set_wnd_size(512, 256);
         Self {
             handle,
             outbound_rx,
@@ -477,7 +479,7 @@ impl Registry {
             return false;
         }
         session.last_receive_time_ms = now_ms;
-        flush_kcp_to_socket(session, socket);
+        flush_kcp_to_socket(session, socket, now_ms);
         if session.consecutive_send_failures >= SEND_FAILURE_LIMIT {
             self.mark_closing(conv_id, CloseReason::SendFailed);
             return false;
@@ -662,11 +664,11 @@ impl Registry {
         };
         let wait_snd = session.kcp.wait_snd();
         let snd_wnd = session.kcp.snd_wnd as usize;
-        let max_batch = if wait_snd >= snd_wnd {
-            1
-        } else {
-            OUTBOUND_BATCH_LIMIT.min(snd_wnd - wait_snd)
-        };
+        let eff_wnd = snd_wnd.min(session.kcp.rmt_wnd.max(128) as usize);
+        if wait_snd >= eff_wnd {
+            return false;
+        }
+        let max_batch = OUTBOUND_BATCH_LIMIT.min(eff_wnd - wait_snd);
 
         let mut sent_any = false;
         let mut send_err = false;
@@ -690,7 +692,7 @@ impl Registry {
             self.mark_closing(conv_id, CloseReason::TransportError);
             return true;
         }
-        flush_kcp_to_socket(session, socket);
+        flush_kcp_to_socket(session, socket, now_ms);
         if session.consecutive_send_failures >= SEND_FAILURE_LIMIT {
             self.mark_closing(conv_id, CloseReason::SendFailed);
             return true;
@@ -787,7 +789,9 @@ fn send_udp(socket: &std::net::UdpSocket, addr: SocketAddr, buf: &[u8], failures
     }
 }
 
-fn flush_kcp_to_socket(session: &mut Session, socket: &std::net::UdpSocket) {
+fn flush_kcp_to_socket(session: &mut Session, socket: &std::net::UdpSocket, now_ms: i64) {
+    let elapsed = session.elapsed_ms(now_ms);
+    session.kcp.advance_clock(elapsed);
     let addr = session.handle.address();
     let failures = &mut session.consecutive_send_failures;
     session.kcp.flush(&mut |pkt| {

@@ -9859,6 +9859,7 @@ fn audit_225_event_slot_dreamlink_self_var_fade_and_cross_map_node() {
         .expect("flush node 2 Wait(0.5)");
     let _ = h.drain_count();
 
+    let t_move = quest_engine::tree::now_ms_pub();
     quest_engine::events::on_player_move(
         &mut h.state.quest_context(&mut events),
         874_590.94,
@@ -9866,6 +9867,36 @@ fn audit_225_event_slot_dreamlink_self_var_fade_and_cross_map_node() {
         2_779.5,
     )
     .expect("reach node 408");
+    // Node 408's FadeInScreen(0.2) + Wait(0.2) must defer SetVar(Self."白屏"=1) so node 409's FadeOutScreen
+    // cannot fire synchronously and get dropped while the client is still fading in.
+    assert_eq!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_var_int("Self:145750001:白屏"),
+        0,
+        "Self.白屏 must remain 0 until FadeInScreen + Wait completes"
+    );
+    assert_eq!(
+        h.state
+            .player_components
+            .progress
+            .info
+            .get_key_int("lp_node:145750001:409"),
+        0,
+        "node 409 must wait for deferred Self.白屏 = 1"
+    );
+    let fade_in_events: Vec<LevelEventNotify> = h.drain_decoded(LevelEventNotify::MSG_ID);
+    assert!(
+        fade_in_events
+            .iter()
+            .any(|ev| ev.IncId == 145_750_001 && ev.StartIndex == 0 && ev.EndIndex == 1),
+        "node 408 must push FadeInScreen+Wait LevelEventNotify immediately: {fade_in_events:?}"
+    );
+
+    quest_engine::tree::on_timers_due(&mut h.state.quest_context(&mut events), t_move + 800)
+        .expect("complete deferred FadeInScreen+Wait SetVar");
     assert_eq!(
         h.state
             .player_components
@@ -9889,8 +9920,10 @@ fn audit_225_event_slot_dreamlink_self_var_fade_and_cross_map_node() {
     );
     let fade_out_events: Vec<LevelEventNotify> = h.drain_decoded(LevelEventNotify::MSG_ID);
     assert!(
-        fade_out_events.iter().any(|ev| ev.IncId == 145_750_001),
-        "node 408/409 completion must push FadeIn/FadeOut LevelEventNotify for 145750001"
+        fade_out_events
+            .iter()
+            .any(|ev| ev.IncId == 145_750_001 && ev.StartIndex == 0 && ev.EndIndex == 0),
+        "node 409 completion must push FadeOutScreen LevelEventNotify after FadeInScreen+Wait: {fade_out_events:?}"
     );
 
     // Also verify CompareVar Self-scope gating directly (0 -> false, 1 -> true).
@@ -10152,5 +10185,457 @@ fn audit_226_keyword_entself_system_string_copy_and_lp_reach_pre_context() {
     assert!(!eval_single_inline_condition(&lp_ctx.make_eval_context(), &lp_pre_cond));
     assert!(eval_single_inline_condition(&lp_ctx.make_eval_context_for_lp(170_700_000), &lp_pre_cond));
 }
+
+#[test]
+fn audit_153_activity_state_enum_destroy_quest_and_wait_level_event_guard() {
+    use sonoro_gamesv_logic::helpers::condition;
+    use sonoro_proto::enums::{BtType, GameCtxType};
+    use sonoro_proto::pb::{EnterLevelPlayNotify, LevelEventNotify, QuestReadyListNotify};
+
+    let mut h = TestHarness::new("audit153", Some(8));
+    let mut events = EventQueue::new();
+
+    // 1) CheckActivityState maps open -> 1 (EActivityState::Open) and closed -> 2 (Close).
+    {
+        h.state
+            .player_components
+            .quest
+            .info
+            .progress
+            .opened_activities
+            .push(111_300_001);
+        let qctx = h.state.quest_context(&mut events);
+        let ectx = qctx.make_eval_context();
+        assert_eq!(condition::eval_activity_state(&ectx, 111_300_001), 1);
+        assert_eq!(condition::eval_activity_state(&ectx, -999_999), 2);
+    }
+
+    // 2) Quest 244850000 node 22 checks ActivityState == 2 (Close) -> DestroyQuest;
+    // when activity 111300001 is open (1), activating quest 244850000 must NOT self-destroy,
+    // and explicit DestroyQuest must record session_destroyed_quests to block auto re-activation loops.
+    if h.state.assets.tables.quest_data.get_data_by_id(&244_850_000).is_some() {
+        h.state.player_components.basic.info.attributes.level = 36;
+        assert!(
+            quest_engine::tree::activate_quest(&mut h.state.quest_context(&mut events), 244_850_000, true)
+                .expect("activate 244850000")
+        );
+        assert!(
+            h.state.player_components.quest.info.has_active_quest(244_850_000),
+            "244850000 must stay active when activity 111300001 is Open (=1)"
+        );
+        let _ = h.drain_count();
+        quest_engine::destroy_quest(&mut h.state.quest_context(&mut events), 244_850_000)
+            .expect("destroy 244850000");
+        assert!(
+            !h.state.player_components.quest.info.has_active_quest(244_850_000),
+            "DestroyQuest must remove 244850000 without refresh_available_quests looping it back"
+        );
+    }
+
+    // 3) push_ready_quest_list deduplicates unchanged consecutive lists.
+    {
+        let _ = h.drain_count();
+        h.state
+            .player_components
+            .quest
+            .info
+            .finish_quest(quest_engine::PROLOGUE_QUEST_ID);
+        let sc = h.state.scene.as_mut().unwrap();
+        sc.join_scene_pushed = true;
+        sc.last_ready_quest_list = None;
+        quest_engine::triggers::push_ready_quest_list(&mut h.state.quest_context(&mut events));
+        let first_cnt = h
+            .drain_decoded::<QuestReadyListNotify>(QuestReadyListNotify::MSG_ID)
+            .len();
+        quest_engine::triggers::push_ready_quest_list(&mut h.state.quest_context(&mut events));
+        let second_cnt = h
+            .drain_decoded::<QuestReadyListNotify>(QuestReadyListNotify::MSG_ID)
+            .len();
+        assert_eq!(first_cnt, 1, "initial ready list push must emit once");
+        assert_eq!(second_cnt, 0, "unchanged ready quest list must be suppressed");
+    }
+
+    // 4) Standalone Wait-only spans (LevelPlay 200700001/316700001 `[SetVar, Wait(1)]`) emit 0 LevelEventNotify,
+    // while paired `[FadeInScreen, Wait, SetVar]` (`145750001_408`) still emits `[0..=1]`.
+    {
+        let _ = h.drain_count();
+        let lp_wait_acts = vec![
+            serde_json::json!({"Name": "SetVar"}),
+            serde_json::json!({"Name": "Wait", "Params": {"Time": 1.0}}),
+        ];
+        quest_engine::triggers::push_bt_level_events_for_type(
+            &mut h.state.quest_context(&mut events),
+            BtType::BtTypeLevelPlay,
+            200_700_001,
+            7,
+            GameCtxType::ChildQuestNodeFinishAction,
+            &lp_wait_acts,
+        )
+        .expect("push standalone wait");
+        let wait_only: Vec<LevelEventNotify> = h.drain_decoded(LevelEventNotify::MSG_ID);
+        assert!(
+            wait_only.is_empty(),
+            "standalone Wait-only span must NOT trigger LevelEventWait ForceReleaseInput: {wait_only:?}"
+        );
+
+        let fade_wait_acts = vec![
+            serde_json::json!({"Name": "FadeInScreen", "Params": {"ScreenType": "White", "Duration": 0.2}}),
+            serde_json::json!({"Name": "Wait", "Params": {"Time": 0.2}}),
+            serde_json::json!({"Name": "SetVar"}),
+        ];
+        quest_engine::triggers::push_bt_level_events_for_type(
+            &mut h.state.quest_context(&mut events),
+            BtType::BtTypeLevelPlay,
+            145_750_001,
+            408,
+            GameCtxType::ChildQuestNodeFinishAction,
+            &fade_wait_acts,
+        )
+        .expect("push fade+wait");
+        let paired: Vec<LevelEventNotify> = h.drain_decoded(LevelEventNotify::MSG_ID);
+        assert_eq!(paired.len(), 1);
+        assert_eq!((paired[0].StartIndex, paired[0].EndIndex), (0, 1));
+    }
+
+    // 5) Repeated level_play::sync_on_login on live Scene skips duplicate EnterLevelPlayNotify pushes.
+    if h.state.assets.tables.level_play_data.get_data_by_id(&200_700_001).is_some() {
+        let _ = h.drain_count();
+        h.state.player_components.quest.info.progress.entered_level_plays = vec![200_700_001];
+        {
+            let mut qctx = h.state.quest_context(&mut events);
+            let mut lctx = level_play::LevelPlayContext::from_quest_ctx(&mut qctx).unwrap();
+            level_play::sync_on_login(&mut lctx).expect("first lp sync");
+        }
+        let enter1: Vec<EnterLevelPlayNotify> = h.drain_decoded(EnterLevelPlayNotify::MSG_ID);
+        assert_eq!(enter1.len(), 1);
+        {
+            let mut qctx = h.state.quest_context(&mut events);
+            let mut lctx = level_play::LevelPlayContext::from_quest_ctx(&mut qctx).unwrap();
+            level_play::sync_on_login(&mut lctx).expect("second lp sync");
+        }
+        let enter2: Vec<EnterLevelPlayNotify> = h.drain_decoded(EnterLevelPlayNotify::MSG_ID);
+        assert!(
+            enter2.is_empty(),
+            "repeated sync_on_login must not re-push EnterLevelPlayNotify: {enter2:?}"
+        );
+    }
+}
+
+#[test]
+fn audit_154_kcp_stream_window_reconnect_and_nonblocking_syn_under_load() {
+    use std::time::{Duration, Instant};
+    use sonoro_proto::PbMessage;
+    use sonoro_proto::pb::{
+        EnterGameRequest, EnterGameResponse, HeartbeatRequest, HeartbeatResponse,
+        InstLevelPlayStateReq, LevelPlayStateListRequest, LevelPlayStateListResponse,
+        LoginRequest, LoginResponse, MovePackagePush, MovingEntityData, ReconnectRequest,
+        ReconnectResponse, SceneLoadingFinishRequest, SceneLoadingFinishResponse,
+    };
+
+    let tmp = TempDirGuard::new("audit154");
+    let fs = Arc::new(FileSystem::open(&tmp.path).expect("open tmp fs"));
+    let assets = super::shared_assets();
+    {
+        let mut pcs =
+            super::PlayerComponentStorage::init(&fs, &assets, 154_000_001).expect("init 154000001");
+        pcs.quest.info.finish_quest(quest_engine::PROLOGUE_QUEST_ID);
+        pcs.quest.save(&fs).expect("save quest_info");
+    }
+
+    let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind probe");
+    let bind_addr = probe.local_addr().expect("probe addr");
+    drop(probe);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .expect("tokio rt");
+    let sm = Arc::new(crate::network::SessionManager::new());
+    let (tx_shut, rx_shut) = tokio::sync::watch::channel(false);
+    let srv_handle = rt.spawn(crate::network::bind_and_serve(
+        bind_addr,
+        Arc::clone(&fs),
+        Arc::clone(&assets),
+        Arc::clone(&sm),
+        rx_shut,
+    ));
+
+    let make_req = |seq: u32, rpc: u16, msg_id: u16, payload: &[u8]| -> Vec<u8> {
+        crate::network::message::encode_raw_alloc(
+            crate::network::message::Header::Request(crate::network::message::RequestHeader {
+                seq_no: seq,
+                rpc_id: rpc,
+                msg_id,
+            }),
+            payload,
+            None,
+        )
+    };
+    let make_push = |seq: u32, msg_id: u16, payload: &[u8]| -> Vec<u8> {
+        crate::network::message::encode_raw_alloc(
+            crate::network::message::Header::Push(crate::network::message::PushHeader {
+                seq_no: seq,
+                msg_id,
+            }),
+            payload,
+            None,
+        )
+    };
+
+    rt.block_on(async {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let mut syn = [0u8; 35];
+        syn[0] = 0xED;
+        let mut buf = [0u8; 8192];
+
+        // Concurrent KRKCP_SYN probes must respond fast even on 2 worker threads during login/scene load.
+        let syn_probe = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let mut worst = Duration::ZERO;
+            for _ in 0..8 {
+                let s = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                s.connect(bind_addr).await.unwrap();
+                let t = Instant::now();
+                s.send(&syn).await.unwrap();
+                let r = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    s.recv(&mut [0u8; 64]),
+                )
+                .await;
+                assert!(r.is_ok(), "concurrent KRKCP_SYN must not stall: {:?}", t.elapsed());
+                worst = worst.max(t.elapsed());
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            worst
+        });
+
+        let cli1 = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli1.connect(bind_addr).await.unwrap();
+        cli1.send(&syn).await.unwrap();
+        let n1 = tokio::time::timeout(Duration::from_secs(2), cli1.recv(&mut buf))
+            .await
+            .expect("cli1 syn")
+            .unwrap();
+        assert_eq!(n1, 5);
+        assert_eq!(buf[0], 0xEE);
+        let conv1 = u32::from_le_bytes(buf[1..5].try_into().unwrap());
+        let mut kcp1 = crate::network::kcp::Kcp::new(conv1);
+        kcp1.stream = true;
+        kcp1.set_mtu(1000).unwrap();
+        kcp1.set_nodelay(1, 10, 2, true);
+        kcp1.set_wnd_size(256, 256);
+
+        let mut pkts = Vec::new();
+        let mut up_seq = 1u32;
+        let mut rpc_id = 1u16;
+        let mut recv_buf = Vec::<u8>::new();
+        kcp1.send(&make_req(
+            up_seq,
+            rpc_id,
+            LoginRequest::MSG_ID,
+            &LoginRequest {
+                Account: b"154000001".to_vec(),
+                Token: b"tok".to_vec(),
+                Id: 154_000_001,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        ))
+        .unwrap();
+        up_seq += 1;
+        rpc_id += 1;
+
+        let mut enter_sent = false;
+        let mut slf_done = false;
+        let mut reconn_token = Vec::new();
+        let player_id = 154_000_001i32;
+        let mut last_srv_seq = 0i32;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(6) && !slf_done {
+            kcp1.update(start.elapsed().as_millis() as u32 + 20, &mut |p| {
+                pkts.push(p.to_vec())
+            });
+            for p in pkts.drain(..) {
+                let _ = cli1.send(&p).await;
+            }
+            while let Ok(Ok(rlen)) =
+                tokio::time::timeout(Duration::from_millis(5), cli1.recv(&mut buf)).await
+            {
+                let _ = kcp1.input(&buf[..rlen]);
+                while let Ok(chunk) = kcp1.recv_vec() {
+                    recv_buf.extend_from_slice(&chunk);
+                    while recv_buf.len() >= 3 {
+                        let flen =
+                            u32::from_le_bytes([recv_buf[0], recv_buf[1], recv_buf[2], 0]) as usize;
+                        if recv_buf.len() < 3 + flen {
+                            break;
+                        }
+                        let body = recv_buf[3..3 + flen].to_vec();
+                        recv_buf.drain(..3 + flen);
+                        let msg = crate::network::message::Message::decode(&body).unwrap();
+                        let sn = msg.header.seq_no() as i32;
+                        if sn > last_srv_seq {
+                            last_srv_seq = sn;
+                        }
+                        let mid = msg.header.message_id();
+                        if mid == LoginResponse::MSG_ID && !enter_sent {
+                            let lr = LoginResponse::decode(&msg.payload).unwrap();
+                            reconn_token = lr.ReconnectToken;
+                            kcp1.send(&make_req(
+                                up_seq,
+                                rpc_id,
+                                EnterGameRequest::MSG_ID,
+                                &EnterGameRequest {
+                                    SingleInstanceId: 8,
+                                    ..Default::default()
+                                }
+                                .encode_to_vec(),
+                            ))
+                            .unwrap();
+                            up_seq += 1;
+                            rpc_id += 1;
+                            enter_sent = true;
+                        } else if mid == EnterGameResponse::MSG_ID {
+                            kcp1.send(&make_req(
+                                up_seq,
+                                rpc_id,
+                                SceneLoadingFinishRequest::MSG_ID,
+                                &SceneLoadingFinishRequest::default().encode_to_vec(),
+                            ))
+                            .unwrap();
+                            up_seq += 1;
+                            rpc_id += 1;
+                        } else if mid == SceneLoadingFinishResponse::MSG_ID {
+                            slf_done = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(slf_done, "cli1 must complete SceneLoadingFinishResponse over stream KCP");
+        let worst_syn = syn_probe.await.unwrap();
+        assert!(worst_syn < Duration::from_millis(250), "worst SYN {worst_syn:?}");
+        drop(cli1);
+
+        // Silent reconnect over KCP stream=true, mtu=1000, wnd=(256, 256) + 300-request & 55-move burst.
+        let cli2 = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        cli2.connect(bind_addr).await.unwrap();
+        cli2.send(&syn).await.unwrap();
+        let n2 = tokio::time::timeout(Duration::from_secs(2), cli2.recv(&mut buf))
+            .await
+            .expect("cli2 syn")
+            .unwrap();
+        assert_eq!(n2, 5);
+        let conv2 = u32::from_le_bytes(buf[1..5].try_into().unwrap());
+        let mut kcp2 = crate::network::kcp::Kcp::new(conv2);
+        kcp2.stream = true;
+        kcp2.set_mtu(1000).unwrap();
+        kcp2.set_nodelay(1, 10, 2, true);
+        kcp2.set_wnd_size(256, 256);
+
+        let mut recv_buf2 = Vec::<u8>::new();
+        let mut got_reconn = false;
+        let mut lpsl_count = 0usize;
+        let mut got_hb2 = false;
+        kcp2.send(&make_req(
+            up_seq,
+            rpc_id,
+            ReconnectRequest::MSG_ID,
+            &ReconnectRequest {
+                PlayerId: player_id,
+                LastSvrSeqNo: last_srv_seq,
+                ReconnectToken: reconn_token,
+                ReconnectTraceId: b"r154".to_vec(),
+            }
+            .encode_to_vec(),
+        ))
+        .unwrap();
+        up_seq += 1;
+        rpc_id += 1;
+
+        let s2 = Instant::now();
+        while s2.elapsed() < Duration::from_secs(5) && !(got_reconn && got_hb2 && lpsl_count >= 300) {
+            kcp2.update(s2.elapsed().as_millis() as u32 + 20, &mut |p| {
+                pkts.push(p.to_vec())
+            });
+            for p in pkts.drain(..) {
+                let _ = cli2.send(&p).await;
+            }
+            while let Ok(Ok(rlen)) =
+                tokio::time::timeout(Duration::from_millis(5), cli2.recv(&mut buf)).await
+            {
+                let _ = kcp2.input(&buf[..rlen]);
+                while let Ok(chunk) = kcp2.recv_vec() {
+                    recv_buf2.extend_from_slice(&chunk);
+                    while recv_buf2.len() >= 3 {
+                        let flen = u32::from_le_bytes([recv_buf2[0], recv_buf2[1], recv_buf2[2], 0])
+                            as usize;
+                        if recv_buf2.len() < 3 + flen {
+                            break;
+                        }
+                        let body = recv_buf2[3..3 + flen].to_vec();
+                        recv_buf2.drain(..3 + flen);
+                        let msg = crate::network::message::Message::decode(&body).unwrap();
+                        let mid = msg.header.message_id();
+                        if mid == ReconnectResponse::MSG_ID && !got_reconn {
+                            let rr = ReconnectResponse::decode(&msg.payload).unwrap();
+                            assert_eq!(rr.ErrorCode, Some(ErrorCode::Success));
+                            got_reconn = true;
+                            let lp_req = LevelPlayStateListRequest {
+                                InstLevelPlayStateReqs: vec![InstLevelPlayStateReq {
+                                    InstId: 8,
+                                    LevelPlayIds: vec![200_700_001, 316_700_001, 145_750_001],
+                                }],
+                            }
+                            .encode_to_vec();
+                            let mv = MovePackagePush {
+                                MovingEntities: vec![MovingEntityData {
+                                    EntityId: 9,
+                                    MoveInfos: vec![Default::default(); 2],
+                                    ..Default::default()
+                                }],
+                                SceneOwnerId: player_id,
+                            }
+                            .encode_to_vec();
+                            for j in 0..300 {
+                                kcp2.send(&make_req(
+                                    up_seq,
+                                    rpc_id,
+                                    LevelPlayStateListRequest::MSG_ID,
+                                    &lp_req,
+                                ))
+                                .unwrap();
+                                up_seq += 1;
+                                rpc_id += 1;
+                                if j < 55 {
+                                    kcp2.send(&make_push(up_seq, MovePackagePush::MSG_ID, &mv))
+                                        .unwrap();
+                                    up_seq += 1;
+                                }
+                            }
+                            kcp2.send(&make_req(up_seq, rpc_id, HeartbeatRequest::MSG_ID, &[]))
+                                .unwrap();
+                            up_seq += 1;
+                            rpc_id += 1;
+                        } else if mid == LevelPlayStateListResponse::MSG_ID {
+                            lpsl_count += 1;
+                        } else if mid == HeartbeatResponse::MSG_ID && got_reconn {
+                            got_hb2 = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(got_reconn, "ReconnectResponse must arrive");
+        assert_eq!(lpsl_count, 300, "all 300 burst responses must arrive cleanly over stream KCP");
+        assert!(got_hb2, "HeartbeatResponse after 300+55 burst must not stall");
+    });
+
+    let _ = tx_shut.send(true);
+    srv_handle.abort();
+}
+
+
 
 
