@@ -1362,6 +1362,45 @@ pub fn push_node_progress_notify<S: PushSink + ?Sized>(
     );
 }
 
+fn enclosing_node_dungeon_id(nodes: &[NodeEntry], start: &NodeEntry) -> Option<i32> {
+    let mut cur = Some(start);
+    for _ in 0..64 {
+        let Some(node) = cur else {
+            break;
+        };
+        if let Some(did) = json_int(node.data.get("DungeonId"))
+            && did > 0
+        {
+            return Some(did);
+        }
+        cur = (node.parent_id > 0)
+            .then(|| find_node_by_id(nodes, node.parent_id))
+            .flatten();
+    }
+    None
+}
+
+fn is_cross_map_finished_child_node<S: PushSink + ?Sized>(
+    ctx: &QuestContext<'_, S>,
+    nodes: &[NodeEntry],
+    node: &NodeEntry,
+    cur_inst: i32,
+    cur_map: i32,
+) -> bool {
+    if let Some(did) = enclosing_node_dungeon_id(nodes, node)
+        && did != cur_inst
+        && ctx.assets.resolve_map_config_id(did) != cur_map
+    {
+        return true;
+    }
+    let target_ids = extract_node_target_entity_ids(node);
+    target_ids.iter().any(|&eid| {
+        eid > 0
+            && ctx.assets.find_level_entity(cur_map, i64::from(eid)).is_none()
+            && ctx.assets.find_level_entity_any_map(i64::from(eid)).is_some()
+    })
+}
+
 pub fn build_tree_info<S: PushSink + ?Sized>(
     ctx: &QuestContext<'_, S>,
     aq: &ActiveQuest,
@@ -1377,11 +1416,26 @@ pub fn build_tree_info<S: PushSink + ?Sized>(
     let mut timer_infos = Vec::new();
     let mut seen = HashSet::new();
 
+    let cur_inst = ctx
+        .scene
+        .as_deref()
+        .map(|s| s.instance_id)
+        .or_else(|| ctx.scene_comp.as_deref().map(|sc| sc.last_scene_info.instance_id))
+        .unwrap_or(8);
+    let cur_map = ctx.assets.resolve_map_config_id(cur_inst);
+
     for &fid in &aq.finished_nodes {
         if !seen.insert(fid) {
             continue;
         }
-        let is_child = find_node_by_id(&nodes, fid).is_some_and(|n| n.node_type == "ChildQuest");
+        let node_opt = find_node_by_id(&nodes, fid);
+        let is_child = node_opt.is_some_and(|n| n.node_type == "ChildQuest");
+        if is_child
+            && !ancestors.contains(&fid)
+            && node_opt.is_some_and(|n| is_cross_map_finished_child_node(ctx, &nodes, n, cur_inst, cur_map))
+        {
+            continue;
+        }
         tree_nodes.insert(
             fid,
             NodeInfo {
@@ -3524,6 +3578,7 @@ pub fn is_kill_satisfied(aq: &ActiveQuest, cond: &Map<String, Value>, ctype: &st
 
 pub fn eval_compare_var_list<S: PushSink + ?Sized>(
     ctx: &QuestContext<'_, S>,
+    owner_id: i32,
     cond: &Map<String, Value>,
 ) -> bool {
     let Some(Value::Array(conds)) = cond.get("Conditions") else {
@@ -3533,7 +3588,7 @@ pub fn eval_compare_var_list<S: PushSink + ?Sized>(
         return true;
     }
     let needed = json_int(cond.get("Count")).unwrap_or(0);
-    let eval_ctx = ctx.make_eval_context();
+    let eval_ctx = ctx.make_eval_context_for_quest(owner_id);
     let passed = conds
         .iter()
         .filter_map(|item| item.as_object())
@@ -3924,7 +3979,7 @@ pub(super) fn should_auto_complete_child_quest<S: PushSink + ?Sized>(
                 false
             }
         }
-        "CompareVar" => eval_compare_var_list(ctx, cond),
+        "CompareVar" => eval_compare_var_list(ctx, quest_id, cond),
         "CheckLevelPlay" => is_level_play_satisfied(ctx, cond),
         "GetItem" => has_all_items(ctx, cond.get("Items")),
         "CheckEntityState" => is_check_entity_state_satisfied(ctx, cond),

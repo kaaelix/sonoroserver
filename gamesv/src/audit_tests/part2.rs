@@ -9767,8 +9767,203 @@ fn audit_quest_tree_order_phone_message_and_empty_save_block_recovery() {
     );
 }
 
+#[test]
+fn audit_225_event_slot_dreamlink_self_var_fade_and_cross_map_node() {
+    use sonoro_proto::pb::{ActivityDataDataOneof, LevelEventNotify};
 
+    let mut h = TestHarness::new("audit_225_event_fade", Some(8));
+    let mut events = EventQueue::new();
 
+    // 1) DreamLinkWorldRun Index must match table Id (1..=N, never 0), and Abyss roles have 9 plugin slots.
+    let acts = activity::build_activity_list(
+        &h.state.assets,
+        &h.state.player_components.progress,
+        None,
+    );
+    let dl = acts
+        .iter()
+        .find_map(|a| match &a.Data {
+            Some(ActivityDataDataOneof::DreamLinkActivityData(d)) => Some(d),
+            _ => None,
+        })
+        .expect("DreamLinkActivityData present");
+    assert!(!dl.LevelPlayList.is_empty());
+    assert!(
+        dl.LevelPlayList
+            .iter()
+            .all(|lp| lp.Index > 0 && lp.Index == lp.LevelPlayId),
+        "DreamLink LevelPlayList.Index must match DreamLinkWorldRun.Id: {:?}",
+        dl.LevelPlayList
+    );
 
+    let abyss = acts
+        .iter()
+        .find_map(|a| match &a.Data {
+            Some(ActivityDataDataOneof::DangoAbyssActivityData(a)) => Some(a),
+            _ => None,
+        })
+        .expect("DangoAbyssActivityData present");
+    assert!(!abyss.RoleList.is_empty());
+    assert!(
+        abyss.RoleList.iter().all(|r| r.EquipItems.len() == 9),
+        "Abyss role EquipItems must always contain 9 slots: {:?}",
+        abyss.RoleList
+    );
 
+    // 2) LevelPlay 145750001 real ride: node 2 -> node 408 -> Wait(0.2) -> SetVar(Self."白屏"=1) -> node 409 CompareVar completes.
+    h.state
+        .player_components
+        .quest
+        .info
+        .finish_quest(quest_engine::PROLOGUE_QUEST_ID);
+    {
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_or_add_active_quest(145_000_005)
+            .mark_node_active(27);
+        for pre_nid in [13, 190, 24, 45, 61] {
+            h.state
+                .player_components
+                .quest
+                .info
+                .mark_node_finished(145_000_005, pre_nid);
+        }
+    }
+    quest_engine::events::on_player_move(
+        &mut h.state.quest_context(&mut events),
+        871_472.75,
+        705_142.8,
+        2_838.75,
+    )
+    .expect("approach gondola LP");
+    let train_net_id = h
+        .state
+        .scene
+        .as_ref()
+        .unwrap()
+        .find_entity_net_id_by_config_id(145_750_138)
+        .expect("train net id");
+    let _ = crate::network::handlers::scene::handle_entity_dynamic_interact_request(
+        &mut h.state,
+        &mut events,
+        sonoro_proto::pb::EntityDynamicInteractRequest {
+            EntityId: train_net_id,
+            OptionGuid: b"4cae376712984b8095a277b04d5d0a26".to_vec(),
+        },
+    )
+    .expect("board gondola");
+    let t0 = quest_engine::tree::now_ms_pub();
+    quest_engine::tree::on_timers_due(&mut h.state.quest_context(&mut events), t0 + 600)
+        .expect("flush node 2 Wait(0.5)");
+    let _ = h.drain_count();
+
+    quest_engine::events::on_player_move(
+        &mut h.state.quest_context(&mut events),
+        874_590.94,
+        708_230.56,
+        2_779.5,
+    )
+    .expect("reach node 408");
+    assert_eq!(
+        h.state
+            .player_components
+            .quest
+            .info
+            .get_var_int("Self:145750001:白屏"),
+        1
+    );
+    assert!(
+        !level_play::is_lp_node_active_pub(
+            Some(&h.state.player_components.progress),
+            145_750_001,
+            408,
+        ) && !level_play::is_lp_node_active_pub(
+            Some(&h.state.player_components.progress),
+            145_750_001,
+            409,
+        ) && h.state.player_components.progress.info.get_key_int("lp_node:145750001:409") == 1,
+        "node 408 (SetVar Self.白屏=1) must allow node 409 (FadeOutScreen) to finish: dynamic={:?}",
+        h.state.player_components.progress.info.dynamic.ints
+    );
+    let fade_out_events: Vec<LevelEventNotify> = h.drain_decoded(LevelEventNotify::MSG_ID);
+    assert!(
+        fade_out_events.iter().any(|ev| ev.IncId == 145_750_001),
+        "node 408/409 completion must push FadeIn/FadeOut LevelEventNotify for 145750001"
+    );
+
+    // Also verify CompareVar Self-scope gating directly (0 -> false, 1 -> true).
+    h.state
+        .player_components
+        .quest
+        .info
+        .set_var_int("Self:145750001:白屏", 0);
+    let n409 = h
+        .state
+        .assets
+        .level_play_nodes
+        .get_owner_nodes(145_750_001)
+        .expect("145750001 nodes")
+        .iter()
+        .find(|n| n.id == 409)
+        .cloned()
+        .expect("node 409");
+    let c409 = quest_engine::get_child_condition_pub(&n409.data)
+        .expect("node 409 cond")
+        .clone();
+    assert!(
+        !quest_engine::triggers::eval_compare_var_list(
+            &h.state.quest_context(&mut events),
+            145_750_001,
+            &c409,
+        ),
+        "CompareVar(Self.白屏 == 1) must be false when Self:145750001:白屏 == 0"
+    );
+    h.state
+        .player_components
+        .quest
+        .info
+        .set_var_int("Self:145750001:白屏", 1);
+    assert!(
+        quest_engine::triggers::eval_compare_var_list(
+            &h.state.quest_context(&mut events),
+            145_750_001,
+            &c409,
+        ),
+        "CompareVar(Self.白屏 == 1) must evaluate true with Self:145750001:白屏 == 1"
+    );
+
+    // 3) Finished ChildQuest node 42 (entity 145000008, DungeonId 904) must be omitted on Map 8.
+    let aq_snapshot = {
+        let aq = h
+            .state
+            .player_components
+            .quest
+            .info
+            .get_or_add_active_quest(145_000_005);
+        aq.active_nodes = vec![454];
+        aq.finished_nodes = vec![12, 24, 361, 42];
+        aq.clone()
+    };
+    let tree_map8 = quest_engine::triggers::build_tree_info(
+        &h.state.quest_context(&mut events),
+        &aq_snapshot,
+    );
+    assert!(
+        !tree_map8.Nodes.contains_key(&42),
+        "finished cross-dungeon DoInteract node 42 must be omitted on Map 8"
+    );
+    h.state.scene = Some(
+        sonoro_gamesv_logic::scene::Scene::init(&h.state.fs, 1, 904).expect("scene 904"),
+    );
+    let tree_map904 = quest_engine::triggers::build_tree_info(
+        &h.state.quest_context(&mut events),
+        &aq_snapshot,
+    );
+    assert!(
+        tree_map904.Nodes.contains_key(&42),
+        "node 42 should still appear inside its matching Dungeon 904"
+    );
+}
 

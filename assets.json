@@ -7,7 +7,7 @@
   "sha256": "0a2be854a5976672b3cd2c9a70d04597a7809d5df073c89e7f95d18e3a78e75f",
   "url": "https://github.com/kaaelix/sonoroserver/releases/download/assets-db/assets.db",
   "server": {
-    "version": "3.8.0-20261128-2",
+    "version": "3.8.0-20261128-3",
     "exclude": [
       "assets/BinData/",
       "assets/assets.db"
@@ -368,8 +368,8 @@
       "gamesv/logic/src/helpers/quest_actions.rs": "ffeb0a1240cc266b86c5bd38d2f1b0cb91011c96cb14e63d8aa80f4e3d2818b9",
       "gamesv/logic/src/helpers/quest_engine/events.rs": "8ee89d2bd1bc32c7bc6c991423381abd33af5f2f03ff08c6a7fa12514d7640e3",
       "gamesv/logic/src/helpers/quest_engine/mod.rs": "062a0e40b45e0b8ecf4c6d862c6c9a25eb1623ef7d7d1978cf07f21bfbf5bf70",
-      "gamesv/logic/src/helpers/quest_engine/tree.rs": "71db05ac00c8536475c8561502657842f34b75cbd97895391b7818f957187a01",
-      "gamesv/logic/src/helpers/quest_engine/triggers.rs": "361532b5e3dae888bd2f0e050fb610a57ca836f29ba0abdc62dbbe4efdeba7de",
+      "gamesv/logic/src/helpers/quest_engine/tree.rs": "27c963ec0547df0324a02045b03a0dcc58e3250a5b1fe153eff0cc79e3613140",
+      "gamesv/logic/src/helpers/quest_engine/triggers.rs": "0c9beffc3ec02b598910caa650bfbc3dc6e8133e9cc2caa58139c42089d33e40",
       "gamesv/logic/src/helpers/quest_mode_actions.rs": "f3eb630f14b327e5fd3237a6ffb5ada7b8525f64632106429eb403c82eec77b5",
       "gamesv/logic/src/helpers/quest_types.rs": "50e608d6f62daa0122fdf8f039a008027c62c4decd0fed770d0cd6dcffacaa2e",
       "gamesv/logic/src/helpers/reward.rs": "f73d0d7d0c0663b0dbf69a61d88eb995d52e7274bfaac47e8bae98d2e6927ae7",
@@ -396,7 +396,7 @@
       "gamesv/logic/src/templates/role_entity_templates.rs": "450a1c8a6a4840246274ffce8b47678789c485c449915fcba782e277d3e30a19",
       "gamesv/src/audit_tests/mod.rs": "dd80ebd1916073f69f57c5dc729286be632c050e7e767d1681d11375b878aeef",
       "gamesv/src/audit_tests/part1.rs": "ffaf52f641972b78fe75c26226553f77b31f6d46e372704be583e7cf789f4aae",
-      "gamesv/src/audit_tests/part2.rs": "9a87bf772834a46e36491249ad2a2cb011a18278536be1f6063808ea36d5dcd0",
+      "gamesv/src/audit_tests/part2.rs": "bddf4e4c1731a6f5c5f727317e81c8fab926c6220810aaea2a968b35ae811c9c",
       "gamesv/src/data/zon/concerto_exceptions.zon": "23a9e3d5beedaa97952cfd36f3fdc854ea2d3c3998723a4261d1ada312c0e38c",
       "gamesv/src/data/zon/config.zon": "43635da6894c286350818d8fb26487a5825380fd3577689ef8b2564204718771",
       "gamesv/src/main.rs": "ce9f1396c91e0461dd16abef2b0f080d730153616ae45ad102f256fe118eb32a",
@@ -410,7 +410,7 @@
       "gamesv/src/network/handlers/access_path.rs": "be1ed1116bab5c1c2769250764649120570707e03dc9b62f3fbdb1a0a490de7e",
       "gamesv/src/network/handlers/achievement.rs": "25749bcb92d49958ad0f7734c45f256ec0b0b359e1e70a82e50ac983aa16dddf",
       "gamesv/src/network/handlers/activity.rs": "d0435853eee6ce60ecf53f7ad463f3fcd4f556ad3c18ee9bc5babb275f4f061e",
-      "gamesv/src/network/handlers/activity_data.rs": "4f5e28ff56ef77159abf49f6f67722f3f1fc18b4a7b67b3a478ad6c1eccfc06d",
+      "gamesv/src/network/handlers/activity_data.rs": "c7ea24feb0f42621dbc0b465b035198546ff5faeea42e061bd8865455a030413",
       "gamesv/src/network/handlers/adventure.rs": "3ef6d2d52ec9a92f4d13e2a6f121e650e87ec2b2f9189ed3de1da574d0b9a05c",
       "gamesv/src/network/handlers/attach.rs": "4662f41c4696337dabe161d6d7649adcbb4ef213d1d8c1cf2ed476027371188e",
       "gamesv/src/network/handlers/auth.rs": "056e58f9e3ff4fb9053c2c9c5720d5ff2a8070287e7096994feedad01f120acf",

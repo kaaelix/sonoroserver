@@ -1669,7 +1669,7 @@ fn eval_quest_failed_condition<S: PushSink + ?Sized>(
     }
 
     if let Some(Value::Object(cv_val)) = fc.get("CompareVar")
-        && eval_compare_var_list(ctx, cv_val)
+        && eval_compare_var_list(ctx, quest_id, cv_val)
     {
         return Ok(Some(FailReason::CompareVarFail));
     }

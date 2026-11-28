@@ -748,15 +748,14 @@ pub fn build_activity_data(
                 .collect();
             let world_runs = rows_for_activity(assets, "DreamLinkWorldRun", id)
                 .iter()
-                .enumerate()
-                .filter_map(|(idx, o)| {
+                .filter_map(|o| {
                     let lid = j_i32(o, "Id");
                     if lid <= 0 {
                         return None;
                     }
                     let claimed = claim_matches_id(claims, "rogue_cat:lp:", lid);
                     Some(LevelPlayList {
-                        Index: idx as i32,
+                        Index: lid,
                         LevelPlayId: lid,
                         State: Some(if claimed {
                             SignState::IsReceive
@@ -1166,7 +1165,7 @@ pub fn build_activity_data(
                     (rid > 0).then_some(AbyssDangoRoleData {
                         Id: rid,
                         Level: info.get_key_int(&format!("abyss:lrole:{rid}")).max(1) as i32,
-                        EquipItems: Vec::new(),
+                        EquipItems: vec![0; 9],
                     })
                 })
                 .collect();
