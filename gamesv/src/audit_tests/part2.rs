@@ -11433,3 +11433,184 @@ fn audit_232_finish_condition_and_lp_dynamic_interact_respect_bt_type_and_guards
     }
 }
 
+#[test]
+fn audit_trial_role_excluded_from_role_list_and_vision_has_common_passive_skills() {
+    use sonoro_proto::PbMessage;
+    let mut h = TestHarness::new("audit_trial_role_and_vision", Some(8));
+    let mut events = EventQueue::new();
+
+    // apply_trial_roles must push RoleTrialOpenNotify (16075001) and NOT PbGetRoleListNotify.
+    h.state.player_components.basic.info.attributes.cur_world_level = 3;
+    h.drain_count();
+    {
+        let mut qctx = h.state.quest_context(&mut events);
+        sonoro_gamesv_logic::helpers::quest_actions::apply_trial_roles(
+            &mut qctx,
+            &[16075001],
+            true,
+        )
+        .expect("apply_trial_roles");
+    }
+
+    let mut pushed_trial_in_role_list = false;
+    let mut pushed_trial_open = false;
+    while let Ok(frame) = h.rx.try_recv() {
+        if frame.len() < 3 {
+            continue;
+        }
+        if let Ok(msg) = crate::network::message::Message::decode(&frame[3..]) {
+            match msg.header.message_id() {
+                sonoro_proto::pb::PbGetRoleListNotify::MSG_ID => {
+                    let n = sonoro_proto::pb::PbGetRoleListNotify::decode(&msg.payload)
+                        .expect("decode PbGetRoleListNotify");
+                    if n.RoleList.iter().any(|r| r.RoleId == 16075001) {
+                        pushed_trial_in_role_list = true;
+                    }
+                }
+                sonoro_proto::pb::RoleTrialOpenNotify::MSG_ID => {
+                    let n = sonoro_proto::pb::RoleTrialOpenNotify::decode(&msg.payload)
+                        .expect("decode RoleTrialOpenNotify");
+                    if n.RoleIds.contains(&16075001) {
+                        pushed_trial_open = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        !pushed_trial_in_role_list,
+        "apply_trial_roles must not push trial RoleId 16075001 in PbGetRoleListNotify"
+    );
+    assert!(
+        pushed_trial_open,
+        "apply_trial_roles must push RoleTrialOpenNotify containing 16075001"
+    );
+    assert!(
+        h.state.player_components.role.is_trial_role(16075001),
+        "trial role 16075001 must remain materialized on server"
+    );
+
+    // push_data (login) must also keep trial role 16075001 out of PbGetRoleListNotify, favor, and motion.
+    h.drain_count();
+    role_logic::push_data(
+        &mut h.state.conn,
+        &h.state.assets,
+        &h.state.player_components.basic,
+        &mut h.state.player_components.role,
+        &mut h.state.player_components.weapon,
+        &mut h.state.player_components.echo,
+        &h.state.player_components.cosmetic,
+        &h.state.player_components.inventory,
+        &h.state.player_components.quest,
+        &h.state.player_components.progress,
+    );
+    let mut login_role_list_count = 0usize;
+    let mut login_has_invalid_role = false;
+    let mut login_has_trial_favor = false;
+    let mut login_has_trial_motion = false;
+    while let Ok(frame) = h.rx.try_recv() {
+        if frame.len() < 3 {
+            continue;
+        }
+        if let Ok(msg) = crate::network::message::Message::decode(&frame[3..]) {
+            match msg.header.message_id() {
+                sonoro_proto::pb::PbGetRoleListNotify::MSG_ID => {
+                    login_role_list_count += 1;
+                    let n = sonoro_proto::pb::PbGetRoleListNotify::decode(&msg.payload)
+                        .expect("decode PbGetRoleListNotify");
+                    if n.RoleList.iter().any(|r| r.RoleId > 1999 || r.RoleId == 16075001) {
+                        login_has_invalid_role = true;
+                    }
+                }
+                sonoro_proto::pb::RoleFavorListNotify::MSG_ID => {
+                    let n = sonoro_proto::pb::RoleFavorListNotify::decode(&msg.payload)
+                        .expect("decode RoleFavorListNotify");
+                    if n.FavorList.iter().any(|f| f.RoleId == 16075001) {
+                        login_has_trial_favor = true;
+                    }
+                }
+                sonoro_proto::pb::RoleMotionListNotify::MSG_ID => {
+                    let n = sonoro_proto::pb::RoleMotionListNotify::decode(&msg.payload)
+                        .expect("decode RoleMotionListNotify");
+                    if n.MotionList.iter().any(|m| m.RoleId == 16075001) {
+                        login_has_trial_motion = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(login_role_list_count, 1);
+    assert!(
+        !login_has_invalid_role,
+        "push_data PbGetRoleListNotify must exclude trial RoleId 16075001"
+    );
+    assert!(
+        !login_has_trial_favor,
+        "push_data RoleFavorListNotify must exclude trial RoleId 16075001"
+    );
+    assert!(
+        !login_has_trial_motion,
+        "push_data RoleMotionListNotify must exclude trial RoleId 16075001"
+    );
+
+    // create_vision_entity must attach common vision passive GA skills (2000001, 2000002).
+    let summon_skill_id = h
+        .state
+        .assets
+        .tables
+        .summon_cfg
+        .items
+        .iter()
+        .find(|cfg| {
+            !cfg.BlueprintType.is_empty()
+                && h.state
+                    .assets
+                    .find_template_config(&cfg.BlueprintType)
+                    .is_some()
+        })
+        .map(|cfg| cfg.Id)
+        .expect("vision summon cfg");
+    let role_info = h
+        .state
+        .player_components
+        .role
+        .role_map
+        .get(&16075001)
+        .cloned()
+        .expect("trial role 16075001");
+    let inst = h
+        .state
+        .assets
+        .tables
+        .instance_dungeon
+        .get_data_by_id(&8)
+        .expect("instance 8");
+    let mut sc = h.state.scene.take().expect("scene");
+    let vision_handle = role_entity_templates::create_vision_entity(
+        &mut sc,
+        h.state.player_id,
+        &h.state.assets,
+        &role_info,
+        &inst,
+        summon_skill_id,
+        1,
+    )
+    .expect("create_vision_entity");
+    let vision_passive_ids: Vec<i32> = sc.entities[vision_handle.index]
+        .passive_ga_skill
+        .as_ref()
+        .expect("vision passive_ga_skill")
+        .skill_component_pb
+        .iter()
+        .map(|s| s.SkillId)
+        .collect();
+    assert!(
+        vision_passive_ids.contains(&2_000_001) && vision_passive_ids.contains(&2_000_002),
+        "vision entity must receive common passive GA skills 2000001/2000002: {vision_passive_ids:?}"
+    );
+    h.state.scene = Some(sc);
+}
+
+

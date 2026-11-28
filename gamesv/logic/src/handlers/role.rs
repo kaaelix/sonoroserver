@@ -212,17 +212,14 @@ pub fn push_data<S: PushSink + ?Sized>(
         .collect();
     let mut notify = PbGetRoleListNotify::default();
     for (role_id, role_info) in &role_entries {
-        let is_trial = role_comp.is_trial_role(*role_id);
-        if !is_trial {
-            if *role_id > 1999 || *role_id < 1000 {
-                continue;
-            }
-            if let Some(selected) = selected_main_role
-                && role_helper::is_main_role(assets, *role_id)
-                && *role_id != selected
-            {
-                continue;
-            }
+        if role_comp.is_trial_role(*role_id) || *role_id > 1999 || *role_id < 1000 {
+            continue;
+        }
+        if let Some(selected) = selected_main_role
+            && role_helper::is_main_role(assets, *role_id)
+            && *role_id != selected
+        {
+            continue;
         }
         if let Ok(pb_role) = role_stats::to_client_role_info(
             assets,
@@ -248,6 +245,9 @@ fn push_favor_list<S: PushSink + ?Sized>(
 ) {
     let mut favor_list = Vec::with_capacity(role_comp.role_map.len());
     for &role_id in role_comp.role_map.keys() {
+        if role_comp.is_trial_role(role_id) || !(1000..=1999).contains(&role_id) {
+            continue;
+        }
         let word_ids = assets
             .tables
             .favor_word
@@ -308,6 +308,9 @@ fn push_motion_list<S: PushSink + ?Sized>(
 ) {
     let mut motion_list = Vec::new();
     for &role_id in role_comp.role_map.keys() {
+        if role_comp.is_trial_role(role_id) || !(1000..=1999).contains(&role_id) {
+            continue;
+        }
         let motion_ids: Vec<FavorItem> = assets
             .tables
             .motion

@@ -254,6 +254,11 @@ pub fn create_vision_entity(
     storage.equip = Some(EquipComponent::default());
     storage.character_attach = Some(CharacterAttachComponent::default());
     storage.vision_skills = Some(VisionSkillComponent::default());
+    let mut passive_skills = Vec::new();
+    append_vision_passive_skills(assets, &mut passive_skills, &[summon_skill_id], &[]);
+    storage.passive_ga_skill = Some(PassiveGaSkillComponent {
+        skill_component_pb: passive_skills,
+    });
 
     let entity = scene.spawn(storage);
     let born_buffs: Vec<BuffAdditionEntry> = buff_list_from_ids(&summon_cfg.BornBuffId)

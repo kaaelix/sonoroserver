@@ -1854,20 +1854,6 @@ fn apply_trial_roles_with_options<S: PushSink + ?Sized>(
         }
     }
 
-    if let Some(role_comp) = ctx.role_comp.as_deref_mut()
-        && !newly_materialized.is_empty()
-    {
-        trial_roles::push_trial_role_list(
-            ctx.sink,
-            ctx.assets,
-            role_comp,
-            ctx.weapon_comp,
-            ctx.echo_comp,
-            &newly_materialized,
-        )
-        .map_err(io::Error::other)?;
-    }
-
     if let Some(scene) = ctx.scene.as_deref_mut() {
         scene.set_trial_roles(&ctx.quest_comp.info.env.trial_roles);
     }
